@@ -243,7 +243,7 @@ def test_keymap_has_no_duplicate_chords_and_every_action_is_known() -> None:
 def test_the_timers_rest_while_the_final_edit_tab_is_in_front(
     tmp_path: Path, local_socket: None
 ) -> None:
-    """W-75, D126 — 최종 편집 탭이 앞이면 1·2초 타이머 셋을 멈추고 「영상 정리」로 오면 켠다.
+    """W-75, D134 — 최종 편집 탭이 앞이면 1·2초 타이머 셋을 멈추고 「영상 정리」로 오면 켠다.
 
     실측: 타이머 한 번의 `dispatch('tick')`이 브라우저 주 스레드를 약 260 ms 막아 2초에 1.3초를
     먹었다 — 확대·끌기·재생이 최대 0.5초 걸렸다. 탭의 `select`는 누름·프로그램 전환·로드에 뜬다."""

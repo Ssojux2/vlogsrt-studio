@@ -283,7 +283,7 @@ console.log(JSON.stringify(cases.map(([dy, mode]) => FE.wheelZoomFactor(dy, mode
 
 @needs_node
 def test_wheel_zoom_follows_the_wheel_amount(tmp_path: Path) -> None:
-    """W-75, D126 — 마우스 한 칸(100 px)이 한 걸음(125%)이고, 트랙패드 핀치의 작은 델타는
+    """W-75, D134 — 마우스 한 칸(100 px)이 한 걸음(125%)이고, 트랙패드 핀치의 작은 델타는
     그만큼 작게 — 한 사건은 한 걸음까지. 줄 단위(deltaMode 1)는 부호만 보고 한 걸음이다."""
     got = _node(tmp_path, WHEEL, str(_core(tmp_path)))
     assert isinstance(got, list)

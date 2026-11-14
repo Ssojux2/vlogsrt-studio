@@ -550,7 +550,7 @@ def validate_analysis_proxy(original: Path, proxy: Path) -> PairValidation:
 
 
 class LocalMediaSlots:
-    """로컬 미디어 ffmpeg 자리 — 수는 고정이고, 화면이 기다리는 일이 먼저 빈 자리를 얻는다(D128).
+    """로컬 미디어 ffmpeg 자리 — 수는 고정이고, 화면이 기다리는 일이 먼저 빈 자리를 얻는다(D136).
 
     썸네일·원본 전체 미리보기는 **급한** 일이다 — 사람이 불러온 영상을 보려고 기다린다. 분석
     프록시는 분석을 승인하기 전에만 끝나면 된다. 급한 일이 줄을 서 있는 동안 급하지 않은 일은
@@ -606,7 +606,7 @@ class LocalMediaSlots:
 
 _LOCAL_MEDIA_SLOTS = LocalMediaSlots(FOLDER_WORKSPACE.local_media.limit(os.cpu_count()))
 """이 프로세스의 로컬 미디어 ffmpeg 자리 — 분석 프록시·썸네일·원본 전체 미리보기·렌더·번인이 함께
-쓴다(D100 §2·D128).
+쓴다(D100 §2·D136).
 
 작업 스레드에는 한도가 없다(`jobs.JobManager`) — 폴더를 불러오면 원본마다 프록시·미리보기가 한꺼번에
 뜬다. 자리는 다른 잠금을 쥐지 않는 잎에서만 잡는다(만들기 잠금은 그 앞에 잡는다) — 순환이 없다."""

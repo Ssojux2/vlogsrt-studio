@@ -229,7 +229,7 @@ def test_switching_video_stops_the_previous_preview_and_restarts_on_return(tmp_p
         b_first = wait_until(lambda: _active_preview(ui, root, b_id))[0]
         wait_until(lambda: (b_id,) in entered)
         # 처음 보던 A의 미리보기가 아직 멈추는 중일 수 있다 — 머리 짓기가 빨라 문에 먼저
-        # 닿으면(D127) 취소를 보지 않는 문에서 산다. 이 전환이 새로 건 A 작업을 본다(아래 B와 같다).
+        # 닿으면(D135) 취소를 보지 않는 문에서 산다. 이 전환이 새로 건 A 작업을 본다(아래 B와 같다).
         older = {job.job_id for job in _active_preview(ui, root, a_id)}
         ui.quick_source_view(signature, a_id)
         assert ui.raw.get_job(root, b_first.job_id).status == "cancel_requested"

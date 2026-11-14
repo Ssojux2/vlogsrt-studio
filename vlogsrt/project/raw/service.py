@@ -390,6 +390,7 @@ __all__ = [
     "UPKEEP_JOB_KIND",
     "ANALYSIS_PROXY_JOB_KIND",
     "RENDER_EXPORT_JOB_KIND",
+    "TIMELINE_EXPORT_JOB_KIND",
     "SRT_TRANSLATE_JOB_KIND",
     "SUBTITLE_BURN_JOB_KIND",
     "SYNC_CHECK_JOB_KIND",
@@ -493,6 +494,9 @@ KEPT_HUMAN_REASON = render_plan.PART_HUMAN_RECOMMENDED
 """「내보낼 부분」 조각이 사람 추천에서 왔다는 까닭 — 레일이 자동 녹색과 따로 그린다(W-46b)."""
 """추천만 이어붙인 초안 영상 + SRT + 보고서를 내는 작업(W-44, D100 §5b) — 무료 로컬. 작업공간마다
 한 번에 하나다(같은 지문이면 도는 작업에 다시 붙는다)."""
+
+TIMELINE_EXPORT_JOB_KIND = "timeline_export"
+"""「타임라인으로 보내기」(W-71b, D126) — 렌더 없이 원본 범위 타임라인을 만드는 작업(무료 로컬)."""
 
 SUBTITLE_BURN_JOB_KIND = "subtitle_burn"
 """자막 입히기(W-65, D116) — 영상 하나에 한국어(+ 영어) SRT를 번인해 `<이름>.burned.mp4`를 쓰는 무료
@@ -4007,6 +4011,19 @@ class RawWorkspaceService:
 
         return self.submit_job(root, RENDER_EXPORT_JOB_KIND, "render_export/draft", body)
 
+    def start_timeline_render(self, root: Path, timeline_id: str, revision: int) -> JobHandle:
+        """원본 범위 타임라인에서 렌더(W-71e, D130) — 초안과 같은 작업 종류·같은 `export/<시각>/`.
+
+        결과 카드·영어 변환·자막 입히기·초안 편집이 그 폴더를 그대로 쓴다. 지문에 타임라인 아이디와
+        리비전이 들어 같은 리비전이면 도는 작업에 다시 붙는다. 무료 로컬이다."""
+        from vlogsrt.project.raw import timeline_render
+
+        def body(context: JobContext) -> None:
+            timeline_render.export_timeline(self, root, timeline_id, revision, context)
+
+        fingerprint = f"render_export/timeline/{timeline_id}@{revision}"
+        return self.submit_job(root, RENDER_EXPORT_JOB_KIND, fingerprint, body)
+
     def export_srt_again(self, root: Path) -> Any:
         """「SRT만 다시 내보내기」(D115) — 마지막 초안 폴더에 지금 원본 자막으로 새 SRT를 쓴다.
 
@@ -4057,6 +4074,100 @@ class RawWorkspaceService:
 
         return final_edit_io.save_edit(
             self._workspace(root), export_id, base_revision, payload, force=force
+        )
+
+    def start_timeline_export(self, root: Path) -> JobHandle:
+        """「타임라인으로 보내기」(W-71b, D126) — 추천 조각을 렌더하지 않고 원본 범위 타임라인으로
+        만들어 새 `timeline/<시각>/`에 쓰는 작업. 원본 조사(ffprobe)만 하고 무료 로컬이다."""
+        from vlogsrt.project.raw import timeline_edit_io
+
+        def body(context: JobContext) -> None:
+            timeline_edit_io.create_timeline(self, root, context)
+
+        return self.submit_job(root, TIMELINE_EXPORT_JOB_KIND, "timeline_export/create", body)
+
+    def has_timeline(self, root: Path) -> bool:
+        """보낸 타임라인이 하나라도 있는가 — 파일만 본다(DB를 열지 않는다)."""
+        from vlogsrt.project.raw import timeline_edit_io
+
+        return bool(timeline_edit_io.timeline_folders(root))
+
+    def timeline_open(self, root: Path, timeline_id: str | None = None) -> dict[str, Any]:
+        """원본 범위 타임라인의 재료(D126) — 파일의 문서·요약과 바뀐 원본 자막. 읽기만 한다."""
+        from vlogsrt.project.raw import timeline_edit_io
+
+        return timeline_edit_io.open_timeline(self, root, timeline_id)
+
+    def timeline_media(self, root: Path, timeline_id: str | None = None) -> dict[str, Any]:
+        """원본 범위 타임라인 재생 재료(W-71c) — 클립이 있는 원본마다 원본 전체 미리보기.
+
+        완성본이면 등록 ID와 브라우저 시각 원점(`video_origin_seconds` — 원본 국소 s초는 미리보기
+        `원점 + s`초)을, 아니면 상태만 준다(지어내지 않는다). 읽기만 한다."""
+        from vlogsrt.project.raw import timeline_edit_io
+
+        timeline, source_ids = timeline_edit_io.clipped_sources(root.expanduser(), timeline_id)
+        active = self.active_jobs(root, (VISUAL_PREPARE_JOB_KIND,))
+        previews = visual_review.source_previews(self._workspace(root), source_ids, active)
+        sources: dict[str, dict[str, Any]] = {}
+        for source_id, preview in previews.items():
+            ready = (
+                preview.state == "ready"
+                and preview.registered_file_id is not None
+                and preview.browser_origin_seconds is not None
+            )
+            sources[source_id] = {
+                "state": preview.state,
+                "fileId": preview.registered_file_id if ready else None,
+                "origin": preview.browser_origin_seconds if ready else None,
+                "width": preview.width if ready else None,
+                "height": preview.height if ready else None,
+                "rotation": preview.rotation_degrees if ready else None,
+            }
+        return {"timelineId": timeline, "sources": sources}
+
+    def timeline_tiers(self, root: Path, source_ids: Sequence[str]) -> dict[str, list[list[str]]]:
+        """원본마다 등급 구간 [시작 초, 끝 초, 등급](원본 시계, 원점 0) — 범위 조정의 띠(W-71d).
+
+        렌더 계획이 쓰는 같은 보고서(`tier_report`)다. 표시만 하고 아무것도 쓰지 않는다 — 분석이
+        없으면 빈 목록."""
+        rows = self.review_workspace_facade(root).tier_evidence_rows()
+        tiers: dict[str, list[list[str]]] = {}
+        for source_id in source_ids:
+            row = rows.get(source_id)
+            report = self.tier_report(root, row.revision_id, source_id) if row else None
+            spans = report.spans if report is not None else ()
+            tiers[source_id] = [[str(span.start), str(span.end), span.tier] for span in spans]
+        return tiers
+
+    def timeline_save(
+        self,
+        root: Path,
+        timeline_id: str,
+        base_revision: int,
+        payload: Mapping[str, Any],
+        *,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """원본 범위 타임라인 저장(D126) — 파일의 사실로 다시 검사하고 그 폴더에만 쓴다."""
+        from vlogsrt.project.raw import timeline_edit_io
+
+        return timeline_edit_io.save_timeline(
+            root.expanduser(), timeline_id, base_revision, payload, force=force
+        )
+
+    def timeline_add_source(
+        self,
+        root: Path,
+        timeline_id: str,
+        base_revision: int,
+        payload: Mapping[str, Any],
+        source_id: str,
+    ) -> dict[str, Any]:
+        """클립이 없는 원본을 원본 전체 클립으로 넣는다(W-71g) — 처음 넣으면 지금 자막을 심는다."""
+        from vlogsrt.project.raw import timeline_edit_io
+
+        return timeline_edit_io.add_source_to_timeline(
+            self, root.expanduser(), timeline_id, base_revision, payload, source_id
         )
 
     def final_edit_waveform(self, root: Path, export_id: str) -> dict[str, Any]:
@@ -7038,7 +7149,7 @@ def _reserve_probe_room(sources: int) -> None:
 
 
 def _warm_source_probes(workspace: RawWorkspace, asset_ids: Iterable[str]) -> None:
-    """원본 조사 기억을 로컬 미디어 자리 수만큼 함께 채운다(W-76, D127) — 뒤 루프가 기억에 맞는다.
+    """원본 조사 기억을 로컬 미디어 자리 수만큼 함께 채운다(W-76, D135) — 뒤 루프가 기억에 맞는다.
 
     아무것도 돌려주지도 바꾸지도 않는다 — 검증(해시) 차례·만드는 계획·실패는 뒤따르는 차례 루프가
     예전 그대로 한다. 기억은 성공한 값만 담으므로 여기서 실패한 원본은 루프가 제 자리에서 다시 재

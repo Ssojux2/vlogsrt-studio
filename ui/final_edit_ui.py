@@ -278,8 +278,11 @@ class FinalEditPanel:
 
     # ── 짓기 ──────────────────────────────────────────────────────────
 
-    def build_tab(self) -> None:
+    def build_tab(self, header: Callable[[], None] | None = None) -> None:
+        """탭 하나 — `header`는 편집 칸 위에 먼저 짓는다(원본 범위 타임라인 요약, W-71b)."""
         with gr.Tab(TAB_LABEL, id=FINAL_EDIT_TAB_KEY, elem_id=FINAL_EDIT_TAB_ID) as self.tab:
+            if header is not None:
+                header()
             self.block = gr.HTML(
                 final_edit_html(self._empty_model(NO_WORKSPACE_TEXT)),
                 elem_id=FINAL_EDIT_BLOCK_ID,

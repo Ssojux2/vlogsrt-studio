@@ -44,7 +44,15 @@ from fastapi.responses import (  # noqa: E402
 from ui import activity_log, design_tokens, os_open, ui_facade  # noqa: E402
 from ui import chooser as ui_chooser  # noqa: E402
 from ui.burn_cell import BURN_JOB_LABEL, BurnCell  # noqa: E402
-from ui.final_edit_ui import FINAL_EDIT_CSS, REVIEW_TAB_KEY, FinalEditPanel  # noqa: E402
+from ui.final_edit_ui import (  # noqa: E402
+    FINAL_EDIT_CSS,
+    FINAL_EDIT_TAB_KEY,
+    REVIEW_TAB_KEY,
+    FinalEditPanel,
+)
+from ui.timeline_cell import JOB_LABEL as TIMELINE_JOB_LABEL  # noqa: E402
+from ui.timeline_cell import TimelineCell  # noqa: E402
+from ui.timeline_player import TIMELINE_PLAYER_CSS, TimelinePlayer  # noqa: E402
 from vlogsrt import log, preprocess  # noqa: E402
 from vlogsrt.project.raw import service as raw_service  # noqa: E402
 
@@ -450,7 +458,7 @@ GLOBAL_ORDER_CONFIRM_LABEL = "전체 원본 순서 확정(촬영 시각 순)"
 APP_HEADER_ID = "app-header"
 REVIEW_TAB_ID = "review-tab"
 TIMER_COUNT = 3
-"""화면의 타이머 수 — 1초 상태 틱 · 2초 그리기 · 2초 보내기 알림(최종 편집 탭에서 쉰다, D126)."""
+"""화면의 타이머 수 — 1초 상태 틱 · 2초 그리기 · 2초 보내기 알림(최종 편집 탭에서 쉰다, D134)."""
 FINALCUT_SEND_LABEL = "Final Cut으로 보내기"
 """원본 전체를 태그 달린 타임라인 하나로 쓰고 Final Cut에 건넨다(D56) — 옛 두 단계를 대신한다."""
 FINALCUT_SEND_JOB_KIND = "finalcut_send"
@@ -724,6 +732,7 @@ CLOSE_CANCELS_JOB_KINDS = frozenset(
         raw_service.VISUAL_PREPARE_JOB_KIND,
         raw_service.ANALYSIS_PROXY_JOB_KIND,
         raw_service.RENDER_EXPORT_JOB_KIND,
+        raw_service.TIMELINE_EXPORT_JOB_KIND,
         raw_service.SUBTITLE_BURN_JOB_KIND,
     }
 )
@@ -764,6 +773,7 @@ ACTIVITY_JOB_LABELS = {
     raw_service.VISUAL_PREPARE_JOB_KIND: "미리보기 준비",
     raw_service.ANALYSIS_PROXY_JOB_KIND: "4K 분석 프록시",
     raw_service.RENDER_EXPORT_JOB_KIND: "추천만 이어붙이기",
+    raw_service.TIMELINE_EXPORT_JOB_KIND: TIMELINE_JOB_LABEL,
     raw_service.SRT_TRANSLATE_JOB_KIND: "영어 SRT 변환",
     raw_service.SUBTITLE_BURN_JOB_KIND: BURN_JOB_LABEL,
     raw_service.SEGMENT_JOB_KIND: "컷 준비",
@@ -920,6 +930,7 @@ CSS = (
     + BASE_CSS
     + ui_facade.WORKBENCH_CSS
     + FINAL_EDIT_CSS
+    + TIMELINE_PLAYER_CSS
 )
 """마운트에 싣는 전체 CSS — 글꼴 · 토큰(밝은·어두운) · 바탕 · 작업대 순서."""
 
@@ -927,7 +938,7 @@ FONT_CACHE_SECONDS = 604800
 """묶음 글꼴은 판을 바꿀 때만 바뀐다 — 한 주 캐시로 다시 받지 않게 한다(파일 이름에 판이 없다)."""
 
 PICTURE_CACHE_CONTROL = "private, no-cache"
-"""그림(카드 썸네일) 응답 — 브라우저가 간직하되 쓸 때마다 묻는다(D125). `max-age`는 등록 검증(§4.4 —
+"""그림(카드 썸네일) 응답 — 브라우저가 간직하되 쓸 때마다 묻는다(D133). `max-age`는 등록 검증(§4.4 —
 없는 ID 404 · 바뀐 파일 409)을 건너뛰므로 쓰지 않는다. 같은 검증자면 본문 없는 304다."""
 
 UNCACHED_MEDIA = "no-store"
@@ -943,7 +954,7 @@ def picture_etag(path: Path) -> str:
 def picture_validation(
     path: Path, headers: dict[str, str], if_none_match: str | None
 ) -> Response | None:
-    """그림의 머리를 검증자로 바꾸고, 같은 검증자면 본문 없는 304를 낸다(D125). 다르면 None."""
+    """그림의 머리를 검증자로 바꾸고, 같은 검증자면 본문 없는 304를 낸다(D133). 다르면 None."""
     etag = picture_etag(path)
     headers["Cache-Control"] = PICTURE_CACHE_CONTROL
     headers["ETag"] = etag
@@ -2007,6 +2018,15 @@ class RawWorkspaceUi:
             self, raw_service.RawWorkspaceError, raw_service.RENDER_EXPORT_JOB_KIND
         )
         self._render_export_started: Any = None
+        # 「타임라인으로 보내기」(W-71b, D126) — 렌더 없이 원본 범위 타임라인, 끝나면 「최종 편집」.
+        self._timeline_cell = TimelineCell(
+            self,
+            raw_service.RawWorkspaceError,
+            raw_service.TIMELINE_EXPORT_JOB_KIND,
+            FINAL_EDIT_TAB_KEY,
+        )
+        # 원본 범위 타임라인 재생기(W-71c) — 타임라인 요약 아래, 원본마다 미리보기를 튼다.
+        self._timeline_player = TimelinePlayer(self, raw_service.RawWorkspaceError)
         self._status_sent: tuple[gr.State, ...] = ()
         self._choose_event: Any = None
         # 선택기·조사 단추 참조 — 배선 증명은 실제 Blocks 의존성(app.config)이 한다.
@@ -4628,6 +4648,8 @@ class RawWorkspaceUi:
             self._render_export_button = gr.Button(
                 RENDER_EXPORT_LABEL, variant="primary", elem_id=RENDER_EXPORT_ID
             )
+            # 「타임라인으로 보내기」(W-71b, D126) — 옆에 둔다(렌더·번인은 아직 초안 길, W-71e까지).
+            self._timeline_cell.build_button()
             # 일괄 확인의 원천 — 화면의 단추는 제외 제안 대기열의 「남은 M개 모두 제외 유지」이고,
             # 그것이 이 숨은 단추를 누른다(옛 「자동 제외 확인」의 처리기·입출력 그대로, D57 C).
             self._confirm_auto_button = gr.Button(
@@ -11412,7 +11434,7 @@ class RawWorkspaceUi:
             # 탭 묶음을 드러내 둔다 — 초안 렌더가 끝나면 「최종 편집」으로 넘긴다(D117).
             with gr.Tabs(elem_id="vl-tabs") as tabs:
                 self._review_tab()
-                self._final_edit.build_tab()
+                self._final_edit.build_tab(header=self._final_edit_header)
                 self._caption_tab()
             # 오른쪽 서랍은 탭 뒤에 짓는다 — 두 탭 사이에 끼면 탭 묶음이 둘로 갈린다.
             extract_button, refresh_segment, profile_dd, analysis_plan = self._settings_drawer()
@@ -11513,10 +11535,19 @@ class RawWorkspaceUi:
             assert self._draw_timer is not None and self._render_export_started is not None
             self._final_edit.wire(tabs, self._draw_timer, self._render_export_started, switched)
             self._wire_timer_rest()
+            status = self._capcut_status
+            sent = self._timeline_cell.wire(tabs, status, switched, ui_facade.EXPORT_WAKE_JS)
+            self._timeline_player.wire(switched, sent)
+            self._report_activity(sent, status)
         return app
 
+    def _final_edit_header(self) -> None:
+        """「최종 편집」 탭 머리 — 원본 범위 타임라인 요약(W-71b)과 그 재생기(W-71c)."""
+        self._timeline_cell.build_summary()
+        self._timeline_player.build()
+
     def _wire_timer_rest(self) -> None:
-        """최종 편집 탭이 앞이면 1·2초 타이머 셋을 멈추고 「영상 정리」로 오면 켠다(W-75, D126).
+        """최종 편집 탭이 앞이면 1·2초 타이머 셋을 멈추고 「영상 정리」로 오면 켠다(W-75, D134).
 
         타이머 한 번의 `dispatch('tick')`이 브라우저 주 스레드를 약 260 ms 막아(구성요소 370여 개)
         2초에 1.3초를 먹었다 — 타임라인 확대·끌기·재생이 최대 0.5초 늦었다. 탭의 `select`는 누름·
@@ -11688,6 +11719,9 @@ class RawWorkspaceUi:
                 ssr_mode=False,
                 theme=workbench_theme(),
                 css=CSS,
+                # 실행 기록은 사건마다 최근 100번을 localStorage에 다시 쓴다 — 타이머가 그것을
+                # 실행마다 MB 단위로 키워 가만히 둔 화면의 메인 스레드를 잡았다(W-71c, D127).
+                run_history=False,
             )
         return app
 
@@ -11834,7 +11868,7 @@ class RawWorkspaceUi:
     ) -> Response:
         """등록된 미디어 하나를 제공한다 — 경로는 오지 않고 ID만 온다(§4.3·§4.4).
 
-        그림의 통째 요청만 검증자를 싣고, 같은 검증자에는 본문 없이 304다(D125) — 문(없는 ID·
+        그림의 통째 요청만 검증자를 싣고, 같은 검증자에는 본문 없이 304다(D133) — 문(없는 ID·
         바뀐 파일)을 다 지난 뒤에만 견준다.
         """
         root = self._snapshot_root()

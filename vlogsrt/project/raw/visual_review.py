@@ -901,14 +901,22 @@ def _preparing_backed(record: dict[str, object], active: Sequence[JobRecord]) ->
     return any(job.kind == VISUAL_PREPARE_JOB_KIND for job in active)
 
 
+# 원본 해시 → 그 원본의 미리보기 기록들(`_preview_records`가 한 번 읽은 모양).
+PreviewRecords = Mapping[str, Sequence[dict[str, object]]]
+
+
 def _source_candidates(
     workspace: RawWorkspace,
     source_sha256: str,
     selected_audio: tuple[int | None, ...] | None,
+    records: PreviewRecords | None = None,
 ) -> list[tuple[str, dict[str, object]]]:
-    """이 원본(과 소리 선택)의 미리보기 기록 전부 — 최근(`built_at`) 순."""
+    """이 원본(과 소리 선택)의 미리보기 기록 전부 — 최근(`built_at`) 순.
+
+    `records`는 원본 여럿을 함께 보는 질의가 한 번 읽은 기록이다(없으면 지금 읽는다)."""
     candidates: list[tuple[str, dict[str, object]]] = []
-    for record in _preview_records(workspace).get(source_sha256, ()):
+    by_source = _preview_records(workspace) if records is None else records
+    for record in by_source.get(source_sha256, ()):
         if record.get("schema") != VISUAL_PREVIEW_RECIPE:
             continue
         key = _record_str(record, "key")
@@ -952,6 +960,7 @@ def _latest_source_record(
     source_sha256: str,
     selected_audio: tuple[int | None, ...] | None = None,
     active: Sequence[JobRecord] = (),
+    records: PreviewRecords | None = None,
 ) -> tuple[str, dict[str, object]] | None:
     """이 원본의 원본 전체 미리보기 기록 — (키, 기록) 또는 None.
 
@@ -963,7 +972,7 @@ def _latest_source_record(
     아무것도 못 받는다(실측 증상). 완성본이 하나도 없을 때만 가장 최근 기록의
     상태(preparing·failed·stale)가 그대로 보인다.
     """
-    candidates = _source_candidates(workspace, source_sha256, selected_audio)
+    candidates = _source_candidates(workspace, source_sha256, selected_audio, records)
     if not candidates:
         return None
     return next(
@@ -979,6 +988,7 @@ def _source_preview_state(
     active: Sequence[JobRecord],
     selected_audio: tuple[int | None, ...] | None = None,
     claimed: bool = False,
+    records: PreviewRecords | None = None,
 ) -> VisualSourcePreview:
     """원본 하나의 미리보기 상태 — 기록 주도로 유도한다(질의는 조사하지 않는다).
 
@@ -988,7 +998,7 @@ def _source_preview_state(
     맡았다는 표시다 — 재생 가능한 완성본이 없으면 「준비 중」이다(기록이 아직 없어도, D62).
     """
     audio_tracks = _read_inventory(workspace, source_sha256)
-    found = _latest_source_record(workspace, source_sha256, selected_audio, active)
+    found = _latest_source_record(workspace, source_sha256, selected_audio, active, records)
     if found is None:
         if selected_audio is not None:
             state = "missing"  # 이 선택은 한 번도 만들지 않았다 — 다른 선택의 흔적과 무관
@@ -1571,6 +1581,31 @@ def source_preparation_missing(
     return missing
 
 
+def source_previews(
+    workspace: RawWorkspace, source_ids: Sequence[str], active_jobs: Sequence[JobRecord]
+) -> dict[str, VisualSourcePreview]:
+    """원본마다 지금 내용(해시)의 원본 전체 미리보기 상태 — 원본 범위 타임라인 재생(W-71c)이 쓴다.
+
+    검토 머리·계획 없이 기록만 본다(미리보기 기록은 원본 해시에 묶인다). 소리는 고르지 않는다 —
+    가장 최근 완성본이 지금의 선택이다(검토 화면의 기본 질의와 같다). 읽기만 한다.
+    """
+    active = tuple(
+        job
+        for job in active_jobs
+        if job.kind == VISUAL_PREPARE_JOB_KIND and job.status in ACTIVE_JOB_STATUSES
+    )
+    claimed = _claimed_sources(workspace, active)
+    records = _preview_records(workspace)  # 원본마다 폴더를 다시 읽지 않는다(169개 → 2.9만 번)
+    previews: dict[str, VisualSourcePreview] = {}
+    for source_id in source_ids:
+        # 해시를 아직 못 잰 원본은 어느 기록과도 맞지 않는다 — 「없음」으로 보인다(지어내지 않는다).
+        sha = workspace.source_asset(source_id).content_sha256 or ""
+        previews[source_id] = _source_preview_state(
+            workspace, source_id, sha, active, None, claimed=sha in claimed, records=records
+        )
+    return previews
+
+
 REPRESENTATIVE_THUMBS_PREFIX = "representative-thumbs:"
 """영상마다 첫 컷 썸네일 작업(W-24 세션 I)의 지문 머리 — 쪽·영상 준비의 지문(16진 해시)과 갈린다."""
 
@@ -1719,7 +1754,7 @@ def _prepare_segments(
     미리보기 파일이 아니라 원본(또는 프록시, `_select_source`가 고른 것)에서 바로 뽑으므로 순서만
     바뀌고 바이트·키는 같다. 진행 눈금은 썸네일 수 + 원본 수다. 실패 목록이 답(원본 차례 그대로).
 
-    원본마다의 일은 로컬 미디어 자리 수만큼 함께 돈다(D128) — 쪽의 썸네일이 다 끝난 뒤에 미리보기
+    원본마다의 일은 로컬 미디어 자리 수만큼 함께 돈다(D136) — 쪽의 썸네일이 다 끝난 뒤에 미리보기
     단계가 시작한다. ffmpeg는 자리 안에서만 돌므로 동시에 도는 수는 여전히 자리 수다.
     """
     by_source: dict[str, list[ReviewSegment]] = {}
@@ -1795,7 +1830,7 @@ def _source_preview(
 
 
 def _per_source(tasks: Sequence[Callable[[], _T]]) -> list[_T]:
-    """원본마다의 일을 자리 수만큼 함께 돌려 원본 차례대로 돌려준다(D128).
+    """원본마다의 일을 자리 수만큼 함께 돌려 원본 차례대로 돌려준다(D136).
 
     일꾼은 문맥을 복사해 취소·단계 이름을 잇는다(D112의 렌더 토막과 같다). 하나가 오류로 멈추면
     아직 시작하지 않은 일은 시작하지 않고, 도는 일이 끝난 뒤 차례가 가장 앞선 오류를 올린다 —
@@ -2028,7 +2063,7 @@ def _prepare_thumb(
         # 「지금 도는 작업」이 일반 이름(프레임 추출) 대신 사람이 기다리는 단계를 말한다(D61).
         with preprocess.process_step("썸네일 추출"):
             seek = _seek_plan_for(selection, {} if seek_plans is None else seek_plans)
-            # 썸네일도 로컬 미디어 자리를 잡는다 — 화면 일이라 급한 자리다(D128). 자리 밖에서 돌던
+            # 썸네일도 로컬 미디어 자리를 잡는다 — 화면 일이라 급한 자리다(D136). 자리 밖에서 돌던
             # 썸네일은 프록시 셋 위에 하나 더 얹혀 CPU를 넘겼다.
             with media_refs.local_media_slot(urgent=True):
                 _extract_thumb(selection, frame_index, staged, seek)
@@ -2172,7 +2207,7 @@ def _ensure_full_source_preview(
         return
     _write_record(record_path, _source_record_payload(selection, key, "preparing", None, None))
     try:
-        # 로컬 미디어 동시 한도(D100 §2) — 분석 프록시와 같은 자리를 다투되 먼저 얻는다(D128).
+        # 로컬 미디어 동시 한도(D100 §2) — 분석 프록시와 같은 자리를 다투되 먼저 얻는다(D136).
         with media_refs.local_media_slot(urgent=True):
             extraction = preprocess.extract_visual_review_preview(
                 selection.path,
