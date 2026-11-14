@@ -281,7 +281,7 @@ def test_folder_workspace_names_refuse_hidden_and_path_spellings(name: str) -> N
 
 
 def test_a_waiting_local_media_slot_hears_cancellation(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(media_refs, "_LOCAL_MEDIA_SLOTS", threading.BoundedSemaphore(1))
+    monkeypatch.setattr(media_refs, "_LOCAL_MEDIA_SLOTS", media_refs.LocalMediaSlots(1))
     outcome: list[str] = []
     asked: list[int] = []
 

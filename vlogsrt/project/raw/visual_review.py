@@ -46,15 +46,19 @@ import math
 import os
 import re
 import secrets
+import threading
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from fractions import Fraction
 from pathlib import Path
+from typing import TypeVar
 
 from vlogsrt import log, oscompat, preprocess
 from vlogsrt.oscompat import process_alive, publish_exclusive
-from vlogsrt.project.raw import read_scope, source_verify
+from vlogsrt.project.raw import media_refs, read_scope, source_verify
 from vlogsrt.project.raw.analysis_config import REVIEW_MEDIA
 from vlogsrt.project.raw.config import FOLDER_WORKSPACE
 from vlogsrt.project.raw.jobs import JobCancelledError, JobContext
@@ -85,6 +89,8 @@ from vlogsrt.project.raw.segment_review import (
     split_edit,
 )
 from vlogsrt.project.raw.workspace import RawWorkspace
+
+_T = TypeVar("_T")
 
 __all__ = [
     "REPRESENTATIVE_THUMBS_PREFIX",
@@ -1706,34 +1712,109 @@ def _prepare_segments(
     page_segments: Sequence[ReviewSegment],
     choices: Mapping[str, int | None],
 ) -> list[str]:
-    """페이지 조각을 순서대로 — 원본마다 검증 한 번, 조각마다 썸네일, 그 뒤에 원본 전체 미리보기.
+    """페이지 조각을 원본마다 — 원본마다 검증 한 번, 조각마다 썸네일, 그 뒤에 원본 전체 미리보기.
 
     썸네일이 먼저다(W-24 세션 I). 예전에는 원본마다 첫 썸네일 앞에서 원본 전체 인코딩을 했다 —
     실측 0024(33컷)는 그 인코딩이 매번 한도·서버 멈춤에 끊겨 썸네일이 하나도 없었다. 썸네일은
     미리보기 파일이 아니라 원본(또는 프록시, `_select_source`가 고른 것)에서 바로 뽑으므로 순서만
-    바뀌고 바이트·키는 같다. 진행 눈금은 썸네일 수 + 원본 수다. 실패 목록이 답.
+    바뀌고 바이트·키는 같다. 진행 눈금은 썸네일 수 + 원본 수다. 실패 목록이 답(원본 차례 그대로).
+
+    원본마다의 일은 로컬 미디어 자리 수만큼 함께 돈다(D128) — 쪽의 썸네일이 다 끝난 뒤에 미리보기
+    단계가 시작한다. ffmpeg는 자리 안에서만 돌므로 동시에 도는 수는 여전히 자리 수다.
     """
-    selections: dict[str, _SourceSelection] = {}
-    seek_plans: dict[str, preprocess.FrameSeekPlan | None] = {}
-    failures: list[str] = []
-    sources = {segment.source_id for segment in page_segments}
-    context.set_total(len(page_segments) + len(sources))
-    done = 0
+    by_source: dict[str, list[ReviewSegment]] = {}
     for segment in page_segments:
+        by_source.setdefault(segment.source_id, []).append(segment)
+    context.set_total(len(page_segments) + len(by_source))
+    progress = _Progress(context)
+    thumbs = _per_source(
+        [
+            functools.partial(
+                _source_thumbs, context, workspace, revision, segments, choices, progress
+            )
+            for segments in by_source.values()
+        ]
+    )
+    previews = _per_source(
+        [
+            functools.partial(_source_preview, context, workspace, selection, progress)
+            for selection, _ in thumbs
+        ]
+    )
+    return [f for _, found in thumbs for f in found] + [f for found in previews for f in found]
+
+
+class _Progress:
+    """일꾼들이 함께 올리는 진행 눈금 — 끝난 수만 센다.
+
+    쓰기까지 자물쇠 안이다 — 밖에서 쓰면 늦게 쓴 일꾼의 작은 수가 큰 수를 덮는다
+    (마지막 눈금이 모자란다).
+    """
+
+    def __init__(self, context: JobContext) -> None:
+        self._context = context
+        self._lock = threading.Lock()
+        self._done = 0
+
+    def step(self) -> None:
+        with self._lock:
+            self._done += 1
+            self._context.set_progress(self._done)
+
+
+def _source_thumbs(
+    context: JobContext,
+    workspace: RawWorkspace,
+    revision: ReviewRevision,
+    segments: Sequence[ReviewSegment],
+    choices: Mapping[str, int | None],
+    progress: _Progress,
+) -> tuple[_SourceSelection, list[str]]:
+    """원본 하나의 선택과 그 조각들의 썸네일 — 실패는 이 원본의 목록에 담는다."""
+    failures: list[str] = []
+    seek_plans: dict[str, preprocess.FrameSeekPlan | None] = {}
+    selection = _chosen_source(workspace, revision, segments[0].source_id, choices, context)
+    for segment in segments:
         context.check_cancel()
-        selection = selections.get(segment.source_id)
-        if selection is None:
-            selection = _chosen_source(workspace, revision, segment.source_id, choices, context)
-            selections[segment.source_id] = selection
         _prepare_thumb(workspace, revision, segment, selection, failures, seek_plans)
-        done += 1
-        context.set_progress(done)
-    for selection in selections.values():
-        context.check_cancel()
-        _ensure_full_source_preview(workspace, selection, failures)
-        done += 1
-        context.set_progress(done)
+        progress.step()
+    return selection, failures
+
+
+def _source_preview(
+    context: JobContext,
+    workspace: RawWorkspace,
+    selection: _SourceSelection,
+    progress: _Progress,
+) -> list[str]:
+    failures: list[str] = []
+    context.check_cancel()
+    _ensure_full_source_preview(workspace, selection, failures)
+    progress.step()
     return failures
+
+
+def _per_source(tasks: Sequence[Callable[[], _T]]) -> list[_T]:
+    """원본마다의 일을 자리 수만큼 함께 돌려 원본 차례대로 돌려준다(D128).
+
+    일꾼은 문맥을 복사해 취소·단계 이름을 잇는다(D112의 렌더 토막과 같다). 하나가 오류로 멈추면
+    아직 시작하지 않은 일은 시작하지 않고, 도는 일이 끝난 뒤 차례가 가장 앞선 오류를 올린다 —
+    차례로 돌던 예전처럼 앞선 원본의 오류가 답이다.
+    """
+    workers = min(len(tasks), FOLDER_WORKSPACE.local_media.limit(os.cpu_count()))
+    if workers <= 1:
+        return [task() for task in tasks]
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="prepare") as pool:
+        futures: list[Future[_T]] = [pool.submit(copy_context().run, task) for task in tasks]
+        for future in futures:
+            if future.exception() is not None:
+                for waiting in futures:
+                    waiting.cancel()
+                break
+    for future in futures:
+        if not future.cancelled() and future.exception() is not None:
+            future.result()
+    return [future.result() for future in futures]
 
 
 def _chosen_source(
@@ -1947,16 +2028,10 @@ def _prepare_thumb(
         # 「지금 도는 작업」이 일반 이름(프레임 추출) 대신 사람이 기다리는 단계를 말한다(D61).
         with preprocess.process_step("썸네일 추출"):
             seek = _seek_plan_for(selection, {} if seek_plans is None else seek_plans)
-            preprocess.extract_frame_index(
-                selection.path,
-                selection.video_stream_index,
-                frame_index,
-                staged,
-                long_edge=VISUAL_THUMB_LONG_EDGE,
-                seek=seek,
-                priority=REVIEW_MEDIA.process_niceness,
-                slot_packets=selection.slot_packets,
-            )
+            # 썸네일도 로컬 미디어 자리를 잡는다 — 화면 일이라 급한 자리다(D128). 자리 밖에서 돌던
+            # 썸네일은 프록시 셋 위에 하나 더 얹혀 CPU를 넘겼다.
+            with media_refs.local_media_slot(urgent=True):
+                _extract_thumb(selection, frame_index, staged, seek)
         _publish(staged, target)
     except RuntimeError as error:
         _write_record(
@@ -1967,6 +2042,24 @@ def _prepare_thumb(
         return
     (workspace.root / _thumb_failure_relative(key)).unlink(missing_ok=True)
     _ensure_registered(workspace, target, relative, rebuilt=True)
+
+
+def _extract_thumb(
+    selection: _SourceSelection,
+    frame_index: int,
+    staged: Path,
+    seek: preprocess.FrameSeekPlan | None,
+) -> None:
+    preprocess.extract_frame_index(
+        selection.path,
+        selection.video_stream_index,
+        frame_index,
+        staged,
+        long_edge=VISUAL_THUMB_LONG_EDGE,
+        seek=seek,
+        priority=REVIEW_MEDIA.process_niceness,
+        slot_packets=selection.slot_packets,
+    )
 
 
 def _thumb_record_payload(
@@ -2079,8 +2172,8 @@ def _ensure_full_source_preview(
         return
     _write_record(record_path, _source_record_payload(selection, key, "preparing", None, None))
     try:
-        # 로컬 미디어 동시 한도(D100 §2) — 분석 프록시와 같은 자리를 다툰다.
-        with media_refs.local_media_slot():
+        # 로컬 미디어 동시 한도(D100 §2) — 분석 프록시와 같은 자리를 다투되 먼저 얻는다(D128).
+        with media_refs.local_media_slot(urgent=True):
             extraction = preprocess.extract_visual_review_preview(
                 selection.path,
                 target,

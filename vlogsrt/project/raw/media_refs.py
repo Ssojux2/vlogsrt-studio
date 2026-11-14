@@ -549,22 +549,80 @@ def validate_analysis_proxy(original: Path, proxy: Path) -> PairValidation:
     )
 
 
-_LOCAL_MEDIA_SLOTS = threading.BoundedSemaphore(FOLDER_WORKSPACE.local_media.limit(os.cpu_count()))
-"""이 프로세스의 로컬 미디어 ffmpeg 자리 — 분석 프록시와 원본 전체 미리보기가 함께 쓴다(D100 §2).
+class LocalMediaSlots:
+    """로컬 미디어 ffmpeg 자리 — 수는 고정이고, 화면이 기다리는 일이 먼저 빈 자리를 얻는다(D128).
+
+    썸네일·원본 전체 미리보기는 **급한** 일이다 — 사람이 불러온 영상을 보려고 기다린다. 분석
+    프록시는 분석을 승인하기 전에만 끝나면 된다. 급한 일이 줄을 서 있는 동안 급하지 않은 일은
+    빈 자리를 집지 않는다(한 번 쥔 자리를 빼앗지는 않는다). 기다림은 `waiting`으로 줄에 이름을
+    올린 뒤 `acquire`(짧게 기다리기)를 되풀이한다 — 사이사이 취소를 듣는다.
+    """
+
+    def __init__(self, count: int) -> None:
+        self._ready = threading.Condition()
+        self._free = count
+        self._urgent = 0
+
+    @property
+    def free(self) -> int:
+        with self._ready:
+            return self._free
+
+    @property
+    def urgent_waiting(self) -> int:
+        with self._ready:
+            return self._urgent
+
+    @contextlib.contextmanager
+    def waiting(self, *, urgent: bool) -> Iterator[None]:
+        """줄에 선 동안 — 급한 일이면 그동안 급하지 않은 일이 빈 자리를 집지 못한다."""
+        if not urgent:
+            yield
+            return
+        with self._ready:
+            self._urgent += 1
+        try:
+            yield
+        finally:
+            with self._ready:
+                self._urgent -= 1
+                self._ready.notify_all()
+
+    def acquire(self, *, urgent: bool, timeout: float) -> bool:
+        with self._ready:
+            got = self._ready.wait_for(lambda: self._open_for(urgent=urgent), timeout)
+            if got:
+                self._free -= 1
+            return got
+
+    def _open_for(self, *, urgent: bool) -> bool:
+        return self._free > 0 and (urgent or not self._urgent)
+
+    def release(self) -> None:
+        with self._ready:
+            self._free += 1
+            self._ready.notify_all()
+
+
+_LOCAL_MEDIA_SLOTS = LocalMediaSlots(FOLDER_WORKSPACE.local_media.limit(os.cpu_count()))
+"""이 프로세스의 로컬 미디어 ffmpeg 자리 — 분석 프록시·썸네일·원본 전체 미리보기·렌더·번인이 함께
+쓴다(D100 §2·D128).
 
 작업 스레드에는 한도가 없다(`jobs.JobManager`) — 폴더를 불러오면 원본마다 프록시·미리보기가 한꺼번에
 뜬다. 자리는 다른 잠금을 쥐지 않는 잎에서만 잡는다(만들기 잠금은 그 앞에 잡는다) — 순환이 없다."""
 
 
 @contextlib.contextmanager
-def local_media_slot() -> Iterator[None]:
-    """로컬 미디어 ffmpeg 한 자리를 쥔다 — 기다리는 동안에도 취소를 듣는다."""
-    while not _LOCAL_MEDIA_SLOTS.acquire(timeout=_LOCK_POLL_SECONDS):
-        check_cancel()
+def local_media_slot(*, urgent: bool = False) -> Iterator[None]:
+    """로컬 미디어 ffmpeg 한 자리를 쥔다 — 기다리는 동안에도 취소를 듣는다. `urgent`는 화면 일."""
+    slots = _LOCAL_MEDIA_SLOTS
+    with slots.waiting(urgent=urgent):
+        while not slots.acquire(urgent=urgent, timeout=_LOCK_POLL_SECONDS):
+            check_cancel()
     try:
         yield
     finally:
-        _LOCAL_MEDIA_SLOTS.release()
+        slots.release()
 
 
 def _build_lock(directory: Path) -> threading.Lock:
