@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import errno
 import hashlib
 import json
@@ -18,6 +19,7 @@ import threading
 import types
 import uuid
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime
 from decimal import ROUND_CEILING, Decimal
@@ -5159,7 +5161,9 @@ class RawWorkspaceService:
         rows = {row.asset_id: row for row in store.list_source_results(revision.revision_id)}
         intervals: dict[str, list[PlannedInterval]] = {}
         _reserve_probe_room(len(order.entries))
-        for entry in sorted(order.entries, key=lambda item: item.ordinal):
+        ordered = sorted(order.entries, key=lambda item: item.ordinal)
+        _warm_source_probes(workspace, (entry.asset_id for entry in ordered))
+        for entry in ordered:
             row = rows.get(entry.asset_id)
             if row is None and not use_current_order:
                 raise AnalysisError(
@@ -7033,6 +7037,34 @@ def _reserve_probe_room(sources: int) -> None:
         preprocess.reserve_probe_memo(preprocess.PROBE_MEMO_SLOTS_PER_SOURCE * sources)
 
 
+def _warm_source_probes(workspace: RawWorkspace, asset_ids: Iterable[str]) -> None:
+    """원본 조사 기억을 로컬 미디어 자리 수만큼 함께 채운다(W-76, D127) — 뒤 루프가 기억에 맞는다.
+
+    아무것도 돌려주지도 바꾸지도 않는다 — 검증(해시) 차례·만드는 계획·실패는 뒤따르는 차례 루프가
+    예전 그대로 한다. 기억은 성공한 값만 담으므로 여기서 실패한 원본은 루프가 제 자리에서 다시 재
+    알린다(실패를 버리는 것이 아니라 알릴 자리를 루프에 남긴다). 취소만은 곧바로 올린다.
+    """
+    ids = list(asset_ids)
+    workers = FOLDER_WORKSPACE.local_media.limit(os.cpu_count())
+    if workers < 2 or len(ids) < 2:
+        return
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="probe-warm") as pool:
+        futures = [
+            pool.submit(contextvars.copy_context().run, _warm_one, workspace, asset_id)
+            for asset_id in ids
+        ]
+        for future in futures:
+            if isinstance(future.exception(), JobCancelledError):
+                for waiting in futures:
+                    waiting.cancel()
+                future.result()
+
+
+def _warm_one(workspace: RawWorkspace, asset_id: str) -> None:
+    path = workspace.source_media_path(workspace.source_asset(asset_id))
+    preprocess.probe_extraction_clock_memo(path, probe=preprocess.probe_raw_media_memo(path))
+
+
 def _measured_source(workspace: RawWorkspace, asset: SourceAsset) -> _MeasuredSource:
     """원본의 시계를 잰다 — 격자 증명(`uniform_grid`)의 판정은 부른 쪽이 본다(D68)."""
     path = workspace.source_media_path(asset)
@@ -7076,7 +7108,9 @@ def _planned_sources(
     """순서의 원본마다 다시 검증·측정해 조각을 짓는다 — VFR은 덮지 않고 기록한다(D68)."""
     result = _PlannedSources([], [], {}, [])
     _reserve_probe_room(len(revision.entries))
-    for order_entry in sorted(revision.entries, key=lambda item: item.ordinal):
+    ordered = sorted(revision.entries, key=lambda item: item.ordinal)
+    _warm_source_probes(workspace, (entry.asset_id for entry in ordered))
+    for order_entry in ordered:
         asset = _verified_asset(workspace, order_entry.asset_id)
         facts = _measured_source(workspace, asset)
         if not facts.clock.uniform_grid:
