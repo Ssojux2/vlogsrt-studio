@@ -235,3 +235,101 @@ def test_clamp_edge_keeps_an_edge_inside_the_source_room_and_the_minimum_length(
     ]
     got = _node(tmp_path, EDGE_RUNNER, str(core), json.dumps(doc), json.dumps(asks))
     assert got == [0, 60, 87, 120, 150, 90, 300, 0, 41, 13]
+
+
+# ── 클립 편집: 블레이드·지우기·합치기 뒤의 선택과 플레이헤드(W-71f) — 브라우저만의 규칙 ─────────
+
+CLIP_EDIT_RUNNER = r"""
+const TL = require(process.argv[2]);
+const doc = JSON.parse(process.argv[3]);
+const asks = JSON.parse(process.argv[4]);
+function one(a) {
+  try {
+    const out = a[0] === "view" ? TL.clampView(doc, a[1], a[2])
+      : TL.clipEdit(doc, a[0], a[1], a[2]);
+    return { clips: out.doc ? out.doc.clips : null, sel: out.sel, playhead: out.playhead };
+  } catch (e) {
+    if (TL.isError(e)) { return { error: true }; }
+    throw e;
+  }
+}
+console.log(JSON.stringify(asks.map(one)));
+"""
+
+# a 둘은 맞닿은 블레이드 조각 · b 30프레임 · c는 24fps 48프레임 = 시퀀스 60프레임. 출력 0–150.
+EDIT_CLIPS = [["a", 0, 30], ["a", 30, 60], ["b", 10, 40], ["c", 24, 72]]
+
+
+def _clip_edit(tmp_path: Path, clips: list[list[object]], asks: list[list[object]]) -> list[dict]:
+    core = tmp_path / "timeline_core.js"
+    core.write_text(TIMELINE_CORE_JS, encoding="utf-8")
+    doc = {"facts": PLAY_FACTS, "clips": clips, "cues": [], "nextCue": 1, "seeded": {}}
+    out = _node(tmp_path, CLIP_EDIT_RUNNER, str(core), json.dumps(doc), json.dumps(asks))
+    assert isinstance(out, list)
+    return out
+
+
+@needs_node
+def test_blade_at_the_playhead_selects_the_right_piece_and_keeps_the_playhead(
+    tmp_path: Path,
+) -> None:
+    got = _clip_edit(tmp_path, EDIT_CLIPS, [["blade", 0, 70], ["blade", 2, 60], ["blade", 0, 0]])
+    assert got[0] == {
+        "clips": [["a", 0, 30], ["a", 30, 60], ["b", 10, 20], ["b", 20, 40], ["c", 24, 72]],
+        "sel": 3,
+        "playhead": 70,
+    }
+    assert got[1] == {"error": True}  # 편집 점 위
+    assert got[2] == {"error": True}  # 타임라인 처음도 편집 점이다
+
+
+@needs_node
+def test_delete_ripples_and_moves_to_the_clip_that_took_its_place(tmp_path: Path) -> None:
+    """지운 자리를 뒤가 당겨 채운다 — 선택은 그 자리 클립(마지막이면 앞 클립), 헤드는 그 시작."""
+    got = _clip_edit(tmp_path, EDIT_CLIPS, [["delete", 2, 75], ["delete", 3, 140]])
+    assert got[0] == {
+        "clips": [["a", 0, 30], ["a", 30, 60], ["c", 24, 72]],
+        "sel": 2,
+        "playhead": 60,
+    }
+    assert got[1] == {
+        "clips": [["a", 0, 30], ["a", 30, 60], ["b", 10, 40]],
+        "sel": 2,
+        "playhead": 60,
+    }
+
+
+@needs_node
+def test_the_last_clip_is_not_deleted(tmp_path: Path) -> None:
+    """빈 타임라인은 렌더가 거부하고 재생할 것이 없다 — 마지막 하나는 지우지 않는다."""
+    assert _clip_edit(tmp_path, [["b", 10, 40]], [["delete", 0, 5]]) == [{"error": True}]
+
+
+@needs_node
+def test_join_merges_only_a_touching_piece_of_the_same_source(tmp_path: Path) -> None:
+    got = _clip_edit(tmp_path, EDIT_CLIPS, [["join", 0, 45], ["join", 1, 45], ["join", 3, 100]])
+    assert got[0] == {
+        "clips": [["a", 0, 60], ["b", 10, 40], ["c", 24, 72]],
+        "sel": 0,
+        "playhead": 45,
+    }
+    assert got[1] == {"error": True}  # a와 b는 다른 원본
+    assert got[2] == {"error": True}  # 마지막 클립은 합칠 다음이 없다
+
+
+@needs_node
+def test_an_unknown_edit_is_refused(tmp_path: Path) -> None:
+    assert _clip_edit(tmp_path, EDIT_CLIPS, [["swap", 0, 0], ["delete", 9, 0]]) == [
+        {"error": True},
+        {"error": True},
+    ]
+
+
+@needs_node
+def test_clamp_view_keeps_selection_and_playhead_inside_a_shorter_timeline(tmp_path: Path) -> None:
+    """되돌리기·다시 하기로 클립이 줄면 선택과 플레이헤드가 문서 안으로 돌아온다."""
+    got = _clip_edit(tmp_path, [["a", 0, 30], ["b", 10, 40]], [["view", 3, 140], ["view", 1, 12]])
+    assert got == [
+        {"clips": None, "sel": 1, "playhead": 59},
+        {"clips": None, "sel": 1, "playhead": 12},
+    ]

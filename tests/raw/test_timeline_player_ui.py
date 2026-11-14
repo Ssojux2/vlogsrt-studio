@@ -127,6 +127,19 @@ def test_the_page_escapes_the_model_and_has_two_decks_and_its_own_keys() -> None
     assert "<video" not in empty and "data-tl-model" in empty
 
 
+def test_the_clip_edit_buttons_are_on_the_page_and_every_button_has_a_handler() -> None:
+    """W-71f — 자르기(⌘B)·클립 지우기(⌫)·합치기 단추 · 모든 `data-tl` 단추를 실행본이 받는다."""
+    page = timeline_player_html(client_model("sig", "tok", _opened(), _media(), TIERS))
+    actions = set(re.findall(r'data-tl="([a-z-]+)"', page))
+    assert {"blade", "delete-clip", "join"} <= actions
+    for action in actions:
+        assert re.search(rf'(^|[\s{{,])"?{re.escape(action)}"?: function', PLAYER_JS, re.M) or (
+            re.search(rf'(^|[\s{{,])"?{re.escape(action)}"?: [a-z]+[,}} ]', PLAYER_JS, re.M)
+        ), action
+    assert 'clipOp("blade")' in PLAYER_JS and 'ev.code === "KeyB"' in PLAYER_JS
+    assert 'ev.code === "Backspace"' in PLAYER_JS and 'ev.code === "Delete"' in PLAYER_JS
+
+
 def test_d117_keys_leave_the_player_alone() -> None:
     """초안 편집의 문서 키 처리기(캡처 단계)가 재생기 안의 Space·화살표를 가로채지 않는다."""
     assert 'closest("[data-vl-own-keys]")' in APP_JS

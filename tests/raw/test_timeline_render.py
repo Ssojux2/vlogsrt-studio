@@ -94,6 +94,31 @@ def test_an_edited_timeline_renders_its_frames_and_its_srt(trip: Folder) -> None
     assert len(report["dropped"]) == len(removed)
 
 
+def test_a_deleted_clip_is_reported_as_a_timeline_cut_not_lost(trip: Folder) -> None:  # noqa: F811
+    """W-71f · 규칙 9 — 화면에서 지운 클립의 원본 구간은 렌더 보고서의 `timeline_cut`으로 남는다."""
+    created = _create(trip, MOMENT.replace(minute=11))
+    document = created.document
+    assert len(document.clips) > 1
+    gone = document.clips[0]
+    edited = timeline_edit.delete_clips(document, [0])
+    timeline_edit_io.save_timeline(
+        trip.root, created.folder.name, 1, timeline_edit.to_payload(edited)
+    )
+    result = _render(trip, created.folder, 2, 12)
+    assert result.plan.total_frames == timeline_edit.edited_frames(edited)
+    step = next(s.frame_duration for s in document.facts.sources if s.source_id == gone.source_id)
+    covering = [
+        row
+        for row in result.plan.dropped
+        if row.source_id == gone.source_id
+        and row.reason == render_plan.DROP_TIMELINE_CUT
+        and row.start <= gone.start_frame * step
+        and gone.end_frame * step <= row.end
+    ]
+    assert len(covering) == 1
+    assert any(row["reason"] == render_plan.DROP_TIMELINE_CUT for row in _report(result)["dropped"])
+
+
 def test_srt_again_refuses_a_timeline_render(trip: Folder) -> None:  # noqa: F811
     created = _create(trip, MOMENT.replace(minute=6))
     _render(trip, created.folder, 1, 7)

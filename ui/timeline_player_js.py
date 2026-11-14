@@ -594,6 +594,28 @@ PLAYER_APP_JS = r"""
     setEdge(side, at);
   }
 
+  // ─── 클립 편집(W-71f): 플레이헤드에서 자르기 · 고른 클립 지우기(리플) · 다음 조각과 합치기 ─
+  // 연산은 모델(`TL.clipEdit`)이 하고 거부도 모델의 글 그대로 보인다. 지운 클립의 원본 구간은
+  // 문서의 뺀 구간으로 남는다(렌더 보고서 `timeline_cut`) — 되돌리기로 돌아온다.
+  var CLIP_EDIT_LABELS = { blade: "자르기", "delete": "지우기", join: "합치기" };
+  function clipOp(op) {
+    if (!S.doc || !S.spans.length) { return; }
+    var number = op === "blade" ? TL.sourcePoint(S.doc, Math.min(S.playhead, S.total - 1))[0]
+      : S.sel;
+    var out;
+    try {
+      out = TL.clipEdit(S.doc, op, S.sel, S.playhead);
+    } catch (error) {
+      if (!TL.isError(error)) { throw error; }
+      say(CLIP_EDIT_LABELS[op] + "를 하지 못했습니다 — " + error.message, true);
+      return;
+    }
+    S.sel = out.sel;
+    S.cursor = null;
+    change(out.doc, "클립 " + (number + 1) + " " + CLIP_EDIT_LABELS[op]);
+    seek(out.playhead);
+  }
+
   // ─── 렌더(W-71e): 저장된 리비전 그대로 원본에서 한 번 ──────────
   // 저장 대기 편집을 먼저 보내고, 저장이 끝난 리비전을 이름으로 건다 — 서버는 다른 리비전이면
   // 렌더하지 않는다. 결과는 초안과 같은 폴더라 결과 카드·영어 변환·자막 입히기가 그대로 쓴다.
@@ -697,6 +719,11 @@ PLAYER_APP_JS = r"""
       special = function () { undo(ev.shiftKey); };
     } else if (mod && !ev.altKey && ev.code === "KeyS") {
       special = function () { saveNow(false); };
+    } else if (mod && !ev.altKey && !ev.shiftKey && ev.code === "KeyB") {
+      special = function () { clipOp("blade"); };
+    } else if (!mod && !ev.altKey && !ev.shiftKey &&
+      (ev.code === "Delete" || ev.code === "Backspace")) {
+      special = function () { clipOp("delete"); };
     }
     if (special) { ev.preventDefault(); ev.stopPropagation(); special(); return; }
     if (mod || ev.altKey) { return; }
@@ -721,6 +748,8 @@ PLAYER_APP_JS = r"""
       undo: function () { undo(false); }, redo: function () { undo(true); },
       "trim-start": function () { trimToCursor(TL.SIDE_START); },
       "trim-end": function () { trimToCursor(TL.SIDE_END); },
+      blade: function () { clipOp("blade"); }, "delete-clip": function () { clipOp("delete"); },
+      join: function () { clipOp("join"); },
       "force-save": function () { saveNow(true); }, render: render };
     var act = acts[target.getAttribute("data-tl")];
     if (act) { act(); }

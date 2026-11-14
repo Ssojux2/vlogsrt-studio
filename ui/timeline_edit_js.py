@@ -527,6 +527,35 @@ TIMELINE_CORE_JS = r"""
     return Math.min(bounds[1], Math.max(at, clip[1] + settings.minClipFrames));
   };
 
+  // ─── 클립 편집 뒤의 선택·플레이헤드(W-71f) ─────────────────────────
+  // 연산은 모델 그대로(`blade`·`deleteClips`·`joinClips`) — 여기서는 화면이 어디를 보는지만 정한다.
+  // 마지막 클립은 지우지 않는다: 빈 타임라인은 렌더가 거부하고 재생할 것이 없다.
+  TL.clampView = function (doc, sel, playhead) {
+    var last = Math.max(TL.editedFrames(doc) - 1, 0);
+    return { doc: null, sel: Math.max(0, Math.min(sel, doc.clips.length - 1)),
+      playhead: Math.max(0, Math.min(playhead, last)) };
+  };
+  TL.clipEdit = function (doc, op, sel, playhead) {
+    if (op === "blade") {
+      var cut = TL.blade(doc, playhead);
+      return { doc: cut, sel: TL.sourcePoint(doc, playhead)[0] + 1, playhead: playhead };
+    }
+    if (op === "delete") {
+      clipAt(doc, sel);
+      if (doc.clips.length === 1) { throw fail("마지막 클립은 지우지 않는다"); }
+      var kept = TL.deleteClips(doc, [sel]);
+      var at = Math.min(sel, kept.clips.length - 1);
+      return { doc: kept, sel: at, playhead: TL.layout(kept)[at].outStart };
+    }
+    if (op === "join") {
+      if (sel === doc.clips.length - 1) { throw fail("마지막 클립은 합칠 다음 조각이 없다"); }
+      var joined = TL.joinClips(doc, sel);
+      var view = TL.clampView(joined, sel, playhead);
+      return { doc: joined, sel: view.sel, playhead: view.playhead };
+    }
+    throw fail("모르는 클립 편집이다: " + op);
+  };
+
   root.__vlTL = TL;
   if (typeof module !== "undefined" && module.exports) { module.exports = TL; }
 })(typeof window !== "undefined" ? window : globalThis);
