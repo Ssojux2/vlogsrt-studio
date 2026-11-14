@@ -3337,7 +3337,7 @@ VISUAL_BOOTSTRAP_JS = (
       }
       // 카드 그림은 서버가 고른 그 영상의 그릴 수 있는 썸네일(`cardThumb`, W-24 세션 I) — 대표 컷
       // 것이 없으면 다른 컷 것이다. 그릴 것이 없으면 대표 컷의 상태 글자다(주소 없는 준비됨은
-      // 아직 없음). 화면 밖 카드의 그림은 스크롤해 올 때 받는다(lazy, D125) — 첫 화면이 영상 수만큼
+      // 아직 없음). 화면 밖 카드의 그림은 스크롤해 올 때 받는다(lazy, D133) — 첫 화면이 영상 수만큼
       // 그림을 받지 않는다.
       function cardArt(c) {
         var src = c.cardThumb !== undefined ? c.cardThumb : drawableThumb(c);

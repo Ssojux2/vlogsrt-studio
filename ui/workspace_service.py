@@ -450,7 +450,7 @@ GLOBAL_ORDER_CONFIRM_LABEL = "전체 원본 순서 확정(촬영 시각 순)"
 APP_HEADER_ID = "app-header"
 REVIEW_TAB_ID = "review-tab"
 TIMER_COUNT = 3
-"""화면의 타이머 수 — 1초 상태 틱 · 2초 그리기 · 2초 보내기 알림(최종 편집 탭에서 쉰다, D126)."""
+"""화면의 타이머 수 — 1초 상태 틱 · 2초 그리기 · 2초 보내기 알림(최종 편집 탭에서 쉰다, D134)."""
 FINALCUT_SEND_LABEL = "Final Cut으로 보내기"
 """원본 전체를 태그 달린 타임라인 하나로 쓰고 Final Cut에 건넨다(D56) — 옛 두 단계를 대신한다."""
 FINALCUT_SEND_JOB_KIND = "finalcut_send"
@@ -927,7 +927,7 @@ FONT_CACHE_SECONDS = 604800
 """묶음 글꼴은 판을 바꿀 때만 바뀐다 — 한 주 캐시로 다시 받지 않게 한다(파일 이름에 판이 없다)."""
 
 PICTURE_CACHE_CONTROL = "private, no-cache"
-"""그림(카드 썸네일) 응답 — 브라우저가 간직하되 쓸 때마다 묻는다(D125). `max-age`는 등록 검증(§4.4 —
+"""그림(카드 썸네일) 응답 — 브라우저가 간직하되 쓸 때마다 묻는다(D133). `max-age`는 등록 검증(§4.4 —
 없는 ID 404 · 바뀐 파일 409)을 건너뛰므로 쓰지 않는다. 같은 검증자면 본문 없는 304다."""
 
 UNCACHED_MEDIA = "no-store"
@@ -943,7 +943,7 @@ def picture_etag(path: Path) -> str:
 def picture_validation(
     path: Path, headers: dict[str, str], if_none_match: str | None
 ) -> Response | None:
-    """그림의 머리를 검증자로 바꾸고, 같은 검증자면 본문 없는 304를 낸다(D125). 다르면 None."""
+    """그림의 머리를 검증자로 바꾸고, 같은 검증자면 본문 없는 304를 낸다(D133). 다르면 None."""
     etag = picture_etag(path)
     headers["Cache-Control"] = PICTURE_CACHE_CONTROL
     headers["ETag"] = etag
@@ -11516,7 +11516,7 @@ class RawWorkspaceUi:
         return app
 
     def _wire_timer_rest(self) -> None:
-        """최종 편집 탭이 앞이면 1·2초 타이머 셋을 멈추고 「영상 정리」로 오면 켠다(W-75, D126).
+        """최종 편집 탭이 앞이면 1·2초 타이머 셋을 멈추고 「영상 정리」로 오면 켠다(W-75, D134).
 
         타이머 한 번의 `dispatch('tick')`이 브라우저 주 스레드를 약 260 ms 막아(구성요소 370여 개)
         2초에 1.3초를 먹었다 — 타임라인 확대·끌기·재생이 최대 0.5초 늦었다. 탭의 `select`는 누름·
@@ -11834,7 +11834,7 @@ class RawWorkspaceUi:
     ) -> Response:
         """등록된 미디어 하나를 제공한다 — 경로는 오지 않고 ID만 온다(§4.3·§4.4).
 
-        그림의 통째 요청만 검증자를 싣고, 같은 검증자에는 본문 없이 304다(D125) — 문(없는 ID·
+        그림의 통째 요청만 검증자를 싣고, 같은 검증자에는 본문 없이 304다(D133) — 문(없는 ID·
         바뀐 파일)을 다 지난 뒤에만 견준다.
         """
         root = self._snapshot_root()
