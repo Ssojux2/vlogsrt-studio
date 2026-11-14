@@ -347,6 +347,7 @@ PLAYER_APP_JS = r"""
     if (redoButton) { redoButton.disabled = !S.history.future.length; }
     var force = $("tl-force");
     if (force) { force.hidden = !S.conflict; }
+    paintAddPicker();
     var prep = $("tl-prepare");
     if (prep && S.doc) {
       var waiting = notReady();
@@ -616,6 +617,102 @@ PLAYER_APP_JS = r"""
     seek(out.playhead);
   }
 
+  // ─── 원본 넣기(W-71g): 클립이 없는 원본을 원본 전체 클립으로 ─────
+  // 처음 넣는 원본은 서버가 지금 원본 자막을 심어 새 리비전으로 쓴다(심은 리비전은 저장 밖이다)
+  // — 그래서 저장 대기 편집을 먼저 보내고, 받은 문서로 바꾸며 되돌리기 기록은 여기서 새로 시작한다.
+  // 빼는 길은 「클립 지우기」다(그 원본의 자막·심은 리비전은 문서에 남아 다시 넣어도 그대로다).
+  function unclipped() {
+    if (!S.doc) { return []; }
+    var has = {};
+    S.doc.clips.forEach(function (clip) { has[clip[0]] = true; });
+    return S.doc.facts.sources.filter(function (s) { return !has[s.id]; })
+      .map(function (s) { return s.id; });
+  }
+  function afterSaved(next) {
+    var gen = S.pollGen;
+    var wait = function () {
+      if (gen !== S.pollGen) { return; }
+      if (S.dirty || S.saving) { W.setTimeout(wait, S.settings.autosaveMs); return; }
+      if (!S.conflict) { next(); }
+    };
+    saveNow(false);
+    W.setTimeout(wait, S.settings.autosaveMs);
+  }
+  function addSource() {
+    var pick = $("tl-add-pick");
+    var id = pick ? pick.value : "";
+    if (!S.doc || !id || S.adding) { return; }
+    if (S.conflict) {
+      say("저장이 충돌한 채로는 원본을 넣지 않습니다 — 먼저 정리하세요.", true);
+      return;
+    }
+    if (S.dirty || S.saving) {
+      say("편집을 저장한 뒤 넣습니다…", false);
+      afterSaved(addSource);
+      return;
+    }
+    if (S.playing) { stopPlayback(); }
+    S.adding = true;
+    var payload = { signature: S.signature, token: S.token, timelineId: S.timelineId,
+      baseRevision: S.baseRevision, doc: docPayload(), sourceId: id };
+    S.server.tl_add_source(payload).then(function (got) {
+      S.adding = false;
+      if (!got || !got.ok) { say((got && got.error) || "원본을 넣지 못했습니다.", true); return; }
+      if (got.conflict) {
+        S.conflict = true;
+        say("다른 곳에서 이 타임라인이 리비전 " + got.revision + "으로 바뀌었습니다 — " +
+          "새로고침한 뒤 다시 넣으세요.", true);
+        return;
+      }
+      placeAdded(id, got);
+    }, function () { S.adding = false; say("원본을 넣지 못했습니다.", true); });
+  }
+  function placeAdded(id, got) {
+    S.doc = Object.assign({ facts: S.doc.facts }, got.doc);
+    S.baseRevision = got.revision;
+    S.dirty = false;
+    S.history = { past: [], future: [] };
+    relayout();
+    S.sel = S.doc.clips.map(function (clip) { return clip[0]; }).indexOf(id);
+    S.cursor = null;
+    var notes = [];
+    if (got.empty) { notes.push("빈 줄 " + got.empty + "개는 넣지 않음"); }
+    if (got.clamped) { notes.push("원본 밖 시각 " + got.clamped + "줄은 원본 안으로"); }
+    say(nameOf(id) + " 원본 전체를 넣었습니다 · 리비전 " + got.revision + " · 새 자막 " + got.cues +
+      "줄" + (notes.length ? " (" + notes.join(" · ") + ")" : "") +
+      " — 되돌리기는 여기서 새로 시작합니다(빼려면 「클립 지우기」).", false);
+    seek(S.spans[S.sel].outStart);
+    refreshMedia();
+  }
+  function refreshMedia() {
+    var gen = S.pollGen;
+    S.server.tl_media({ signature: S.signature, timelineId: S.timelineId }).then(function (got) {
+      if (gen !== S.pollGen || !got || !got.ok) { return; }
+      S.media = got.media;
+      if (!S.playing) { seek(S.playhead); } else { paint(); }
+      if (anyPreparing()) { poll(gen); }
+    });
+  }
+  function paintAddPicker() {
+    var pick = $("tl-add-pick");
+    var button = $("tl-add");
+    if (!pick || !button) { return; }
+    var ids = unclipped();
+    var key = ids.join("\n");
+    if (pick.__tlKey !== key) {
+      pick.__tlKey = key;
+      pick.innerHTML = "";
+      ids.forEach(function (id) {
+        var option = document.createElement("option");
+        option.value = id;
+        option.textContent = nameOf(id);
+        pick.appendChild(option);
+      });
+    }
+    pick.hidden = button.hidden = !ids.length;
+    button.disabled = !!S.adding;
+  }
+
   // ─── 렌더(W-71e): 저장된 리비전 그대로 원본에서 한 번 ──────────
   // 저장 대기 편집을 먼저 보내고, 저장이 끝난 리비전을 이름으로 건다 — 서버는 다른 리비전이면
   // 렌더하지 않는다. 결과는 초안과 같은 폴더라 결과 카드·영어 변환·자막 입히기가 그대로 쓴다.
@@ -625,15 +722,8 @@ PLAYER_APP_JS = r"""
       return;
     }
     if (S.dirty || S.saving) {
-      saveNow(false);
       say("편집을 저장한 뒤 렌더합니다…", false);
-      var gen = S.pollGen;
-      var wait = function () {
-        if (gen !== S.pollGen) { return; }
-        if (S.dirty || S.saving) { W.setTimeout(wait, S.settings.autosaveMs); return; }
-        if (!S.conflict) { render(); }
-      };
-      W.setTimeout(wait, S.settings.autosaveMs);
+      afterSaved(render);
       return;
     }
     if (S.playing) { stopPlayback(); }
@@ -749,7 +839,7 @@ PLAYER_APP_JS = r"""
       "trim-start": function () { trimToCursor(TL.SIDE_START); },
       "trim-end": function () { trimToCursor(TL.SIDE_END); },
       blade: function () { clipOp("blade"); }, "delete-clip": function () { clipOp("delete"); },
-      join: function () { clipOp("join"); },
+      join: function () { clipOp("join"); }, "add-source": addSource,
       "force-save": function () { saveNow(true); }, render: render };
     var act = acts[target.getAttribute("data-tl")];
     if (act) { act(); }

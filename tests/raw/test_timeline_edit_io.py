@@ -378,3 +378,65 @@ def test_timeline_tiers_give_each_clipped_source_its_tier_spans_on_the_source_cl
         ]
         assert rows == expected, source_id
         assert rows and all(F(row[0]) < F(row[1]) for row in rows)
+
+
+# ─── 원본 다시 넣기(W-71g) — 처음 넣는 원본은 지금 원본 자막을 심고 새 리비전으로 쓴다 ─────
+
+
+def _strict(trip: Folder, minute: int) -> Any:
+    """클립이 없는 원본이 생기게 — 가장 긴 조각만 남는 최소 길이로 만든다."""
+    plan = _plan(trip)
+    longest = max(plan.parts, key=lambda part: part.end - part.start)
+    strict = dataclasses.replace(RENDER_SETTINGS, min_part_seconds=longest.end - longest.start)
+    return _create(trip, datetime(2026, 11, 14, 0, minute, 0, tzinfo=UTC), settings=strict)
+
+
+def _record_of(created: Any) -> dict[str, Any]:
+    return json.loads((created.folder / "timeline.json").read_text(encoding="utf-8"))
+
+
+def test_adding_a_never_clipped_source_seeds_its_transcript_and_writes_a_revision(
+    trip: Folder,
+) -> None:
+    created = _strict(trip, 1)
+    clipped = {clip.source_id for clip in created.document.clips}
+    source = next(s for s in created.document.facts.sources if s.source_id not in clipped)
+    payload = timeline_edit.to_payload(created.document)
+    got = trip.service.timeline_add_source(
+        trip.root, created.folder.name, 1, payload, source.source_id
+    )
+    assert got["revision"] == 2
+    _, revision, document = timeline_edit_io.read_document(trip.root, created.folder.name)
+    assert revision == 2 and timeline_edit.to_payload(document) == got["doc"]
+    assert (source.source_id, 0, source.frame_count) in [
+        (c.source_id, c.start_frame, c.end_frame) for c in document.clips
+    ]
+    transcript = trip.service.source_transcript(trip.root, source.source_id)
+    assert transcript is not None
+    assert dict(document.seeded)[source.source_id] == str(transcript["revision"])
+    lines = [r for r in transcript["utterances"] if render_plan.caption_text(r["text"]).strip()]
+    mine = [c for c in document.cues if c.source_id == source.source_id]
+    assert len(mine) == got["cues"] == len(lines) > 0
+    ids = [c.cue_id for c in document.cues]
+    assert len(ids) == len(set(ids))
+    # 넣은 뒤 평범한 저장이 지나간다(심은 리비전이 파일과 같다).
+    saved = timeline_edit_io.save_timeline(trip.root, created.folder.name, 2, got["doc"])
+    assert saved["revision"] == 3
+
+
+def test_adding_a_source_refuses_a_stale_revision_or_a_clipped_source_and_writes_nothing(
+    trip: Folder,
+) -> None:
+    created = _strict(trip, 2)
+    clipped = {clip.source_id for clip in created.document.clips}
+    other = next(s.source_id for s in created.document.facts.sources if s.source_id not in clipped)
+    payload = timeline_edit.to_payload(created.document)
+    before = (created.folder / "timeline.json").read_bytes()
+    stale = trip.service.timeline_add_source(trip.root, created.folder.name, 9, payload, other)
+    assert stale == {"conflict": True, "revision": 1}
+    with pytest.raises(TimelineEditError, match="이미 클립"):
+        trip.service.timeline_add_source(
+            trip.root, created.folder.name, 1, payload, next(iter(clipped))
+        )
+    assert (created.folder / "timeline.json").read_bytes() == before
+    assert _record_of(created)["revision"] == 1

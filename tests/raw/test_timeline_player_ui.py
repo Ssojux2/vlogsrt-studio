@@ -134,7 +134,7 @@ def test_the_clip_edit_buttons_are_on_the_page_and_every_button_has_a_handler() 
     assert {"blade", "delete-clip", "join"} <= actions
     for action in actions:
         assert re.search(rf'(^|[\s{{,])"?{re.escape(action)}"?: function', PLAYER_JS, re.M) or (
-            re.search(rf'(^|[\s{{,])"?{re.escape(action)}"?: [a-z]+[,}} ]', PLAYER_JS, re.M)
+            re.search(rf'(^|[\s{{,])"?{re.escape(action)}"?: [A-Za-z]+[,}} ]', PLAYER_JS, re.M)
         ), action
     assert 'clipOp("blade")' in PLAYER_JS and 'ev.code === "KeyB"' in PLAYER_JS
     assert 'ev.code === "Backspace"' in PLAYER_JS and 'ev.code === "Delete"' in PLAYER_JS
@@ -245,6 +245,39 @@ def test_save_needs_the_token_and_passes_the_document_and_base_revision(
     assert calls[-1][3] is True
     broken = player.action({**payload, "baseRevision": "3"}, "save")
     assert broken["ok"] is False and broken["stale"] is False
+
+
+def test_adding_a_source_needs_the_token_and_passes_the_document_revision_and_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W-71g — 원본 넣기는 쓰기라 저장처럼 서명·수명 토큰에 묶이고 받은 결과를 그대로 돌려준다."""
+    server, _root, signature = _server(tmp_path)
+    player = server._timeline_player
+    calls: list[tuple[Any, ...]] = []
+
+    def add(_root: Path, timeline_id: str, base: int, doc: Any, source_id: str) -> Any:
+        calls.append((timeline_id, base, doc, source_id))
+        return {"revision": base + 1, "doc": doc, "cues": 3, "empty": 1, "clamped": 0}
+
+    monkeypatch.setattr(server.raw, "timeline_add_source", add)
+    doc = {"clips": [["s1", 0, 30]], "cues": [], "nextCue": 1, "seeded": {}}
+    payload: dict[str, object] = {
+        "signature": signature,
+        "token": "낡은-토큰",
+        "timelineId": "t1",
+        "baseRevision": 3,
+        "doc": doc,
+        "sourceId": "s2",
+    }
+    refused = player.action(payload, "add")
+    assert refused["ok"] is False and refused["stale"] is True and calls == []
+    payload["token"] = server._visual_lifetime_token
+    got = player.action(payload, "add")
+    assert got == {"ok": True, "revision": 4, "doc": doc, "cues": 3, "empty": 1, "clamped": 0}
+    assert calls == [("t1", 3, doc, "s2")]
+    broken = player.action({**payload, "sourceId": ""}, "add")
+    assert broken["ok"] is False and broken["stale"] is False
+    assert "tl_add_source" in [f.__name__ for f in player.server_functions()]
 
 
 def test_render_needs_the_token_and_starts_the_timeline_render_at_that_revision(

@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 
 from tests.raw.test_render_export import Folder, _streams
-from tests.raw.test_timeline_edit_io import _create, trip  # noqa: F401 — 모듈 범위 픽스처
+from tests.raw.test_timeline_edit_io import _create, _strict, trip  # noqa: F401 — 모듈 범위 픽스처
 from vlogsrt.project.raw import (
     render_export,
     render_plan,
@@ -117,6 +117,28 @@ def test_a_deleted_clip_is_reported_as_a_timeline_cut_not_lost(trip: Folder) -> 
     ]
     assert len(covering) == 1
     assert any(row["reason"] == render_plan.DROP_TIMELINE_CUT for row in _report(result)["dropped"])
+
+
+def test_an_added_source_renders_whole_with_its_seeded_subtitles(trip: Folder) -> None:  # noqa: F811
+    """W-71g — 넣은 원본은 원본 전체 클립으로 렌더되고 SRT는 심은 자막까지 문서 그대로다."""
+    created = _strict(trip, 13)
+    clipped = {clip.source_id for clip in created.document.clips}
+    source = next(s for s in created.document.facts.sources if s.source_id not in clipped)
+    got = trip.service.timeline_add_source(
+        trip.root,
+        created.folder.name,
+        1,
+        timeline_edit.to_payload(created.document),
+        source.source_id,
+    )
+    _, _, document = timeline_edit_io.read_document(trip.root, created.folder.name)
+    result = _render(trip, created.folder, got["revision"], 14)
+    assert result.plan.total_frames == timeline_edit.edited_frames(document)
+    assert result.srt.read_text(encoding="utf-8") == timeline_edit.srt_text(document)
+    assert any(
+        (p.source_id, p.start_frame, p.end_frame) == (source.source_id, 0, source.frame_count)
+        for p in result.plan.parts
+    )
 
 
 def test_srt_again_refuses_a_timeline_render(trip: Folder) -> None:  # noqa: F811

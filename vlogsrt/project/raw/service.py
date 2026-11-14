@@ -4153,6 +4153,21 @@ class RawWorkspaceService:
             root.expanduser(), timeline_id, base_revision, payload, force=force
         )
 
+    def timeline_add_source(
+        self,
+        root: Path,
+        timeline_id: str,
+        base_revision: int,
+        payload: Mapping[str, Any],
+        source_id: str,
+    ) -> dict[str, Any]:
+        """클립이 없는 원본을 원본 전체 클립으로 넣는다(W-71g) — 처음 넣으면 지금 자막을 심는다."""
+        from vlogsrt.project.raw import timeline_edit_io
+
+        return timeline_edit_io.add_source_to_timeline(
+            self, root.expanduser(), timeline_id, base_revision, payload, source_id
+        )
+
     def final_edit_waveform(self, root: Path, export_id: str) -> dict[str, Any]:
         """초안 영상의 파형(D117) — 처음 한 번 재고 `edit/waveform.json`에 둔다(무료 로컬)."""
         from vlogsrt.project.raw import final_edit_io

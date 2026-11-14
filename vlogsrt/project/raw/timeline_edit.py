@@ -785,6 +785,61 @@ def join_clips(document: TimelineDocument, index: int) -> TimelineDocument:
     return _with_clips(document, document.clips[:index] + (merged,) + document.clips[index + 2 :])
 
 
+def add_source(
+    document: TimelineDocument,
+    source_id: str,
+    transcript: tuple[str, Sequence[render_plan.SourceCue]],
+    settings: FinalEditSettings = FINAL_EDIT_SETTINGS,
+) -> Seeded:
+    """클립이 없는 원본을 원본 전체 클립 하나로 촬영 차례 자리에 넣는다(W-71g).
+
+    같은 원본은 붙어 있어야 하므로 자리는 사실의 원본 차례로 정한다 — 차례가 뒤인 원본의 첫
+    클립 앞, 없으면 끝. 한 번도 심지 않은 원본만 `transcript`(리비전, 원본 자막)를 `seed`와 같은
+    규칙으로 심는다 — 이미 심은 원본(클립을 다 지운 것)은 자막과 리비전이 문서에 그대로 있다.
+    """
+    source = _source(document.facts, source_id)
+    if any(clip.source_id == source_id for clip in document.clips):
+        raise TimelineEditError(f"원본 {source_id}에는 이미 클립이 있다 — 원본 띠로 늘리세요")
+    order = _source_order(document.facts)
+    at = next(
+        (i for i, c in enumerate(document.clips) if order[c.source_id] > order[source_id]),
+        len(document.clips),
+    )
+    clips = (*document.clips[:at], Clip(source_id, 0, source.frame_count), *document.clips[at:])
+    placed = _with_clips(document, clips)
+    if source_id in dict(document.seeded):
+        validate(placed, settings)
+        return Seeded(placed, 0, 0)
+    return _seed_added(placed, source, transcript, settings)
+
+
+def _seed_added(
+    document: TimelineDocument,
+    source: TimelineSource,
+    transcript: tuple[str, Sequence[render_plan.SourceCue]],
+    settings: FinalEditSettings,
+) -> Seeded:
+    revision, source_cues = transcript
+    made = [_seed_cue(source, cue) for cue in source_cues]
+    kept = sorted(
+        (row for row in made if row is not None),
+        key=lambda row: (row[0].start_ms, row[0].end_ms),
+    )
+    added = [
+        replace(row[0], cue_id=f"{NEW_PREFIX}{document.next_cue + n}") for n, row in enumerate(kept)
+    ]
+    order = _source_order(document.facts)
+    seeded = sorted([*document.seeded, (source.source_id, revision)], key=lambda r: order[r[0]])
+    result = replace(
+        document,
+        cues=_sorted(document.facts, [*document.cues, *added]),
+        next_cue=document.next_cue + len(added),
+        seeded=tuple(seeded),
+    )
+    validate(result, settings)
+    return Seeded(result, len(made) - len(kept), sum(row[1] for row in kept))
+
+
 # ─── 자막 연산(원본 밀리초) ──────────────────────────────────────────────
 
 

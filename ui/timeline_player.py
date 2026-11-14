@@ -127,6 +127,10 @@ def timeline_player_html(model: dict[str, Any] | None) -> str:
         '<div class="tl-strip"><canvas id="tl-canvas"></canvas></div>'
         '<div class="tl-range"><div class="tl-range-head"><span id="tl-source-head"></span>'
         '<span class="tl-gap"></span>'
+        '<select id="tl-add-pick" class="tl-add-pick" aria-label="클립이 없는 원본" hidden>'
+        "</select>"
+        '<button type="button" data-tl="add-source" id="tl-add" hidden'
+        ' title="고른 원본 전체를 촬영 차례 자리에 클립으로 넣는다">원본 넣기</button>'
         '<button type="button" data-tl="trim-start" title="클립 앞을 커서로 (⌥[)">앞 ⌥[</button>'
         '<button type="button" data-tl="trim-end" title="클립 뒤를 커서로 (⌥])">뒤 ⌥]</button>'
         "</div>"
@@ -182,6 +186,7 @@ TIMELINE_PLAYER_CSS = """
   border-radius: 6px; background: var(--vl-surface-sunken); overflow: hidden; }
 .tl-range { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
 .tl-range-head { display: flex; gap: 6px; align-items: center; color: var(--vl-ink-muted); }
+.tl-range-head select { font: inherit; font-size: 12px; max-width: 220px; }
 .tl-range-head button { font: inherit; font-size: 12px; padding: 1px 8px; border-radius: 4px;
   cursor: pointer; border: 1px solid var(--vl-line-strong); background: var(--vl-surface-raised);
   color: var(--vl-ink); }
@@ -253,7 +258,10 @@ class TimelinePlayer:
         def tl_tiers(payload: dict[str, object]) -> dict[str, object]:
             return self.action(payload, "tiers")
 
-        return [tl_media, tl_prepare, tl_save, tl_render, tl_tiers]
+        def tl_add_source(payload: dict[str, object]) -> dict[str, object]:
+            return self.action(payload, "add")
+
+        return [tl_media, tl_prepare, tl_save, tl_render, tl_tiers, tl_add_source]
 
     def action(self, payload: dict[str, object], kind: str) -> dict[str, object]:
         """어떤 예외도 500이 아니라 값으로 돌아간다. 준비·저장·렌더는 서명·수명 토큰에 묶인다."""
@@ -264,7 +272,7 @@ class TimelinePlayer:
 
         try:
             root = owner._require_current_selection(owner._serve_str(payload, "signature") or None)
-            if kind in ("prepare", "save", "render"):
+            if kind in ("prepare", "save", "render", "add"):
                 owner._require_workbench_token(payload, owner._visual_lifetime_token, TAB_LABEL)
         except gr.Error as error:
             return fail(error, stale=True)
@@ -274,6 +282,8 @@ class TimelinePlayer:
                 return self._save(root, timeline_id, payload)
             if kind == "render":
                 return self._render(root, timeline_id, payload)
+            if kind == "add":
+                return self._add(root, timeline_id, payload)
             if kind == "tiers":
                 source_id = owner._serve_str(payload, "sourceId")
                 tiers = owner.raw.timeline_tiers(root, [source_id])
@@ -303,6 +313,19 @@ class TimelinePlayer:
         result = self.owner.raw.timeline_save(
             root, timeline_id, base, document, force=payload.get("force") is True
         )
+        return {"ok": True, **result}
+
+    def _add(
+        self, root: Any, timeline_id: str | None, payload: dict[str, object]
+    ) -> dict[str, object]:
+        """클립이 없는 원본을 넣는다(W-71g) — 서버가 지금 자막을 심어 새 리비전으로 쓴다."""
+        base = payload.get("baseRevision")
+        document = payload.get("doc")
+        source_id = self.owner._serve_str(payload, "sourceId")
+        shape = isinstance(base, int) and not isinstance(base, bool) and isinstance(document, dict)
+        if timeline_id is None or not shape or not source_id:
+            raise ValueError("원본 넣기 요청의 모양이 틀렸습니다(타임라인 · 리비전 · 문서 · 원본).")
+        result = self.owner.raw.timeline_add_source(root, timeline_id, base, document, source_id)
         return {"ok": True, **result}
 
     def _render(

@@ -472,3 +472,80 @@ def run_case(case: dict) -> dict:
         return {"value": _value(document, case["op"], case["args"])}
     except TimelineEditError:
         return {"error": True}
+
+
+# ─── 원본 다시 넣기(W-71g) ──────────────────────────────────────────────────
+
+
+def test_add_source_places_the_whole_source_in_shooting_order_and_seeds_it() -> None:
+    document = te.TimelineDocument(
+        facts=FACTS,
+        clips=(te.Clip("a", 30, 120), te.Clip("c", 0, 300)),
+        cues=(te.EditCue("n4", "a", 1000, 2000, "하나", None),),
+        next_cue=5,
+        seeded=(("a", "ra"),),
+    )
+    transcript = (
+        "rb",
+        (_cue("u2", 2, 3, "셋."), _cue("u1", F(1, 2), 1, "둘"), _cue("u3", 4, 4, " ")),
+    )
+    added = te.add_source(document, "b", transcript)
+    assert _clips(added.document) == [("a", 30, 120), ("b", 0, 240), ("c", 0, 300)]
+    assert [_row(c) for c in added.document.cues] == [
+        ("n4", "a", 1000, 2000, "하나", None),
+        ("n5", "b", 500, 1000, "둘", "u1"),
+        ("n6", "b", 2000, 3000, rp.caption_text("셋."), "u2"),
+    ]
+    assert added.document.next_cue == 7
+    assert added.document.seeded == (("a", "ra"), ("b", "rb"))
+    assert (added.empty, added.clamped) == (1, 0)
+
+
+def test_add_source_goes_first_or_last_by_shooting_order() -> None:
+    empty: tuple[str, tuple[rp.SourceCue, ...]] = ("r", ())
+    first = te.add_source(_doc([("b", 0, 24), ("c", 0, 30)]), "a", empty)
+    assert _clips(first.document) == [("a", 0, 300), ("b", 0, 24), ("c", 0, 30)]
+    last = te.add_source(_doc([("a", 0, 30), ("b", 0, 24)]), "c", empty)
+    assert _clips(last.document) == [("a", 0, 30), ("b", 0, 24), ("c", 0, 300)]
+    assert last.document.seeded == (("c", "r"),)
+
+
+def test_add_source_refuses_an_unknown_source_or_one_that_has_a_clip() -> None:
+    document = _doc([("a", 0, 30)])
+    with pytest.raises(TimelineEditError):
+        te.add_source(document, "z", ("r", ()))
+    with pytest.raises(TimelineEditError):
+        te.add_source(document, "a", ("r", ()))
+
+
+def test_a_source_seeded_before_keeps_its_cues_and_revision() -> None:
+    """클립을 다 지운 원본은 자막·심은 리비전이 문서에 남아 있다 — 다시 넣어도 새로 읽지 않는다."""
+    document = te.TimelineDocument(
+        facts=FACTS,
+        clips=(te.Clip("a", 0, 30),),
+        cues=(te.EditCue("c1", "b", 100, 900, "옛 줄", "u1"),),
+        next_cue=1,
+        seeded=(("a", "ra"), ("b", "rb-old")),
+    )
+    added = te.add_source(document, "b", ("rb-new", (_cue("u9", 1, 2, "새 줄"),)))
+    assert _clips(added.document) == [("a", 0, 30), ("b", 0, 240)]
+    assert added.document.cues == document.cues and added.document.next_cue == 1
+    assert added.document.seeded == document.seeded
+    assert (added.empty, added.clamped) == (0, 0)
+
+
+def test_add_source_refuses_past_the_cue_cap() -> None:
+    from dataclasses import replace
+
+    from vlogsrt.project.raw.final_edit_config import FINAL_EDIT_SETTINGS
+
+    tight = replace(FINAL_EDIT_SETTINGS, max_cues=1)
+    document = te.TimelineDocument(
+        facts=FACTS,
+        clips=(te.Clip("a", 0, 30),),
+        cues=(te.EditCue("c1", "a", 0, 500, "하나", None),),
+        next_cue=1,
+        seeded=(("a", "ra"),),
+    )
+    with pytest.raises(TimelineEditError, match="1개를 넘는다"):
+        te.add_source(document, "b", ("rb", (_cue("u1", 0, 1, "둘"),)), tight)

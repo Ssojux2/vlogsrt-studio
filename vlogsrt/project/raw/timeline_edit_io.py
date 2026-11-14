@@ -46,6 +46,7 @@ from vlogsrt.project.raw.timeline_edit import TimelineDocument, TimelineEditErro
 
 if TYPE_CHECKING:
     from vlogsrt.project.raw.jobs import JobContext
+    from vlogsrt.project.raw.models import SourceAsset
     from vlogsrt.project.raw.service import RawWorkspaceService
 
 TIMELINE_FOLDER = "timeline"
@@ -110,7 +111,7 @@ def create_timeline(
     names = {item.asset.asset_id: item.asset.source_name for item in gathered}
     clipped = {clip.source_id for clip in clips}
     transcripts = {
-        item.asset.asset_id: _seed_transcript(service, root, item)
+        item.asset.asset_id: _seed_transcript(service, root, item.asset)
         for item in gathered
         if item.asset.asset_id in clipped
     }
@@ -131,9 +132,9 @@ def create_timeline(
 
 
 def _seed_transcript(
-    service: RawWorkspaceService, root: Path, item: render_export.GatheredSource
+    service: RawWorkspaceService, root: Path, asset: SourceAsset
 ) -> tuple[str, tuple[render_plan.SourceCue, ...]]:
-    revision, cues = render_export.transcript_with_revision(service, root, item.asset)
+    revision, cues = render_export.transcript_with_revision(service, root, asset)
     return (NO_TRANSCRIPT if revision is None else revision), cues
 
 
@@ -410,24 +411,89 @@ def save_timeline(
     folder = _folder_by_id(root, timeline_id)
     with _SAVE_LOCK:
         record = _read_record(folder)
-        document = timeline_edit.from_payload(payload, _facts_from_record(record), settings)
-        held = _document(record, settings)
-        if dict(document.seeded) != dict(held.seeded):
-            raise TimelineEditError("심은 원본 자막 리비전(`seeded`)은 저장으로 바꿀 수 없다")
+        document = _checked_payload(record, payload, settings)
         current = int(record["revision"])
         if current != base_revision and not force:
             return {"conflict": True, "revision": current}
-        saved = _record(
-            document,
-            revision=current + 1,
-            created=_parse_moment(record.get("created_at")),
-            saved=now(),
-            facts=record["facts"],
-            seed=record.get("seed", {}),
-        )
-        _write_record(folder, saved)
+        saved = _write_revision(folder, record, document, now)
     warnings = [[w.cue_id, w.kind] for w in timeline_edit.warnings(document, settings)]
     return {"revision": current + 1, "summary": saved["summary"], "warnings": warnings}
+
+
+def add_source_to_timeline(
+    service: RawWorkspaceService,
+    root: Path,
+    timeline_id: str,
+    base_revision: int,
+    payload: Mapping[str, Any],
+    source_id: str,
+    *,
+    settings: FinalEditSettings = FINAL_EDIT_SETTINGS,
+    now: Callable[[], datetime] = _utc_now,
+) -> dict[str, Any]:
+    """클립이 없는 원본을 원본 전체 클립으로 넣고 새 리비전으로 쓴다(W-71g) — 저장과 같은 검사.
+
+    한 번도 심지 않은 원본이면 지금 원본 자막을 심는다(그래서 화면 편집이 아니라 서버 쓰기다 —
+    `seeded`는 저장으로 바꿀 수 없다). 화면이 본 리비전이 지금과 다르면 쓰지 않고 `conflict`다.
+    """
+    folder = _folder_by_id(root, timeline_id)
+    with _SAVE_LOCK:
+        record = _read_record(folder)
+        document = _checked_payload(record, payload, settings)
+        current = int(record["revision"])
+        if current != base_revision:
+            return {"conflict": True, "revision": current}
+        transcript = _added_transcript(service, root, document, source_id)
+        added = timeline_edit.add_source(document, source_id, transcript, settings)
+        saved = _write_revision(folder, record, added.document, now)
+    return {
+        "revision": current + 1,
+        "summary": saved["summary"],
+        "doc": timeline_edit.to_payload(added.document),
+        "cues": len(added.document.cues) - len(document.cues),
+        "empty": added.empty,
+        "clamped": added.clamped,
+    }
+
+
+def _added_transcript(
+    service: RawWorkspaceService, root: Path, document: TimelineDocument, source_id: str
+) -> tuple[str, tuple[render_plan.SourceCue, ...]]:
+    """넣을 원본의 (리비전, 원본 자막) — 이미 심은 원본은 읽지 않는다(문서의 자막을 그대로 쓴다)."""
+    if source_id in dict(document.seeded):
+        return NO_TRANSCRIPT, ()
+    assets = {asset.asset_id: asset for asset in service.list_source_assets(root)}
+    if source_id not in assets:
+        raise TimelineEditError(f"원본 {source_id}이(가) 작업공간에 없다")
+    return _seed_transcript(service, root, assets[source_id])
+
+
+def _checked_payload(
+    record: Mapping[str, Any], payload: Mapping[str, Any], settings: FinalEditSettings
+) -> TimelineDocument:
+    """받은 문서를 파일의 사실로 검사한다 — 심은 리비전은 파일의 것만(다르면 거부)."""
+    document = timeline_edit.from_payload(payload, _facts_from_record(record), settings)
+    if dict(document.seeded) != dict(_document(record, settings).seeded):
+        raise TimelineEditError("심은 원본 자막 리비전(`seeded`)은 저장으로 바꿀 수 없다")
+    return document
+
+
+def _write_revision(
+    folder: Path,
+    record: Mapping[str, Any],
+    document: TimelineDocument,
+    now: Callable[[], datetime],
+) -> dict[str, Any]:
+    saved = _record(
+        document,
+        revision=int(record["revision"]) + 1,
+        created=_parse_moment(record.get("created_at")),
+        saved=now(),
+        facts=record["facts"],
+        seed=record.get("seed", {}),
+    )
+    _write_record(folder, saved)
+    return saved
 
 
 def _parse_moment(value: object) -> datetime:
