@@ -449,6 +449,8 @@ GLOBAL_ORDER_CONFIRM_LABEL = "전체 원본 순서 확정(촬영 시각 순)"
 # 화면 맞춤(D50) — 머리줄(W-17 B의 44px 줄)과 정리 탭은 CSS가 범위로 쓰는 이름을 단다.
 APP_HEADER_ID = "app-header"
 REVIEW_TAB_ID = "review-tab"
+TIMER_COUNT = 3
+"""화면의 타이머 수 — 1초 상태 틱 · 2초 그리기 · 2초 보내기 알림(최종 편집 탭에서 쉰다, D126)."""
 FINALCUT_SEND_LABEL = "Final Cut으로 보내기"
 """원본 전체를 태그 달린 타임라인 하나로 쓰고 Final Cut에 건넨다(D56) — 옛 두 단계를 대신한다."""
 FINALCUT_SEND_JOB_KIND = "finalcut_send"
@@ -1998,6 +2000,8 @@ class RawWorkspaceUi:
         # 1초 상태 틱 하나와 칸마다 이 세션이 마지막으로 보낸 값(D63 세션 C).
         self._status_timer: gr.Timer | None = None
         self._draw_timer: gr.Timer | None = None  # 2초 그리기 타이머(작업대 · 초안 카드)
+        self._toast_timer: gr.Timer | None = None  # 2초 보내기 알림 타이머
+        self._review_tab_item: gr.Tab | None = None
         # 「최종 편집」 탭(W-66, D117) — 초안 렌더가 끝나면 이 탭으로 넘어온다.
         self._final_edit = FinalEditPanel(
             self, raw_service.RawWorkspaceError, raw_service.RENDER_EXPORT_JOB_KIND
@@ -4585,7 +4589,7 @@ class RawWorkspaceUi:
 
         한 줄짜리 탭 막대는 CSS가 감춘다(보이는 탭이 하나뿐일 때만). 숨은 「자막」 탭은 그대로다.
         """
-        with gr.Tab("영상 정리", id=REVIEW_TAB_KEY, elem_id=REVIEW_TAB_ID):
+        with gr.Tab("영상 정리", id=REVIEW_TAB_KEY, elem_id=REVIEW_TAB_ID) as self._review_tab_item:
             self._command_bar()
             # 단추 응답이 실리는 칸 — 그 값은 활동 칸이 받아 보인다(ACTIVITY_REPLY_JS).
             self._capcut_status = gr.Markdown(visible=False)
@@ -5128,7 +5132,8 @@ class RawWorkspaceUi:
             show_progress="hidden",
         )
         # 보내기는 뒤에서 끝난다 — 끝난 결과를 알림으로 한 번(알림은 대기열을 지나야 뜬다).
-        gr.Timer(2).tick(
+        self._toast_timer = gr.Timer(2)
+        self._toast_timer.tick(
             self.finalcut_toast_view, self._signature_state, None, show_progress="hidden"
         )
 
@@ -11507,7 +11512,32 @@ class RawWorkspaceUi:
             self._wire_model_refresh(switched)
             assert self._draw_timer is not None and self._render_export_started is not None
             self._final_edit.wire(tabs, self._draw_timer, self._render_export_started, switched)
+            self._wire_timer_rest()
         return app
+
+    def _wire_timer_rest(self) -> None:
+        """최종 편집 탭이 앞이면 1·2초 타이머 셋을 멈추고 「영상 정리」로 오면 켠다(W-75, D126).
+
+        타이머 한 번의 `dispatch('tick')`이 브라우저 주 스레드를 약 260 ms 막아(구성요소 370여 개)
+        2초에 1.3초를 먹었다 — 타임라인 확대·끌기·재생이 최대 0.5초 늦었다. 탭의 `select`는 누름·
+        프로그램 전환(자동 전환·「최종 편집 열기」)·로드에서 뜬다(그라디오 6.30 실측). 멈춘 동안
+        머리줄 상태 칸은 그대로 있고 활동 띠(`/vl-activity`)는 계속 돈다."""
+        timers = [self._status_timer, self._draw_timer, self._toast_timer]
+        assert self._review_tab_item is not None and None not in timers
+        gates = (
+            (self._review_tab_item, self.timers_resume),
+            (self._final_edit.tab, self.timers_rest),
+        )
+        for tab, gate in gates:
+            tab.select(gate, None, timers, queue=False, show_progress="hidden")
+
+    @staticmethod
+    def timers_rest() -> tuple[gr.Timer, ...]:
+        return tuple(gr.Timer(active=False) for _ in range(TIMER_COUNT))
+
+    @staticmethod
+    def timers_resume() -> tuple[gr.Timer, ...]:
+        return tuple(gr.Timer(active=True) for _ in range(TIMER_COUNT))
 
     def _wire_folder_import(self, view_outputs: list[object]) -> tuple[Any, ...]:
         """「폴더 불러오기」 배선(W-46a) — 경로 칸 Enter · 「이 폴더 불러오기」 · 「찾아보기」.

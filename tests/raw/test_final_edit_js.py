@@ -271,3 +271,21 @@ def test_app_boot_save_conflict_and_stale_states(tmp_path: Path) -> None:
         "stale": ["stale", True],
         "keysBound": 1,
     }
+
+
+WHEEL = """
+const FE = require(process.argv[2]);
+const s = { zoomStepPercent: 125, wheelZoomNotchPx: 100 };
+const cases = [[-100, 0], [100, 0], [-4, 0], [3, 0], [-900, 0], [0, 0], [-3, 1], [2, 1]];
+console.log(JSON.stringify(cases.map(([dy, mode]) => FE.wheelZoomFactor(dy, mode, s))));
+"""
+
+
+@needs_node
+def test_wheel_zoom_follows_the_wheel_amount(tmp_path: Path) -> None:
+    """W-75, D126 — 마우스 한 칸(100 px)이 한 걸음(125%)이고, 트랙패드 핀치의 작은 델타는
+    그만큼 작게 — 한 사건은 한 걸음까지. 줄 단위(deltaMode 1)는 부호만 보고 한 걸음이다."""
+    got = _node(tmp_path, WHEEL, str(_core(tmp_path)))
+    assert isinstance(got, list)
+    expected = [1.25, 0.8, 1.25**0.04, 1.25**-0.03, 1.25, 1.0, 1.25, 0.8]
+    assert [round(value, 12) for value in got] == [round(value, 12) for value in expected]

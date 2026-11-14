@@ -272,13 +272,14 @@ class FinalEditPanel:
         self.owner = owner
         self.service_error = service_error
         self.export_job_kind = export_job_kind
+        self.tab: Any = None
         self.block: Any = None
         self.open_button: Any = None
 
     # ── 짓기 ──────────────────────────────────────────────────────────
 
     def build_tab(self) -> None:
-        with gr.Tab(TAB_LABEL, id=FINAL_EDIT_TAB_KEY, elem_id=FINAL_EDIT_TAB_ID):
+        with gr.Tab(TAB_LABEL, id=FINAL_EDIT_TAB_KEY, elem_id=FINAL_EDIT_TAB_ID) as self.tab:
             self.block = gr.HTML(
                 final_edit_html(self._empty_model(NO_WORKSPACE_TEXT)),
                 elem_id=FINAL_EDIT_BLOCK_ID,

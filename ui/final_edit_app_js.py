@@ -1140,8 +1140,7 @@ APP_JS = r"""
     ev.preventDefault();
     var rect = canvas().getBoundingClientRect();
     if (ev.ctrlKey || ev.metaKey) {
-      zoomBy(ev.deltaY < 0 ? S.settings.zoomStepPercent / 100 : 100 / S.settings.zoomStepPercent,
-        ev.clientX - rect.left);
+      zoomBy(FE.wheelZoomFactor(ev.deltaY, ev.deltaMode, S.settings), ev.clientX - rect.left);
       return;
     }
     S.scrollX += Math.abs(ev.deltaX) > Math.abs(ev.deltaY) ? ev.deltaX : ev.deltaY;

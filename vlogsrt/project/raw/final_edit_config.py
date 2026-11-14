@@ -28,7 +28,9 @@ class FinalEditSettings:
     - `new_cue_ms`: 플레이헤드에 새로 넣는 자막의 길이.
     - `reverse_tick_ms`: 역방향 셔틀(J)이 뒤로 한 번 시크하는 간격.
     - `waveform_rate`·`waveform_bin_ms`: 파형 진폭 디코딩 주파수와 빈 하나의 길이.
-    - `zoom_*`: 타임라인 1초의 화소 폭 범위와 한 번 줌의 배율. `snap_px`: 스냅이 붙는 거리.
+    - `zoom_*`: 타임라인 1초의 화소 폭 범위와 한 번 줌의 배율. `wheel_zoom_notch_px`: ⌘·Ctrl+휠이
+      한 걸음 줌하는 휠 델타(마우스 한 칸 = 100 px) — 트랙패드 핀치의 작은 델타는 작게 줌한다.
+      `snap_px`: 스냅이 붙는 거리.
     - `big_step_frames`: Shift+화살표·Shift+밀기의 프레임 수.
     - `shuttle_rates`: L을 거듭 누를 때의 배속.
     """
@@ -50,6 +52,7 @@ class FinalEditSettings:
     zoom_min_px_per_s: int = 2
     zoom_max_px_per_s: int = 400
     zoom_step_percent: int = 125
+    wheel_zoom_notch_px: int = 100
     snap_px: int = 8
     big_step_frames: int = 10
     shuttle_rates: tuple[int, ...] = (1, 2, 4, 8)
@@ -63,6 +66,8 @@ class FinalEditSettings:
         )  # fmt: skip
         if min(positive) <= 0 or self.min_gap_ms < 0 or self.coalesce_ms < 0 or self.snap_px < 0:
             raise ValueError("최종 편집 설정의 크기·한도는 양수여야 한다")
+        if self.wheel_zoom_notch_px < 1:
+            raise ValueError("휠 줌 한 걸음의 델타는 양수여야 한다")
         if self.zoom_max_px_per_s < self.zoom_min_px_per_s or self.zoom_step_percent <= 100:
             raise ValueError("줌 범위가 뒤집혔거나 줌 배율이 1 이하다")
         if not self.shuttle_rates or min(self.shuttle_rates) <= 0:
@@ -89,6 +94,7 @@ def client_settings(settings: FinalEditSettings = FINAL_EDIT_SETTINGS) -> dict[s
         "zoomMinPxPerS": settings.zoom_min_px_per_s,
         "zoomMaxPxPerS": settings.zoom_max_px_per_s,
         "zoomStepPercent": settings.zoom_step_percent,
+        "wheelZoomNotchPx": settings.wheel_zoom_notch_px,
         "snapPx": settings.snap_px,
         "bigStepFrames": settings.big_step_frames,
         "shuttleRates": list(settings.shuttle_rates),

@@ -509,6 +509,15 @@ CORE_JS = r"""
     return peak;
   };
 
+  // 휠 줌 배율 — 픽셀 단위면 델타에 비례(트랙패드 핀치는 작은 델타가 잦다), 한 사건은 한 걸음까지.
+  FE.wheelZoomFactor = function (deltaY, deltaMode, settings) {
+    var step = settings.zoomStepPercent / 100;
+    if (!deltaY) { return 1; }
+    if (deltaMode !== 0) { return deltaY < 0 ? step : 1 / step; }
+    var steps = Math.max(-1, Math.min(1, -deltaY / settings.wheelZoomNotchPx));
+    return Math.pow(step, steps);
+  };
+
   root.__vlFE = FE;
   if (typeof module !== "undefined" && module.exports) { module.exports = FE; }
 })(typeof window !== "undefined" ? window : globalThis);
