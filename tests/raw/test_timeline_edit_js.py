@@ -333,3 +333,128 @@ def test_clamp_view_keeps_selection_and_playhead_inside_a_shorter_timeline(tmp_p
         {"clips": None, "sel": 1, "playhead": 59},
         {"clips": None, "sel": 1, "playhead": 12},
     ]
+
+
+# ── 자막 편집: 플레이헤드에서 자막 고치기(W-71i) — 브라우저만의 규칙 ─────────────────────────
+
+CUE_EDIT_RUNNER = r"""
+const TL = require(process.argv[2]);
+const doc = JSON.parse(process.argv[3]);
+const asks = JSON.parse(process.argv[4]);
+const settings = JSON.parse(process.argv[5]);
+function one(a) {
+  try {
+    if (a[0] === "at") { return { cue: TL.cueAt(doc, a[1]) }; }
+    if (a[0] === "split-text") { return { parts: TL.splitText(a[1]) }; }
+    const out = TL.cueEdit(doc, a[0], a[1], a[2], settings, a[3]);
+    return { cues: out.doc ? out.doc.cues : null, nextCue: out.doc ? out.doc.nextCue : null,
+      cue: out.cue };
+  } catch (e) {
+    if (TL.isError(e)) { return { error: true }; }
+    throw e;
+  }
+}
+console.log(JSON.stringify(asks.map(one)));
+"""
+
+# a 0–30프레임(0–1000 ms) → 출력 0–30 · b 10–40프레임(333–1333 ms) → 출력 30–60.
+# c4는 b의 클립 앞이라 컷에 가려진 자막이다.
+CUE_CLIPS = [["a", 0, 30], ["b", 10, 40]]
+CUES = [
+    ["c1", "a", 100, 600, "하나 둘", None],
+    ["c2", "a", 700, 900, "셋", None],
+    ["c3", "b", 400, 1000, "넷 다섯", None],
+    ["c4", "b", 0, 200, "숨음", None],
+]
+
+
+def _cue_edit(tmp_path: Path, asks: list[list[object]]) -> list[dict]:
+    core = tmp_path / "timeline_core.js"
+    core.write_text(TIMELINE_CORE_JS, encoding="utf-8")
+    doc = {"facts": PLAY_FACTS, "clips": CUE_CLIPS, "cues": CUES, "nextCue": 5, "seeded": {}}
+    settings = json.dumps(client_settings())
+    out = _node(tmp_path, CUE_EDIT_RUNNER, str(core), json.dumps(doc), json.dumps(asks), settings)
+    assert isinstance(out, list)
+    return out
+
+
+def _times(got: dict, cue_id: str) -> list[object]:
+    return next(row[2:5] for row in got["cues"] if row[0] == cue_id)
+
+
+@needs_node
+def test_cue_edges_move_to_the_playhead_only_on_the_cues_own_source(tmp_path: Path) -> None:
+    got = _cue_edit(
+        tmp_path,
+        [
+            ["start", "c1", 6],
+            ["start", "c1", 20],
+            ["start", "c1", 40],
+            ["end", "c3", 45],
+            ["end", "c3", 31],
+        ],
+    )
+    assert _times(got[0], "c1") == [200, 600, "하나 둘"] and got[0]["cue"] == "c1"
+    assert got[1] == {"error": True}  # 667 ms — 끝보다 늦은 시작
+    assert got[2] == {"error": True}  # 플레이헤드가 다른 원본(b)에 있다
+    assert _times(got[3], "c3") == [400, 833, "넷 다섯"]
+    assert got[4] == {"error": True}  # 367 ms — 시작보다 이른 끝
+
+
+@needs_node
+def test_split_divides_the_text_at_the_space_nearest_the_middle(tmp_path: Path) -> None:
+    got = _cue_edit(tmp_path, [["split", "c1", 9], ["split", "c1", 2], ["split-text", "하나 둘"]])
+    assert _times(got[0], "c1") == [100, 300, "하나"]
+    assert _times(got[0], "n5") == [300, 600, "둘"]
+    assert got[0]["nextCue"] == 6 and got[0]["cue"] == "c1"
+    assert got[1] == {"error": True}  # 67 ms는 자막 앞이다
+    assert got[2] == {"parts": ["하나", "둘"]}
+
+
+@needs_node
+def test_merge_takes_the_next_visible_cue_of_the_same_source(tmp_path: Path) -> None:
+    got = _cue_edit(tmp_path, [["merge", "c1", 0], ["merge", "c2", 0]])
+    assert _times(got[0], "c1") == [100, 900, "하나 둘 셋"]
+    assert "c2" not in [row[0] for row in got[0]["cues"]]
+    assert got[1] == {"error": True}  # 다음 보이는 자막 c3은 다른 원본
+
+
+@needs_node
+def test_delete_moves_the_selection_to_the_next_visible_cue_then_the_previous(
+    tmp_path: Path,
+) -> None:
+    got = _cue_edit(tmp_path, [["delete", "c2", 0], ["delete", "c3", 0]])
+    assert "c2" not in [row[0] for row in got[0]["cues"]] and got[0]["cue"] == "c3"
+    assert "c3" not in [row[0] for row in got[1]["cues"]] and got[1]["cue"] == "c2"
+
+
+@needs_node
+def test_insert_puts_an_empty_cue_at_the_playhead_inside_its_clip(tmp_path: Path) -> None:
+    got = _cue_edit(tmp_path, [["insert", None, 15], ["insert", None, 60]])
+    new = next(row for row in got[0]["cues"] if row[0] == "n5")
+    assert new == ["n5", "a", 500, 1000, "", None]  # 500 + 2000 ms를 클립 끝(1000 ms)에서 멈춘다
+    assert got[0]["cue"] == "n5" and got[0]["nextCue"] == 6
+    assert got[1] == {"error": True}  # 타임라인 끝에는 넣을 클립이 없다
+
+
+@needs_node
+def test_text_changes_only_when_it_differs_and_hidden_cues_are_not_edited(tmp_path: Path) -> None:
+    got = _cue_edit(
+        tmp_path,
+        [
+            ["text", "c1", 0, "새 글"],
+            ["text", "c1", 0, "하나 둘"],
+            ["start", "c4", 35],
+            ["delete", "c4", 0],
+        ],
+    )
+    assert _times(got[0], "c1") == [100, 600, "새 글"]
+    assert got[1] == {"cues": None, "nextCue": None, "cue": "c1"}
+    assert got[2] == {"error": True}  # 컷에 가려진 자막은 고치지 않는다 — 클립을 늘리면 돌아온다
+    assert got[3] == {"error": True}
+
+
+@needs_node
+def test_cue_at_names_the_visible_cue_under_the_playhead(tmp_path: Path) -> None:
+    got = _cue_edit(tmp_path, [["at", 6], ["at", 22], ["at", 31], ["at", 60]])
+    assert got == [{"cue": "c1"}, {"cue": "c2"}, {"cue": None}, {"cue": None}]

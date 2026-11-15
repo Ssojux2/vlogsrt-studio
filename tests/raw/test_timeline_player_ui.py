@@ -22,6 +22,7 @@ pytest.importorskip("gradio", reason="웹 UI extra(gradio)가 없다", exc_type=
 
 from ui import timeline_player  # noqa: E402
 from ui.final_edit_app_js import APP_JS  # noqa: E402
+from ui.final_edit_ui import KEYMAP  # noqa: E402
 from ui.timeline_player import (  # noqa: E402
     PLAYER_BLOCK_ID,
     PLAYER_JS,
@@ -138,6 +139,53 @@ def test_the_clip_edit_buttons_are_on_the_page_and_every_button_has_a_handler() 
         ), action
     assert 'clipOp("blade")' in PLAYER_JS and 'ev.code === "KeyB"' in PLAYER_JS
     assert 'ev.code === "Backspace"' in PLAYER_JS and 'ev.code === "Delete"' in PLAYER_JS
+
+
+def test_the_cue_panel_is_on_the_page_and_its_buttons_have_handlers() -> None:
+    """W-71i — 자막 목록·편집 칸이 재생기 안에 있고, 실행본이 그리는 자막 단추도 처리기가 있다."""
+    page = timeline_player_html(client_model("sig", "tok", _opened(), _media(), TIERS))
+    assert 'id="tl-cue-list"' in page and 'id="tl-cue-edit"' in page
+    assert 'data-tl="cue-insert"' in page
+    drawn = set(re.findall(r'cueButton\("([a-z-]+)"', PLAYER_JS))
+    assert drawn == {"cue-start", "cue-end", "cue-split", "cue-merge", "cue-delete"}
+    for action in drawn | {"cue-insert"}:
+        assert re.search(rf'"{re.escape(action)}": function', PLAYER_JS), action
+    for op in ("start", "end", "split", "merge", "delete", "insert", "text"):
+        assert f'cueOp("{op}"' in PLAYER_JS, op
+
+
+def test_the_cue_keys_follow_the_draft_editor_and_delete_prefers_a_picked_cue() -> None:
+    """D117과 같은 글자([ ] ⇧B ⇧M ⌥C ⌥↑↓ Enter) — ⌫는 고른 자막이 있을 때만 자막을 지운다."""
+    keys = {key.action: key.code for key in KEYMAP}
+    assert keys["cue-start"] == "BracketLeft" and keys["cue-end"] == "BracketRight"
+    for code in ("BracketLeft", "BracketRight", "KeyB", "KeyM", "KeyC", "ArrowUp", "ArrowDown"):
+        assert f'ev.code === "{code}") {{ return function () {{' in PLAYER_JS, code
+    assert 'plain && S.cue && (ev.code === "Delete" || ev.code === "Backspace")' in PLAYER_JS
+    assert PLAYER_JS.index("var special = cueKey(ev, mod);") < PLAYER_JS.index('clipOp("delete")')
+
+
+def test_an_unconfirmed_cue_text_is_committed_before_saving_rendering_adding_or_hiding() -> None:
+    """글 칸에 쓴 채로 렌더·넣기·⌘S·창 숨기기를 해도 그 글이 빠지지 않는다."""
+    for head in ("function render() {", "function addSource() {"):
+        body = PLAYER_JS[PLAYER_JS.index(head) :]
+        assert body.index("commitText();") < body.index("\n  }\n"), head
+    assert "commitText(); saveNow(false);" in PLAYER_JS
+    hidden = PLAYER_JS[PLAYER_JS.index('addEventListener("visibilitychange"') :]
+    assert hidden.index("commitText();") < hidden.index("saveNow(false)")
+
+
+def test_the_cue_buttons_do_not_move_when_a_text_commit_changes_the_status_or_warnings() -> None:
+    """글 칸을 떠나며 확정하면 상태·경고 줄이 바뀐다 — 그 사이 단추가 움직이면 누름을 잃는다.
+
+    오프라인 앱에서 실제로 잃었다: 상태 글이 이동 막대를 한 줄 더 감아 아래가 23px 내려갔고, 빈 글
+    경고가 사라지며 단추가 올라갔다. 상태 줄은 한 줄 고정 · 경고 줄은 비어도 높이를 둔다.
+    """
+    css = timeline_player.TIMELINE_PLAYER_CSS
+    status = css[css.index(".tl-status {") :].split("}")[0]
+    assert "flex: 1 0 100%" in status and "white-space: nowrap" in status
+    warn = css[css.index(".tl-cue-edit .tl-cue-warn {") :].split("}")[0]
+    assert "min-height" in warn
+    assert "warn.hidden" not in PLAYER_JS and "status.title = S.status;" in PLAYER_JS
 
 
 def test_d117_keys_leave_the_player_alone() -> None:
@@ -369,7 +417,7 @@ def test_a_timeline_that_cannot_be_read_says_why_instead_of_an_empty_player(
 
 def test_the_player_script_takes_its_numbers_from_the_settings() -> None:
     """규칙 8 — 큰 걸음·손잡이 폭·되돌리기 칸·자동 저장은 서버 설정에서 온다(대체 숫자 없음)."""
-    for name in ("bigStepFrames", "snapPx", "undoLimit", "autosaveMs"):
+    for name in ("bigStepFrames", "snapPx", "undoLimit", "autosaveMs"):  # newCueMs는 핵심이 쓴다
         assert f"S.settings.{name}" in PLAYER_JS
     assert "BIG_STEP" not in PLAYER_JS and "HANDLE_PX" not in PLAYER_JS
     assert "|| 200" not in PLAYER_JS and "|| 1500" not in PLAYER_JS
@@ -385,3 +433,12 @@ def test_the_player_script_parses(tmp_path: Path) -> None:
 def test_the_module_does_not_import_the_project_layer() -> None:
     source = Path(timeline_player.__file__).read_text(encoding="utf-8")
     assert not re.search(r"^\s*(from|import) vlogsrt", source, re.M)
+
+
+def test_the_cue_editor_is_not_rebuilt_by_picking_and_playback_scrolls_only_the_list() -> None:
+    """확정이 고름을 바꿔도 단추는 그대로다 · 재생 중 목록 따라가기는 페이지를 움직이지 않는다."""
+    assert "box.__tlSel" not in PLAYER_JS and 'id="tl-cue-head"' in PLAYER_JS
+    assert ".scrollIntoView(" not in PLAYER_JS
+    assert "keepInList(list, row)" in PLAYER_JS
+    css = timeline_player.TIMELINE_PLAYER_CSS
+    assert "position: relative" in css[css.index(".tl-cue-list {") :].split("}")[0]
