@@ -407,7 +407,8 @@ def _encode(
     encoding = render_export._encoding(RENDER_SETTINGS, codec)
     target = preprocess.RenderTarget(job.width, job.height, job.frame_duration)
     basis = job.edit.source_duration if job.edit is not None and job.edit.cut else None
-    with media_refs.local_media_slot():
+    # 사람이 결과를 기다리는 일이다 — 배경 프록시보다 먼저 자리를 얻는다(D140).
+    with media_refs.local_media_slot(urgent=True):
         return preprocess.burn_subtitles(
             request,
             output,
