@@ -457,8 +457,9 @@ GLOBAL_ORDER_CONFIRM_LABEL = "전체 원본 순서 확정(촬영 시각 순)"
 # 화면 맞춤(D50) — 머리줄(W-17 B의 44px 줄)과 정리 탭은 CSS가 범위로 쓰는 이름을 단다.
 APP_HEADER_ID = "app-header"
 REVIEW_TAB_ID = "review-tab"
-TIMER_COUNT = 3
-"""화면의 타이머 수 — 1초 상태 틱 · 2초 그리기 · 2초 보내기 알림(최종 편집 탭에서 쉰다, D134)."""
+REVIEW_TICK_SECONDS = 2
+"""화면 틱 하나의 주기(W-81, D141) — 상태 칸 · 작업대 · 초안 카드 · 자동 전환 · 보내기 알림이
+디스패치 하나다."""
 FINALCUT_SEND_LABEL = "Final Cut으로 보내기"
 """원본 전체를 태그 달린 타임라인 하나로 쓰고 Final Cut에 건넨다(D56) — 옛 두 단계를 대신한다."""
 FINALCUT_SEND_JOB_KIND = "finalcut_send"
@@ -1200,6 +1201,26 @@ def _tier_input(spec: TierCriterionField, value: object) -> object:
     if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"「{spec.label}」에 수를 넣으세요.")
     return float(value)
+
+
+@dataclass(frozen=True)
+class TickPart:
+    """화면 틱에 실린 처리기 하나 — 입력·출력 칸은 틱의 입출력에 차례로 이어 붙는다(W-81, D141)."""
+
+    handler: Callable[..., Any]
+    inputs: tuple[Any, ...]
+    outputs: tuple[Any, ...]
+
+
+def _tick_reply(reply: Any, count: int) -> tuple[Any, ...]:
+    """처리기 답을 출력 칸 수만큼의 묶음으로 — 칸이 없으면 빈 묶음, 하나면 그 값 하나다."""
+    if count == 0:
+        return ()
+    if count == 1:
+        return (reply,)
+    if len(reply) != count:
+        raise ValueError(f"화면 틱 처리기 답이 {len(reply)}칸이다 — 출력은 {count}칸")
+    return tuple(reply)
 
 
 def _toast(level: str, message: str) -> None:
@@ -2008,10 +2029,11 @@ class RawWorkspaceUi:
         self._glossary_status_md: gr.Markdown | None = None
         self._glossary_loaded_state: gr.State | None = None
         self._glossary_warned: set[str] = set()
-        # 1초 상태 틱 하나와 칸마다 이 세션이 마지막으로 보낸 값(D63 세션 C).
-        self._status_timer: gr.Timer | None = None
-        self._draw_timer: gr.Timer | None = None  # 2초 그리기 타이머(작업대 · 초안 카드)
-        self._toast_timer: gr.Timer | None = None  # 2초 보내기 알림 타이머
+        # 화면 틱 하나(W-81, D141)와 거기 실리는 처리기들 — 알림은 맨 앞이다
+        # (던지면 그 틱의 다른 처리기가 돌지 않아 아무것도 쓰이지 않는다).
+        self._review_timer: gr.Timer | None = None
+        self._tick_parts: list[TickPart] = []
+        self._toast_part: TickPart | None = None
         self._review_tab_item: gr.Tab | None = None
         # 「최종 편집」 탭(W-66, D117) — 초안 렌더가 끝나면 이 탭으로 넘어온다.
         self._final_edit = FinalEditPanel(
@@ -4781,7 +4803,9 @@ class RawWorkspaceUi:
         glossary_loaded: list[str] | None,
         *sent: Any,
     ) -> tuple[Any, ...]:
-        """1초 틱 하나(W-23 세션 C, D63) — 옛 1초 타이머 일곱의 처리기를 틱마다 모두 부른다.
+        """상태 틱(W-23 세션 C, D63) — 옛 1초 타이머 일곱의 처리기를 틱마다 모두 부른다.
+
+        W-81(D141)부터는 2초 화면 틱 하나에 실린다.
 
         부수 효과(끝난 승인 작업·지난 알림 걷기, 용어집 경고 한 번)와 주기는 예전 그대로다. 쓰지
         않는 틱이라 읽기는 한 범위 안에서 한 번이다. 범위·교차 확인·용어집 칸은 옛 처리기가 그 탭의
@@ -4807,18 +4831,16 @@ class RawWorkspaceUi:
         event.then(self.forget_sent_view, None, targets, queue=False, show_progress="hidden")
 
     def _wire_status_tick(self) -> None:
-        """1초 상태 틱의 입출력 — 칸이 모두 지어진 뒤(용어집은 서랍에 산다) 옛 일곱을 잇는다."""
-        assert self._status_timer is not None and self._glossary_box is not None
+        """상태 틱의 입출력 — 칸이 모두 지어진 뒤(용어집은 서랍에 산다) 화면 틱에 싣는다(D141)."""
+        assert self._review_timer is not None and self._glossary_box is not None
         assert self._glossary_status_md is not None and self._glossary_loaded_state is not None
         shown = [self._approval_mode_radio, self._cross_check_box, self._glossary_box]
         glossary = [self._glossary_status_md, self._glossary_loaded_state]
         cells = [self._library_approve_button, self._capcut_progress_md, self._usage_md]
-        self._status_timer.tick(
+        self._add_tick_part(
             self.status_tick,
             [self._signature_state, *shown, self._glossary_loaded_state, *self._status_sent],
             [*shown, *glossary, *cells, *self._status_sent],
-            queue=False,
-            show_progress="hidden",
         )
 
     def _report_activity(self, event: Any, reply: Any) -> None:
@@ -4877,7 +4899,7 @@ class RawWorkspaceUi:
         """
         assert self._export_card_html is not None and self._export_open_button is not None
         assert self._export_srt_again_button is not None
-        assert self._draw_timer is not None  # `_wire_review_timers`가 먼저 만든다
+        assert self._review_timer is not None  # `_wire_review_timers`가 먼저 만든다
         status = self._capcut_status
         shown = gr.State(None)
         again = self._export_srt_again_button
@@ -4910,13 +4932,7 @@ class RawWorkspaceUi:
             concurrency_limit=1,
         )
         self._report_activity(exported, status)
-        self._draw_timer.tick(
-            self.render_export_card_tick,
-            [self._signature_state, shown],
-            card,
-            queue=False,
-            show_progress="hidden",
-        )
+        self._add_tick_part(self.render_export_card_tick, [self._signature_state, shown], card)
 
     def _srt_english_cell(self) -> None:
         """「영어 SRT로 변환」(W-63, D114) — 경로 · 고르기(선택 창이 있을 때만) · 변환 · 결과 줄.
@@ -5139,27 +5155,51 @@ class RawWorkspaceUi:
         self._forget_sent_after(chosen, "progress")
 
     def _wire_review_timers(self, outputs: list[Any]) -> None:
-        """1·2초 타이머 — 1초는 상태 틱 하나(승인 단추 · 상태 줄 · 실사용 원천 · 범위 칸 ·
-        교차 확인 칸 · 용어집, 배선은 `_wire_status_tick`), 2초는 작업대 다시 그리기와 보내기 알림.
+        """화면 틱 하나(W-81, D141) — 처리기는 그대로이고 한 타이머의 한 의존에 차례로 실린다.
 
-        옛 1초 타이머 일곱은 탭 하나가 초마다 서버를 일곱 번 불렀다(D63 세션 C).
+        상태 틱(승인 단추 · 상태 줄 · 실사용 원천 · 범위 칸 · 교차 확인 칸 · 용어집,
+        `_wire_status_tick`) · 작업대 다시 그리기 · 초안 결과 카드 · 최종 편집 자동 전환 · 보내기
+        알림. 옛 배선(1초 하나 + 2초 둘에 의존 다섯)은 2초에 디스패치 여섯이었고, 그라디오가
+        디스패치마다 모든 칸의 진행 상태를 두 번 다시 매겨 주 스레드를 33–53 ms씩 막았다 — 이제
+        2초에 하나다. 의존은 대기열을 지난다(알림은 대기열에서만 뜬다).
         """
-        self._status_timer = gr.Timer(1)
+        self._review_timer = gr.Timer(REVIEW_TICK_SECONDS)
         self._status_sent = tuple(gr.State(None) for _cell in STATUS_SENT_CELLS)
         drawn = gr.State(None)  # 이 탭이 마지막으로 그린 열쇠(D64)
-        # 2초 그리기 타이머 — 초안 결과 카드(W-46a)도 이 타이머에 붙는다(타이머를 늘리지 않는다).
-        self._draw_timer = gr.Timer(2)
-        self._draw_timer.tick(
-            self.capcut_tick_view,
-            [self._signature_state, drawn],
-            [*outputs, drawn],
-            show_progress="hidden",
+        self._add_tick_part(
+            self.capcut_tick_view, [self._signature_state, drawn], [*outputs, drawn]
         )
-        # 보내기는 뒤에서 끝난다 — 끝난 결과를 알림으로 한 번(알림은 대기열을 지나야 뜬다).
-        self._toast_timer = gr.Timer(2)
-        self._toast_timer.tick(
-            self.finalcut_toast_view, self._signature_state, None, show_progress="hidden"
-        )
+        # 보내기는 뒤에서 끝난다 — 끝난 결과를 알림으로 한 번. 실패는 오류로 던지므로 맨 앞에 둔다.
+        self._toast_part = TickPart(self.finalcut_toast_view, (self._signature_state,), ())
+
+    def _add_tick_part(
+        self, handler: Callable[..., Any], inputs: list[Any], outputs: list[Any]
+    ) -> None:
+        """화면 틱에 처리기 하나를 싣는다 — 의존은 배선이 다 끝난 뒤 `_wire_review_tick`이 단다."""
+        self._tick_parts.append(TickPart(handler, tuple(inputs), tuple(outputs)))
+
+    def _wire_review_tick(self) -> None:
+        """실린 처리기들을 화면 틱의 의존 하나로 — 입출력은 처리기 차례대로 이어 붙인다."""
+        assert self._review_timer is not None and self._toast_part is not None
+        self._tick_parts.insert(0, self._toast_part)
+        inputs = [block for part in self._tick_parts for block in part.inputs]
+        outputs = [block for part in self._tick_parts for block in part.outputs]
+        self._review_timer.tick(self.review_tick, inputs, outputs, show_progress="hidden")
+
+    def review_tick(self, *values: Any) -> tuple[Any, ...]:
+        """화면 틱 한 번 — 처리기마다 제 입력 몫을 넘기고 답을 출력 차례대로 잇는다(W-81, D141).
+
+        처리기는 옛 타이머와 같은 것을 같은 인자로 받는다 — 건너뛰기·기억·부수 효과가 그대로다.
+        알림(맨 앞)이 오류를 던지면 다른 처리기는 돌지 않는다 — 한 번만 내는 답(정리 고리 안내 등)이
+        쓰이지 않은 채 남고 칸마다의 기억도 그대로라, 다음 틱이 모두 다시 한다.
+        """
+        replies: list[Any] = []
+        at = 0
+        for part in self._tick_parts:
+            reply = part.handler(*values[at : at + len(part.inputs)])
+            at += len(part.inputs)
+            replies.extend(_tick_reply(reply, len(part.outputs)))
+        return tuple(replies)
 
     def _settings_drawer(self) -> tuple[gr.Button, gr.Button, gr.Dropdown, gr.Button]:
         """오른쪽 서랍 — 분석 모델 · 복원 · 고급 도구. 무대 위에 겹칠 뿐 무대를 밀지 않는다."""
@@ -5188,7 +5228,7 @@ class RawWorkspaceUi:
                 advanced = self._review_advanced_tab()
             self._package_tab()
         self._wire_library_approval()
-        self._wire_status_tick()  # 용어집 칸까지 지어진 뒤 — 1초 틱의 칸이 다 있다
+        self._wire_status_tick()  # 용어집 칸까지 지어진 뒤 — 상태 틱의 칸이 다 있다
         return advanced
 
     def _tier_criteria_panel(self) -> None:
@@ -11534,8 +11574,9 @@ class RawWorkspaceUi:
                 closed,
             )
             self._wire_model_refresh(switched)
-            assert self._draw_timer is not None and self._render_export_started is not None
-            self._final_edit.wire(tabs, self._draw_timer, self._render_export_started, switched)
+            assert self._render_export_started is not None
+            self._final_edit.wire(tabs, self._add_tick_part, self._render_export_started, switched)
+            self._wire_review_tick()
             self._wire_timer_rest()
             status = self._capcut_status
             sent = self._timeline_cell.wire(tabs, status, switched, ui_facade.EXPORT_WAKE_JS)
@@ -11549,28 +11590,29 @@ class RawWorkspaceUi:
         self._timeline_player.build()
 
     def _wire_timer_rest(self) -> None:
-        """최종 편집 탭이 앞이면 1·2초 타이머 셋을 멈추고 「영상 정리」로 오면 켠다(W-75, D134).
+        """최종 편집 탭이 앞이면 화면 틱을 멈추고 「영상 정리」로 오면 켠다(W-75, D134).
 
-        타이머 한 번의 `dispatch('tick')`이 브라우저 주 스레드를 약 260 ms 막아(구성요소 370여 개)
-        2초에 1.3초를 먹었다 — 타임라인 확대·끌기·재생이 최대 0.5초 늦었다. 탭의 `select`는 누름·
+        타이머 디스패치마다 그라디오가 모든 칸의 진행 상태를 다시 매겨 주 스레드를 막았다 — 타임라인
+        확대·끌기·재생이 늦었다. W-81(D141)부터 타이머는 화면 틱 하나다. 탭의 `select`는 누름·
         프로그램 전환(자동 전환·「최종 편집 열기」)·로드에서 뜬다(그라디오 6.30 실측). 멈춘 동안
         머리줄 상태 칸은 그대로 있고 활동 띠(`/vl-activity`)는 계속 돈다."""
-        timers = [self._status_timer, self._draw_timer, self._toast_timer]
-        assert self._review_tab_item is not None and None not in timers
+        assert self._review_tab_item is not None and self._review_timer is not None
         gates = (
             (self._review_tab_item, self.timers_resume),
             (self._final_edit.tab, self.timers_rest),
         )
         for tab, gate in gates:
-            tab.select(gate, None, timers, queue=False, show_progress="hidden")
+            tab.select(gate, None, self._review_timer, queue=False, show_progress="hidden")
 
     @staticmethod
-    def timers_rest() -> tuple[gr.Timer, ...]:
-        return tuple(gr.Timer(active=False) for _ in range(TIMER_COUNT))
+    def timers_rest() -> gr.Timer:
+        """화면 틱을 멈춘다 — 출력이 하나라 묶음이 아니라 갱신 하나다(묶음이면 그 묶음이 값이 되어
+        주기가 NaN이 되고 브라우저가 4 ms마다 틱을 쏜다, W-81 실측)."""
+        return gr.Timer(active=False)
 
     @staticmethod
-    def timers_resume() -> tuple[gr.Timer, ...]:
-        return tuple(gr.Timer(active=True) for _ in range(TIMER_COUNT))
+    def timers_resume() -> gr.Timer:
+        return gr.Timer(active=True)
 
     def _wire_folder_import(self, view_outputs: list[object]) -> tuple[Any, ...]:
         """「폴더 불러오기」 배선(W-46a) — 경로 칸 Enter · 「이 폴더 불러오기」 · 「찾아보기」.

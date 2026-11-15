@@ -27,6 +27,7 @@ pytest.importorskip(
 
 import gradio as gr  # noqa: E402
 
+from tests.raw.review_tick_parts import tick_part  # noqa: E402
 from tests.raw.test_background_library import setup_library  # noqa: E402
 from tests.raw.test_relisten import approve, pre_19b_digest, stage  # noqa: E402
 from tests.raw.test_selection_analysis import wait_until  # noqa: E402
@@ -289,9 +290,12 @@ def test_blocks_put_the_approval_mode_in_the_approval_cell_and_wire_it(
     # 칸의 값을 맞추는 것은 둘 — 화면을 열 때(그때의 작업공간 값)와 1초 틱. 틱은 그 탭의 칸
     # 값을 입력으로 받아 저장값과 다를 때만 보낸다(탭마다 따로 — 검증 지적 1). 틱은 1초 상태 틱
     # 하나다(D63 세션 C) — 범위 칸은 그 틱의 첫 칸이다.
+    # 상태 틱은 화면 틱 하나에 실린 처리기다(W-81, D141) — 그 몫의 입력이 예전 의존 그대로다.
     refresh = {d["targets"][0][1]: d for d in deps if radio._id in d["outputs"]}
     assert sorted(refresh) == ["load", "tick"]
-    assert refresh["tick"]["inputs"][:2] == [ui._signature_state._id, radio._id]
+    status = tick_part(app, ui, ui.status_tick)
+    assert refresh["tick"] == status.dep
+    assert status.inputs[:2] == [ui._signature_state._id, radio._id]
     # 승인 클릭은 서명만 보낸다 — 견적 문구가 없다(D110).
     buttons = {b.value: b for b in app.blocks.values() if isinstance(b, gr.Button)}
     (approve_dep,) = [
