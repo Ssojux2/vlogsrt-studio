@@ -1006,11 +1006,14 @@ def run_analysis(
     store.update_revision(revision.revision_id, status="analyzing", error=None)
     done = 0
     try:
+        context.check_cancel()
+        # 선택 밖 원본은 보존만 표시한다 — 트랜잭션 하나 · 원본 목록 읽기 하나로(D156).
+        unselected = [entry for entry in ordered if entry.asset_id not in assets]
+        _record_unanalyzed_rows(store, revision, _unanalyzed_rows(workspace, unselected))
         for entry in ordered:
             context.check_cancel()
             asset = assets.get(entry.asset_id)
             if asset is None:
-                _record_unanalyzed(store, revision, workspace, entry.asset_id, entry.ordinal)
                 context.advance()
                 continue
             _analyze_one(
@@ -1054,22 +1057,49 @@ def run_analysis(
     )
 
 
-def _record_unanalyzed(
-    store: AnalysisStore,
-    revision: AnalysisRevision,
-    workspace: RawWorkspace,
-    asset_id: str,
-    source_order: int,
+def _unanalyzed_rows(workspace: RawWorkspace, entries: Sequence[Any]) -> list[tuple[str, int, str]]:
+    """선택 밖 원본의 (아이디, 순번, 이름) — 이름은 원본 목록 한 번에서 찾는다. 목록에 없으면
+    예전처럼 원본 하나를 물어 「없는 자산 ID」로 실패한다."""
+    if not entries:
+        return []
+    by_id = {asset.asset_id: asset for asset in workspace.list_source_assets()}
+    rows = []
+    for entry in entries:
+        asset = by_id.get(entry.asset_id) or workspace.source_asset(entry.asset_id)
+        rows.append((entry.asset_id, entry.ordinal, asset.source_name))
+    return rows
+
+
+def _record_unanalyzed_rows(
+    store: AnalysisStore, revision: AnalysisRevision, rows: Sequence[tuple[str, int, str]]
 ) -> None:
-    """선택에 들지 않은 원본 — 분석 없이 보존만 표시한다(순서는 항상 전부 산다)."""
-    _upsert(
-        store,
-        revision,
-        asset_id=asset_id,
-        source_order=source_order,
-        source_name=workspace.source_asset(asset_id).source_name,
-        fingerprint="-",
-        status="unanalyzed",
+    """선택에 들지 않은 원본 — 분석 없이 보존만 표시한다(순서는 항상 전부 산다).
+
+    한 트랜잭션으로 쓴다 — 예전에는 원본마다 연결 · 트랜잭션 · 다시 읽기였다(일괄 승인이면
+    라이브러리 크기의 제곱, D156)."""
+    now = _now()
+    store.upsert_source_results(
+        [
+            AnalysisSourceResult(
+                revision_id=revision.revision_id,
+                asset_id=asset_id,
+                source_order=source_order,
+                source_name=source_name,
+                fingerprint="-",
+                status="unanalyzed",
+                speech_status=None,
+                execution_mode=None,
+                document_path=None,
+                record_path=None,
+                window_count=0,
+                segment_count=0,
+                cached_from=None,
+                error=None,
+                created_at=now,
+                updated_at=now,
+            )
+            for asset_id, source_order, source_name in rows
+        ]
     )
 
 
