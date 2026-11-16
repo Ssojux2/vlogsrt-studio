@@ -1897,9 +1897,8 @@ WORKBENCH_CSS = (
    높이를 갖고, 덱은 그 아래 제 높이로 선다(문서가 스크롤한다). 없으면 예전 화면 그대로다. */
 #vl-timeline-deck { grid-area: deck; min-width: 0; flex-wrap: nowrap; }
 #visual-stage:has(#vl-timeline-deck .tl-root:not(.tl-empty)) {
-  height: auto; grid-template-rows: auto auto auto auto auto var(--vl-statusline-h); }
-#visual-stage:has(#vl-timeline-deck .tl-root:not(.tl-empty)) #visual-preview video {
-  flex: none; height: var(--vl-deck-viewer-h); }
+  height: auto; grid-template-rows: auto auto auto auto auto var(--vl-statusline-h);
+  --vl-viewer-video-h: var(--vl-deck-viewer-h); --vl-viewer-video-flex: none; }
 /* 넓은 브라우저 열은 Final Cut 필름스트립처럼 카드를 여러 열로 늘어놓는다. */
 #visual-stage .vl-cards {
   grid-template-columns: repeat(auto-fill, minmax(var(--vl-browser-card-min), 1fr)); }
@@ -2029,8 +2028,10 @@ WORKBENCH_CSS = (
   display: flex; flex-direction: column; }
 .vl-video-surface { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
 /* 영상은 두 테마 모두 어두운 우물 위에 놓인다 — 밝은 바탕에 영상을 띄우지 않는다. */
+/* 높이·늘기는 무대 변수 — 아래 덱이 차 있으면 토큰 높이(W-85). 선언은 여기 한 번이다(D50). */
 #visual-preview video {
-  width: 100%; height: auto; flex: 1 1 auto; min-height: 0;
+  width: 100%; height: var(--vl-viewer-video-h, auto); flex: var(--vl-viewer-video-flex, 1 1 auto);
+  min-height: 0;
   background: var(--vl-video-well); object-fit: contain; }
 .vl-current-caption, #visual-note { flex: none; }
 #visual-note, .vl-footnote { overflow-wrap: anywhere; }
