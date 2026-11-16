@@ -696,6 +696,9 @@ def test_publish_failure_is_reported_not_raised(
 
 @pytest.fixture()
 def engine() -> ModuleType:
+    if os.name != "posix":
+        # 개발 엔진(`macos/scripts/`)은 POSIX 전용이다 — `fcntl` 잠금(W-84a).
+        pytest.skip("POSIX 전용 개발 엔진(macos/scripts)")
     saved = {
         name: os.environ.get(name) for name in (_JOB_DIR_ENV, _JOB_ID_ENV, _ENGINE_INVOCATION_ENV)
     }
