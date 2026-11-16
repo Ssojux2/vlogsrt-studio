@@ -339,6 +339,9 @@ class ReviewMediaSettings:
         "h264_videotoolbox", "h264_nvenc", "h264_qsv", "h264_amf", "libx264",
     )  # fmt: skip
     preview_hardware_bits_per_pixel: Fraction = Fraction(1, 10)
+    preview_hardware_decode: bool = True
+    """macOS면 원본을 VideoToolbox로 디코드한다(P-3, D157) — 실패한 꼴은 그 실행 동안
+    소프트웨어로."""
     preview_timeout_floor_seconds: float = 1800.0
     preview_timeout_media_ratio: float = 6.0
     process_niceness: int = 10

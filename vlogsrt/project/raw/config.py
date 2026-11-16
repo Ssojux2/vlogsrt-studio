@@ -1738,6 +1738,9 @@ class RenderSettings:
     track_timescale_min: int = 10_000
     timeout_floor_seconds: float = 1800.0
     timeout_media_ratio: float = 6.0
+    hardware_decode: bool = True
+    """macOS면 원본 조각을 VideoToolbox로 디코드한다(P-3, D157) — 실패하면 그 조각을 소프트웨어로
+    한 번 더 하고 그 꼴은 그 실행 동안 소프트웨어로. 검증(프레임 수 · 격자)은 그대로다."""
     priority: int = 10
     piece_max_seconds: Fraction = Fraction(30)
 

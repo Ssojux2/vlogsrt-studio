@@ -4620,6 +4620,9 @@ class PreviewEncoding:
     threads: int | None = None
     """libx264의 `-threads` — 로컬 미디어 자리 몫(`LocalMediaConcurrency.encode_threads`). 없으면
     ffmpeg가 정한다(예전 그대로). 하드웨어 인코더에는 싣지 않는다."""
+    hardware_decode: bool = False
+    """참이면 macOS에서 원본을 VideoToolbox로 디코드한다(P-3, D157) — 실패하면 소프트웨어로
+    한 번 더."""
 
     def tag(self, video_codec: str = _SOFTWARE_H264, bitrate: int | None = None) -> str:
         """기록에 남기는 이름 — 이 미리보기를 무엇으로 만들었는가(캐시 열쇠가 아니다).
@@ -4952,9 +4955,11 @@ def _visual_preview_command(
     probe: RawMediaProbe,
     track: RawAudioTrack | None,
     codec_args: Sequence[str],
+    decode_args: Sequence[str] = (),
 ) -> list[str]:
     command = [
         require_ffmpeg(), "-hide_banner", "-nostdin", "-y",
+        *decode_args,
         "-i", str(source),
         "-map", f"0:{probe.video.stream_index}",
     ]  # fmt: skip
@@ -4988,16 +4993,37 @@ def _encode_visual_preview(
     인코더 확인(`encoder_works`)은 작은 lavfi 입력이라 실제 원본(크기·화소 형식)에서 세션을 못 여는
     하드웨어가 있다. 시간 한도(`ProcessTimeout`)·취소는 다시 하지 않는다 — 그대로 올라간다.
     """
-    command = _visual_preview_command(source, staged, probe, track, codec_args)
+    copying = _video_codec_of(codec_args) == "copy"
+    decode = hardware_decode_args(
+        encoding is not None and encoding.hardware_decode and not copying, probe.video
+    )
     try:
-        _run_niced(command, priority, timeout=timeout_seconds)
+        _run_niced(
+            _visual_preview_command(source, staged, probe, track, codec_args, decode),
+            priority,
+            timeout=timeout_seconds,
+        )
         return codec_args
     except ProcessTimeout:
         raise
     except RuntimeError as error:
-        if encoding is None or _video_codec_of(codec_args) in ("copy", _SOFTWARE_H264):
+        failure: RuntimeError = error
+    if decode:
+        remember_hardware_decode_failure(probe.video, failure)
+        try:
+            _run_niced(
+                _visual_preview_command(source, staged, probe, track, codec_args),
+                priority,
+                timeout=timeout_seconds,
+            )
+            return codec_args
+        except ProcessTimeout:
             raise
-        log.warn(f"하드웨어 인코더로 미리보기를 만들지 못해 libx264로 다시 만든다: {error}")
+        except RuntimeError as error:
+            failure = error
+    if encoding is None or _video_codec_of(codec_args) in ("copy", _SOFTWARE_H264):
+        raise failure
+    log.warn(f"하드웨어 인코더로 미리보기를 만들지 못해 libx264로 다시 만든다: {failure}")
     software = replace(encoding, video_codecs=(_SOFTWARE_H264,))
     retry_args, _, _ = _visual_preview_args(probe, track, software)
     _run_niced(
@@ -5319,6 +5345,9 @@ class RenderEncoding:
     threads: int | None = None
     """libx264의 `-threads` — 로컬 미디어 자리 몫(W-45). 없으면 ffmpeg가 정한다. 모든 조각이 같은
     값이라 이어붙이기(`-c copy`)는 그대로다. 하드웨어 인코더에는 싣지 않는다."""
+    hardware_decode: bool = False
+    """참이면 macOS에서 원본을 VideoToolbox로 디코드한다(P-3, D157) — 실패하면 소프트웨어로
+    한 번 더."""
 
     def timeout(self, seconds: Fraction) -> float:
         """조각·이어붙이기 한 번의 한도 — `max(바닥, 배율 × 길이)`(D59와 같은 꼴)."""
@@ -5375,6 +5404,53 @@ def encoder_works(name: str, executable: str | None = None) -> bool:
         log.debug(f"인코더 {name}이(가) 돌지 않는다 — 다음 후보로 간다: {error}")
         return False
     return True
+
+
+# ── 하드웨어 디코드(P-3, D157) ─────────────────────────────────────
+# 미리보기 · 초안 렌더의 원본 디코드만 VideoToolbox로 한다(macOS, 그 ffmpeg가 들고 있을 때).
+# 바이트가 요청 신원인 분석 프록시 · 클립 · 썸네일에는 쓰지 않는다(D-4). 실패한
+# (코덱, 화소 형식, 크기)는 이 프로세스 동안 기억해 다음부터 소프트웨어로 바로 간다 —
+# 매번 실패를 기다리지 않는다.
+HARDWARE_DECODER = "videotoolbox"
+_HW_DECODE_FAILED: set[tuple[str, str, int, int]] = set()
+_HW_DECODE_LOCK = threading.Lock()
+
+
+@functools.cache
+def available_hwaccels(executable: str) -> frozenset[str]:
+    """그 ffmpeg의 하드웨어 가속 이름(`-hwaccels`) — 실행 파일마다 한 번 묻는다."""
+    listing = _run([executable, "-hide_banner", "-hwaccels"]).stdout
+    return frozenset(line.strip() for line in listing.splitlines()[1:] if line.strip())
+
+
+def _decode_key(video: RawVideoMedia) -> tuple[str, str, int, int]:
+    return (video.codec_name, video.pix_fmt or "", video.width, video.height)
+
+
+def hardware_decode_args(enabled: bool, video: RawVideoMedia) -> list[str]:
+    """원본 입력 앞에 붙일 `-hwaccel` — 켜졌고 macOS이고 그 ffmpeg에 있고 이 꼴이 실패한 적
+    없을 때만."""
+    if not enabled or sys.platform != "darwin":
+        return []
+    with _HW_DECODE_LOCK:
+        if _decode_key(video) in _HW_DECODE_FAILED:
+            return []
+    try:
+        if HARDWARE_DECODER not in available_hwaccels(require_ffmpeg()):
+            return []
+    except RuntimeError:
+        return []
+    return ["-hwaccel", HARDWARE_DECODER]
+
+
+def remember_hardware_decode_failure(video: RawVideoMedia, error: BaseException) -> None:
+    """이 꼴은 다음부터 소프트웨어로 — 실패는 경고로 남기고 감추지 않는다."""
+    with _HW_DECODE_LOCK:
+        _HW_DECODE_FAILED.add(_decode_key(video))
+    log.warn(
+        f"하드웨어 디코드({HARDWARE_DECODER})가 {video.codec_name} {video.width}x{video.height}에서"
+        f" 실패해 소프트웨어 디코드로 다시 한다(이 꼴은 이번 실행 동안 바로 소프트웨어): {error}"
+    )
 
 
 def pick_video_encoder(preferences: Sequence[str], executable: str | None = None) -> str:
@@ -5476,6 +5552,7 @@ def _render_part_command(
     part: RenderPartSpec,
     target: RenderTarget,
     encoding: RenderEncoding,
+    decode_args: Sequence[str] = (),
 ) -> list[str]:
     seconds = part.output_frames * target.frame_duration
     audio_inputs, audio_label = _render_audio_input(source, plan, seconds, encoding)
@@ -5493,6 +5570,7 @@ def _render_part_command(
         "-seek_timestamp", "1",
         "-ss", _format_us(plan.seek, ceil=False),
         "-t", _format_us(plan.out_duration, ceil=True),
+        *decode_args,
         "-i", str(source),
         *audio_inputs,
         "-filter_complex", graph,
@@ -5544,18 +5622,43 @@ def render_part(
     output = staging_dir / f"part{part.index:05d}.{_RENDER_PART_CONTAINER}"
     _assert_safe_staging(source, output)
     staged = _reserve_staging_temp(output)
-    seconds = part.output_frames * target.frame_duration
+    decode = hardware_decode_args(encoding.hardware_decode, media_probe.video)
     try:
-        command = _render_part_command(source, staged, media_probe, plan, part, target, encoding)
-        _run(
-            command, timeout=encoding.timeout(seconds), priority=encoding.priority, on_poll=on_poll
-        )
-        _verify_render_part(staged, part, target, encoding)
+        try:
+            _render_part_once(
+                source, staged, media_probe, plan, part, target, encoding, decode, on_poll
+            )
+        except ProcessTimeout:
+            raise
+        except RuntimeError as error:  # 실패 · 검증 실패(RenderVerificationError)
+            if not decode:
+                raise
+            remember_hardware_decode_failure(media_probe.video, error)
+            _render_part_once(
+                source, staged, media_probe, plan, part, target, encoding, (), on_poll
+            )
     except BaseException:
         staged.unlink(missing_ok=True)
         raise
     _publish_staged_clip(staged, output)
     return output
+
+
+def _render_part_once(
+    source: Path,
+    staged: Path,
+    probe: RawMediaProbe,
+    plan: _RawMediaPlan,
+    part: RenderPartSpec,
+    target: RenderTarget,
+    encoding: RenderEncoding,
+    decode: Sequence[str],
+    on_poll: Callable[[], None] | None,
+) -> None:
+    seconds = part.output_frames * target.frame_duration
+    command = _render_part_command(source, staged, probe, plan, part, target, encoding, decode)
+    _run(command, timeout=encoding.timeout(seconds), priority=encoding.priority, on_poll=on_poll)
+    _verify_render_part(staged, part, target, encoding)
 
 
 def _render_part_plan(

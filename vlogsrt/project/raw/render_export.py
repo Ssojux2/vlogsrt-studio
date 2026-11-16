@@ -434,6 +434,7 @@ def _encoding(settings: RenderSettings, codec: str) -> preprocess.RenderEncoding
         priority=settings.priority,
         # CPU 인코드는 로컬 미디어 자리 몫의 스레드만(W-45, D100 §6) — 조각 일꾼이 그 자리를 다툰다.
         threads=FOLDER_WORKSPACE.local_media.encode_threads(os.cpu_count()),
+        hardware_decode=settings.hardware_decode,
     )
 
 

@@ -2268,6 +2268,7 @@ def _preview_encoding(video: preprocess.RawVideoMedia) -> preprocess.PreviewEnco
         video_codecs=REVIEW_MEDIA.preview_video_codecs,
         hardware_bits_per_pixel=REVIEW_MEDIA.preview_hardware_bits_per_pixel,
         threads=FOLDER_WORKSPACE.local_media.encode_threads(os.cpu_count()),
+        hardware_decode=REVIEW_MEDIA.preview_hardware_decode,
     )
 
 
