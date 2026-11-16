@@ -42,7 +42,9 @@ def test_runs_the_same_checks_as_make() -> None:
 def test_installs_ffmpeg_and_node_everywhere() -> None:
     text = _text()
     for system in ("macOS", "Windows", "Linux"):
-        assert re.search(rf"if: runner.os == '{system}'\n\s+run: .*ffmpeg", text), system
+        # 그 운영체제의 단계(한 줄 `run:`이든 여러 줄 `run: |`이든)가 ffmpeg를 깐다.
+        steps = re.findall(rf"if: runner.os == '{system}'\n(.*?)(?=\n\s+- name:|\Z)", text, re.S)
+        assert any("ffmpeg" in step for step in steps), system
     assert "actions/setup-node" in text
 
 
