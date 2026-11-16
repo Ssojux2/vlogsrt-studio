@@ -41,7 +41,7 @@ from fastapi.responses import (  # noqa: E402
     StreamingResponse,
 )
 
-from ui import activity_log, design_tokens, os_open, timer_lease_js, ui_facade  # noqa: E402
+from ui import activity_log, design_tokens, os_open, timer_lease_js, ui_facade, window_js  # noqa: E402
 from ui import chooser as ui_chooser  # noqa: E402
 from ui.burn_cell import BURN_JOB_LABEL, BurnCell  # noqa: E402
 from ui.final_edit_ui import (  # noqa: E402
@@ -931,6 +931,7 @@ CSS = (
     + ui_facade.WORKBENCH_CSS
     + FINAL_EDIT_CSS
     + TIMELINE_PLAYER_CSS
+    + window_js.window_css()
 )
 """마운트에 싣는 전체 CSS — 글꼴 · 토큰(밝은·어두운) · 바탕 · 작업대 순서."""
 
@@ -11592,7 +11593,9 @@ class RawWorkspaceUi:
     def _timeline_header(self) -> None:
         """아래 덱 — 원본 범위 타임라인 요약(W-71b)과 그 재생기(W-71c), 그리고 화면 틱 임대의 숨은
         단추 둘(W-85, D145). 임대 실행본은 요약 칸이 싣는다(새 구성요소를 늘리지 않는다)."""
-        self._timeline_cell.build_summary(js_on_load=timer_lease_js.lease_bind_js())
+        self._timeline_cell.build_summary(
+            js_on_load=timer_lease_js.lease_bind_js() + window_js.window_bind_js()
+        )
         self._timeline_player.build()
         self._timers_rest_button = gr.Button(
             visible="hidden", elem_id=timer_lease_js.REST_BUTTON_ID

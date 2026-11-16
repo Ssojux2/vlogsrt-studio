@@ -55,7 +55,11 @@ PLAYER_APP_JS = r"""
     S.rootEl = got.rootEl;
     S.epoch = m.epoch;
     S.pollGen += 1;
-    if (m.empty) { S.doc = null; S.timelineId = null; return; }
+    if (m.empty) {
+      S.doc = null; S.timelineId = null;
+      if (W.__vlWindow && W.__vlWindow.releaseProgram) { W.__vlWindow.releaseProgram(); }
+      return;
+    }
     S.signature = m.signature;
     S.token = m.token;
     S.timelineId = m.timelineId;
@@ -77,6 +81,8 @@ PLAYER_APP_JS = r"""
       S.cue = null;
     }
     bindDom();
+    // 뷰어 하나(W-86b) — 화면(.tl-stage)을 위 덱 뷰어 칸으로 옮긴다(노드째, 청취자 그대로).
+    if (W.__vlWindow && W.__vlWindow.adoptProgram) { W.__vlWindow.adoptProgram(S.rootEl); }
     showDeck();
     seek(S.playhead);
     if (anyPreparing()) { poll(S.pollGen); }
