@@ -506,7 +506,8 @@ def _render_one(
     staging: Path,
 ) -> Path:
     try:
-        with media_refs.local_media_slot():
+        # 사람이 결과를 기다리는 일이다 — 배경 프록시보다 먼저 자리를 얻는다(D140).
+        with media_refs.local_media_slot(urgent=True):
             return preprocess.render_part(
                 item.path, piece.spec, target, encoding, staging,
                 probe=item.probe, clock=item.clock, audio_extents=item.audio,
