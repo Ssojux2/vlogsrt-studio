@@ -191,6 +191,8 @@ Final Cut 전체 타임라인(D44·D45·D56). 플러그인은 제거됐다. 계�
 | W-78 | 분석 프록시 검증의 프록시 쪽 표본을 ffmpeg 하나로(D136의 다음 후보, D137) — `preprocess.correspondence_frames`(여러 입력 + `concat`, 장 수가 다르면 실패) · 프록시 쪽 35점(같은 점 5 + 이동 30)만 묶고 원본 쪽 5점은 점마다 그대로 · 실제 30개 바이트 모두 같음·판정 같음 · 실측 30개: 프록시 35점 46.4초 → 12.9초 · 불러오기 끝 204초 → 161초 · 전체 227초 → 183초 · 시험 `test_proxy_sample_batch` | ✅ 2026-11-14 |
 | W-79 | 시스템 환경 자원 예산(Phase 1) 측정(D139) — 실제 30개 불러오기를 자리 3·4·5로 견줌: 190·199·198초(끝) · CPU 94–95% — 자리 셋에서 이미 CPU가 찬다 · 지금 공식(`min(3, CPU//2)`)이 이 기계에 맞아 `system_profile`·새 조정값은 만들지 않음 · 분석 중 겹침은 유료라 사람 측정으로 남김 · 코드 변경 없음 | ✅ 2026-11-15 (분석 쪽은 사람 측정) |
 | W-80 | 렌더·번인도 급한 자리(D136이 남긴 일, D140) — `render_export._render_one`·`burn_export._encode`가 `local_media_slot(urgent=True)` · 미리 만드는 분석 프록시만 보통 자리 · 자리 수·argv·바이트 그대로 · 시험 `test_render_burn_slot` | ✅ 2026-11-15 |
+| W-81 | Gemini 429 재시도(결정 D-1, D141) — 공급자가 대기를 말한(본문 `RetryInfo` 먼저, 없으면 `Retry-After` 정수 초) 분당 한도 429만, 60초 이하면 그만큼 기다렸다 3번까지 다시 보낸다 · 하루 한도·대기 없는 429·503·시간 초과는 예전처럼 한 번 · 문(`transcribe._gemini_rate_retry`)이 의미 분석·전사 둘 다 · 시도마다 새 승인·취소 문 · 기다리는 동안 0.5초마다 취소 확인 · Claude 그대로 · 설정 `GEMINI_RATE_RETRY` · 시험 `test_gemini_rate_retry` · 사람: 다음 429 문구로 대기를 말하는지 확인 | ✅ 2026-11-16 |
+| W-82 | 의미 분석 창 병렬 전송(계획 Phase 4-1, D142) — `annotate_windows`가 조립·재사용·취소 확인은 창 차례대로, 묻기만 묶인 풀의 일꾼(`copy_context`)이 한다 · 결과는 창 차례, `on_annotations`는 이어진 접두만 · 치른 판정은 끝나는 순간 `on_settled`로 캐시에(멈출 때도 나간 창은 거둔다) · 공급자별 동시 수 `PROVIDER_CONCURRENCY`(Gemini 4 — 사용자 결정 · Claude·OpenAI 1 = 예전 직렬) · 1을 넘으면 프로세스 전체 상한(영상 셋이 나눠 쓴다) · 예약 문 잠금 · 창·요청 신원·예약·비용 그대로 · 시험 `test_semantic_window_parallel` · 사람: 다음 분석의 429 줄·2단계 시간 확인 | ✅ 2026-11-16 |
 
 ---
 

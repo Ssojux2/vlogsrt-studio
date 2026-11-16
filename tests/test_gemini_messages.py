@@ -193,6 +193,42 @@ def test_odd_quota_details_are_dropped_not_echoed(violation: object, retry_delay
     assert SECRET not in message
 
 
+def test_the_retry_after_header_is_read_when_the_body_has_no_delay() -> None:
+    """본문에 `RetryInfo`가 없으면 `Retry-After`(정수 초)를 대기 초로 싣는다(D141).
+
+    전송은 여전히 한 번이다 — 다시 보내는 것은 문(`transcribe`)이다."""
+    opener = opener_with(
+        status=429, body=_fixture_bytes("error_429.json"), headers={"Retry-After": "7"}
+    )
+    with pytest.raises(GeminiAPIStatusError) as info:
+        post_generate_content(client_with(opener), MODEL, BODY)
+    assert info.value.retry_delay_seconds == 7.0
+    assert len(opener.calls) == 1
+
+
+def test_the_body_delay_wins_over_the_retry_after_header() -> None:
+    opener = opener_with(
+        status=429,
+        body=_fixture_bytes("error_429_quota_minute.json"),
+        headers={"Retry-After": "40"},
+    )
+    with pytest.raises(GeminiAPIStatusError) as info:
+        post_generate_content(client_with(opener), MODEL, BODY)
+    assert info.value.retry_delay_seconds == 12.4
+
+
+@pytest.mark.parametrize(
+    "value", ["soon", "-1", "1e3", "7.5", "1234567", "Wed, 21 Oct 2026 07:28:00 GMT", ""]
+)
+def test_odd_retry_after_headers_are_dropped(value: str) -> None:
+    opener = opener_with(
+        status=429, body=_fixture_bytes("error_429.json"), headers={"Retry-After": value}
+    )
+    with pytest.raises(GeminiAPIStatusError) as info:
+        post_generate_content(client_with(opener), MODEL, BODY)
+    assert info.value.retry_delay_seconds is None
+
+
 def test_503_is_an_uncertain_connection_error_sent_once() -> None:
     opener = opener_with(status=503, body=_fixture_bytes("error_503.json"))
     with pytest.raises(GeminiAPIStatusError) as info:

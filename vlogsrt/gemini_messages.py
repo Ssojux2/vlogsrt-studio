@@ -11,11 +11,13 @@
 시간 엔진 Gemini 3.5 Transcribe(W-31, D92)는 Interactions에만 있다 — 그 요청은 문(`transcribe`)이
 `store: false`를 실어 보내고, 여기는 `POST /{version}/interactions` 한 번을 보낼 뿐이다.
 
-재시도·스트리밍이 없다. 429·503·시간 초과는 명시적 실패 기록이어야 조용한 지연이 되지
-않는다. 리다이렉트도 따르지 않는다 — 키를 실은 요청이 다른 호스트로 넘어가는 길을 남기지
-않는다. https만 쓴다 — base_url은 클라이언트를 만들 때와 키를 얹기 직전에 두 번 검사하고,
-opener에는 https 처리기(와 환경 프록시를 따르는 처리기)만 있다. 키는 쿼리(`?key=`)가 아니라
-`x-goog-api-key` 헤더로만 간다 — URL은 프록시·오류 문면에 남을 수 있다.
+요청 한 번을 보낼 뿐 재시도·스트리밍이 없다. 503·시간 초과는 명시적 실패 기록이어야 조용한
+지연이 되지 않는다. 공급자가 대기 시간을 말한 429만 문(`transcribe`)이 기다렸다 다시
+보낸다(D141) — 그 시도도 여기서는 새 요청 한 번이다. 리다이렉트도 따르지 않는다 — 키를 실은
+요청이 다른 호스트로 넘어가는 길을 남기지 않는다. https만 쓴다 — base_url은 클라이언트를
+만들 때와 키를 얹기 직전에 두 번 검사하고, opener에는 https 처리기(와 환경 프록시를 따르는
+처리기)만 있다. 키는 쿼리(`?key=`)가 아니라 `x-goog-api-key` 헤더로만 간다 — URL은 프록시·오류
+문면에 남을 수 있다.
 """
 
 from __future__ import annotations
@@ -56,6 +58,9 @@ QUOTA_ID_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,127}")
 QUOTA_VALUE_TOKEN = re.compile(r"[0-9]{1,12}")
 RETRY_DELAY_TOKEN = re.compile(r"[0-9]{1,6}(\.[0-9]{1,9})?s")
 """`RetryInfo.retryDelay`의 JSON 꼴(protobuf Duration — `"43s"`·`"12.4s"`)."""
+RETRY_AFTER_HEADER = "Retry-After"
+RETRY_AFTER_TOKEN = re.compile(r"[0-9]{1,6}")
+"""`Retry-After`의 정수 초 꼴(RFC 9110 delay-seconds) — 날짜 꼴은 받지 않는다(시계가 어긋난다)."""
 
 Opener = Callable[[urllib.request.Request, float], Any]
 """(요청, 시간 한도) → 응답. 시험은 가짜를 주입하고, 실제는 리다이렉트를 끈 opener다."""
@@ -70,7 +75,8 @@ class GeminiAPIStatusError(RuntimeError):
 
     429는 `QuotaFailure`의 첫 위반 한도 이름(`quota_id`)·한도 값(`quota_value`)과 `RetryInfo`의
     대기 초(`retry_delay_seconds`)를 싣는다 — 분당 한도인지 하루 한도인지 기록에 남긴다(D111).
-    재시도에는 쓰지 않는다.
+    본문에 대기가 없으면 `Retry-After` 헤더(정수 초)를 대기 초로 싣는다. 문(`transcribe`)이 이
+    칸으로 분당 한도 429만 기다렸다 다시 보낸다(D141).
     """
 
     def __init__(
@@ -226,24 +232,24 @@ def _post_json(client: GeminiClient, path: str, body: Mapping[str, object]) -> d
         method="POST",
         headers={API_KEY_HEADER: client.api_key, "content-type": "application/json"},
     )
-    status, raw = _exchange(client, request)
+    status, raw, headers = _exchange(client, request)
     if not 200 <= status < 300:
-        raise _status_error(status, raw, client)
+        raise _status_error(status, raw, client, _retry_after(headers))
     return _parsed(raw)
 
 
-def _exchange(client: GeminiClient, request: urllib.request.Request) -> tuple[int, bytes]:
-    """요청을 한 번 보내고 (상태, 본문)을 받는다 — 전송 실패는 형식이 정해진 예외다."""
+def _exchange(client: GeminiClient, request: urllib.request.Request) -> tuple[int, bytes, Any]:
+    """요청을 한 번 보내고 (상태, 본문, 헤더)를 받는다 — 전송 실패는 형식이 정해진 예외다."""
     open_request = client.opener or _default_opener
     try:
         with open_request(request, client.timeout_seconds) as response:
-            return int(response.status), response.read()
+            return int(response.status), response.read(), None  # 헤더는 오류에서만 읽는다
     except urllib.error.HTTPError as error:
         try:
             raw = error.read() if error.fp is not None else b""
         finally:
             error.close()
-        return error.code, raw
+        return error.code, raw, error.headers
     except TimeoutError as error:
         raise GeminiAPITimeoutError("Gemini API 시간 초과 — 응답 수신 불명확") from error
     except urllib.error.URLError as error:
@@ -264,8 +270,20 @@ def _parsed(raw: bytes) -> dict[str, Any]:
     return parsed
 
 
-def _status_error(status: int, raw: bytes, client: GeminiClient) -> GeminiAPIStatusError:
-    """오류 본문에서 상태·까닭·메시지만 꺼낸다 — 모양이 다르면 본문을 되뇌지 않는다."""
+def _retry_after(headers: Any) -> float | None:
+    """`Retry-After`의 정수 초 — 없거나 모양이 다르면 None."""
+    value = headers.get(RETRY_AFTER_HEADER) if headers is not None else None
+    if not isinstance(value, str) or not RETRY_AFTER_TOKEN.fullmatch(value.strip()):
+        return None
+    return float(value.strip())
+
+
+def _status_error(
+    status: int, raw: bytes, client: GeminiClient, header_delay: float | None = None
+) -> GeminiAPIStatusError:
+    """오류 본문에서 상태·까닭·메시지만 꺼낸다 — 모양이 다르면 본문을 되뇌지 않는다.
+
+    대기 초는 본문의 `RetryInfo`가 먼저고, 없으면 `Retry-After` 헤더다(D141)."""
     error_type, reason, message = UNPARSED_ERROR, "", ""
     quota_id, quota_value, delay = "", "", None
     try:
@@ -290,7 +308,7 @@ def _status_error(status: int, raw: bytes, client: GeminiClient) -> GeminiAPISta
         message,
         quota_id=quota_id,
         quota_value=quota_value,
-        retry_delay_seconds=delay,
+        retry_delay_seconds=delay if delay is not None else header_delay,
     )
 
 

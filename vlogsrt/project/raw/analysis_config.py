@@ -831,6 +831,47 @@ def validate_analysis_concurrency(settings: RawAnalysisConcurrency) -> None:
 
 
 @dataclass(frozen=True)
+class RawProviderConcurrency:
+    """의미 분석 창을 공급자에 한 번에 보내는 수 — 외부 근거 없는 조정 대상(D142).
+
+    1을 넘으면 영상 하나 안에서 그만큼 창을 함께 보내고, 그 수가 **프로세스 전체** 상한이다 —
+    영상 셋이 함께 돌아도(D49) 그 공급자에는 이만큼만 나간다. Gemini 4는 사용자가 골랐다
+    (2026-11-16). 1은 예전 그대로다 — 영상 안에서 창을 차례로 보내고 프로세스 상한을 두지
+    않는다(영상 셋이면 셋). Claude·OpenAI는 1이다. 보내는 창·요청 신원·예약 수·비용은 이 값과
+    무관하고, 결과는 창 차례로 모은다. `slot_poll_seconds`는 다른 영상이 자리를 쥔 동안 취소를
+    살피는 간격이다.
+    """
+
+    google: int = 4
+    anthropic: int = 1
+    openai: int = 1
+    slot_poll_seconds: float = 0.5
+
+    def limit(self, provider: str) -> int:
+        value = getattr(self, provider, None)
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValueError(f"동시 전송 수를 모르는 공급자다: {provider!r}")
+        return value
+
+
+PROVIDER_CONCURRENCY = RawProviderConcurrency()
+"""지금 쓰는 공급자별 창 동시 전송 수 — 주입이 없으면 이 하나를 읽는다."""
+
+
+def validate_provider_concurrency(settings: RawProviderConcurrency) -> None:
+    """값역 검사 — 개수는 1 이상 정수(bool 아님), 살피는 간격은 0보다 크다."""
+    for name in ("google", "anthropic", "openai"):
+        value = getattr(settings, name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"{name} 동시 전송 수는 1 이상 정수여야 한다: {value!r}")
+    if not settings.slot_poll_seconds > 0:
+        raise ValueError(f"자리 살피는 간격은 0보다 커야 한다: {settings.slot_poll_seconds!r}")
+
+
+validate_provider_concurrency(PROVIDER_CONCURRENCY)
+
+
+@dataclass(frozen=True)
 class WorkspaceDbSettings:
     """작업공간 DB(WAL)의 옆 파일 크기 상한과 체크포인트 대기 — 외부 근거 없는 조정 대상(D63 H).
 
