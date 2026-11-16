@@ -1643,6 +1643,57 @@ def test_concurrent_preparation_keeps_cache_consistent(
     assert probe.video.codec_name == "h264"
 
 
+@needs_ffmpeg
+def test_a_preview_published_while_waiting_for_the_slot_is_reused_not_failed(
+    service: raw_service.RawWorkspaceService,
+    workspace_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """자리를 기다리는 사이 다른 준비가 같은 키를 게시하면 그 파일을 쓴다(CI 실측 경합).
+
+    예전에는 자리를 얻기 **전**에만 파일을 봐서, 추출의 스테이징 안전장치가 「이미 있다」로
+    실패했다(macOS CI · 느린 러너에서 동시 준비 시험이 깨졌다)."""
+    from contextlib import contextmanager
+
+    from vlogsrt.project.raw import media_refs
+
+    card = tmp_path / "card"
+    card.mkdir()
+    _voiced_media(card / "발화.mp4", "3")
+    base = _review_ready(service, workspace_root, card, ONE_SECOND_TILE)
+    facade = ReviewWorkspaceFacade(workspace_root)
+    workspace = RawWorkspace.open(workspace_root)
+    first = service.submit_job(
+        workspace_root, "visual_prepare", "first", _concurrent_body(workspace, facade, base)
+    )
+    assert _wait_terminal(service, workspace_root, first.job_id).status == "succeeded"
+    (target,) = sorted((workspace_root / "previews" / "visual").glob("*.mp4"))
+    stash = tmp_path / "peer.mp4"
+    shutil.copyfile(target, stash)
+    target.unlink()
+    real_slot = media_refs.local_media_slot
+
+    @contextmanager
+    def peer_publishes(*args: Any, **kwargs: Any) -> Any:
+        with real_slot(*args, **kwargs):
+            if not target.exists():
+                shutil.copyfile(stash, target)  # 기다리는 사이 다른 준비가 게시했다
+            yield
+
+    def must_not_encode(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("이미 게시된 미리보기를 다시 만들지 않는다")
+
+    monkeypatch.setattr(media_refs, "local_media_slot", peer_publishes)
+    monkeypatch.setattr(preprocess, "extract_visual_review_preview", must_not_encode)
+    second = service.submit_job(
+        workspace_root, "visual_prepare", "second", _concurrent_body(workspace, facade, base)
+    )
+    record = _wait_terminal(service, workspace_root, second.job_id)
+    assert record.status == "succeeded", record.error
+    assert target.is_file() and target.read_bytes() == stash.read_bytes()
+
+
 def _preview_record(
     workspace: RawWorkspace, key: str, state: str, built_at: str, *, with_file: bool
 ) -> None:
