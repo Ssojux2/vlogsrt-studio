@@ -1200,7 +1200,7 @@ def test_slice_refuses_to_overwrite_the_stored_pcm(tmp_path: Path) -> None:
 
     assert stored.read_bytes() == pcm_bytes
     assert alias.read_bytes() == pcm_bytes
-    assert [path.name for path in tmp_path.iterdir()] == ["ref.pcm", "alias.pcm"]
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["alias.pcm", "ref.pcm"]
 
 
 @pytest.mark.parametrize("failure", ["replace", "wave_open"])
@@ -1226,7 +1226,7 @@ def test_slice_publication_is_atomic(
             write_wav_slice(reference, SampleRange(0, 10), destination)
 
     assert destination.read_bytes() == previous
-    assert [path.name for path in tmp_path.iterdir()] == ["ref.pcm", "slice.wav"]
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["ref.pcm", "slice.wav"]
 
 
 # ─────────────────────────────────────────────────────────────

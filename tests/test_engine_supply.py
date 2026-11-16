@@ -10,8 +10,16 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import sys
 from pathlib import Path
+
+import pytest
+
+# 엔진 번들 서명 검증은 macOS `codesign`이 하는 일이다 — 다른 운영체제에는 그 도구가 없다(W-84a).
+needs_codesign = pytest.mark.skipif(
+    shutil.which("codesign") is None, reason="codesign(macOS)이 없는 환경"
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -163,6 +171,7 @@ def test_engine_manifest_carries_build_packages_ffmpeg_and_data_fields(
     )
 
 
+@needs_codesign
 def test_unsigned_embedded_macho_fails_the_verify_gate(tmp_path: Path) -> None:
     """서명 없는 내장 Mach-O는 codesign 검증에서 닫힌다 — 반쪽 번들은 못 나간다."""
     tree = _synthetic_engine(tmp_path, with_macho=True)
@@ -257,6 +266,7 @@ def test_finalize_never_returns_manifest_when_signing_fails(tmp_path, monkeypatc
     assert reached_manifest == []
 
 
+@needs_codesign
 def test_staged_bin_ffmpeg_and_ffprobe_are_signature_targets(tmp_path) -> None:
     """bin에 실린 두 바이너리는 Mach-O로 인식돼 서명·검증 대상이 된다."""
     engine = _synthetic_engine(tmp_path, with_macho=False)
