@@ -34,6 +34,10 @@ from vlogsrt.project.workflow_protocol import (
     encode_message,
 )
 
+# 개발 엔진(`macos/scripts/`)은 POSIX 전용이다 — `fcntl` 잠금 · zsh 설치 스크립트. Windows에는 그
+# 엔진이 없다(작업대는 `vlogsrt/filelock.py`의 msvcrt 길을 쓴다, W-84a).
+pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX 전용 개발 엔진(macos/scripts)")
+
 _ENGINE_SCRIPT = Path(__file__).resolve().parents[2] / "macos" / "scripts" / "vlogsrt-engine.py"
 _JOB_DIR_ENV = "VLOGSRT_ENGINE_JOB_DIR"
 
