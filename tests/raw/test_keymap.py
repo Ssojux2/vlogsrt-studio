@@ -98,8 +98,9 @@ def test_the_sheet_is_built_from_the_table_and_follows_the_platform() -> None:
 
 def test_a_frame_nudge_lands_on_the_target_frame_through_document_operations() -> None:
     """, · . (D138이 남긴 프레임 밀기) — 「시작점 설정」과 같은 규칙
-    (`TL.sourceMsAt` 프레임 시작)으로 그 프레임에 놓고, 반내림이 앞 프레임으로 돌아오면 1ms 뒤로. 이웃 · 간격은 `LN.bodyMany`가 막고,
-    옮기기는 `TL.cueShift` 하나다(규칙 3 — 고른 틱을 문서 연산에 넘길 뿐)."""
+    (`TL.sourceMsAt` 프레임 시작)으로 그 프레임에 놓고, 반내림이 앞 프레임으로 돌아오면 1ms
+    뒤로. 이웃 · 간격은 `LN.bodyMany`가 막고, 옮기기는 `TL.cueShift` 하나다(규칙 3 —
+    고른 틱을 문서 연산에 넘길 뿐)."""
     from ui.timeline_player_js import PLAYER_APP_JS
 
     body = PLAYER_APP_JS[PLAYER_APP_JS.index("function nudgeCues(frames) {") :]
