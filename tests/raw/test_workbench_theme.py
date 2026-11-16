@@ -133,9 +133,10 @@ def test_gradio_theme_is_built_from_the_tokens_with_dark_pairs() -> None:
     assert f"--body-text-color: {tokens['ink'][1]};" in dark
     assert f"--input-background-fill: {tokens['surface-raised'][1]};" in dark
     assert f"--code-background-fill: {tokens['surface-sunken'][1]};" in dark
-    for half in (light, dark):
-        assert "--button-primary-background-fill: #2f6db3;" in half  # 본점 하나, 두 테마 같다
-        assert "--checkbox-background-color-selected: #2f6db3;" in half
+    # 본점은 테마마다 하나 — 어두움은 Final Cut 보라 쪽(W-90).
+    for half, accent in ((light, tokens["accent"][0]), (dark, tokens["accent"][1])):
+        assert f"--button-primary-background-fill: {accent};" in half
+        assert f"--checkbox-background-color-selected: {accent};" in half
     # 그라디오의 --color-accent는 글자·선(선택한 탭 글자 등)이다 — accent-ink(4.5:1)로 간다.
     assert f"--color-accent: {tokens['accent-ink'][0]};" in light
     assert f"--color-accent: {tokens['accent-ink'][1]};" in dark
@@ -231,7 +232,8 @@ def test_tokens_are_declared_once_for_light_and_once_for_dark() -> None:
         assert f"{prop}: {value};" in light and prop not in dark, name
     # 영상은 두 테마 모두 어두운 우물 위에 놓인다. 본점은 두 테마가 같다.
     assert design_tokens.COLOR_TOKENS["video-well"] == ("#050607", "#050607")
-    assert design_tokens.COLOR_TOKENS["accent"] == ("#2f6db3", "#2f6db3")
+    # 밝은 본점은 그대로, 어두운 본점은 Final Cut 보라 쪽(W-90 — 흰 글자 4.5:1을 지키는 #645FF0).
+    assert design_tokens.COLOR_TOKENS["accent"] == ("#2f6db3", "#645ff0")
     for light_value, dark_value in design_tokens.COLOR_TOKENS.values():
         assert re.fullmatch(r"#[0-9a-f]{6}(?:[0-9a-f]{2})?", light_value), light_value
         assert re.fullmatch(r"#[0-9a-f]{6}(?:[0-9a-f]{2})?", dark_value), dark_value

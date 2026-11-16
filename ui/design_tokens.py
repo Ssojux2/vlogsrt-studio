@@ -58,11 +58,13 @@ COLOR_TOKENS: dict[str, tuple[str, str]] = {
     "ink": ("#15181c", "#e8ebee"),
     "ink-muted": ("#4d5560", "#a8b0b9"),
     "ink-faint": ("#6b737d", "#858d97"),
-    "accent": ("#2f6db3", "#2f6db3"),
-    "accent-hover": ("#27599a", "#27599a"),
+    # 어두움 짝은 Final Cut 보라 쪽이다(W-90, Final Cut Pro 12.4 `FinalCutPurple` #706BFF, 정적 분석).
+    # #706BFF 위 흰 글자는 4.01:1이라 채움은 한 단 짙은 #645FF0(4.73:1) · 글자·선은 밝은 #A9A6FF다.
+    "accent": ("#2f6db3", "#645ff0"),
+    "accent-hover": ("#27599a", "#5852e0"),
     "on-accent": ("#ffffff", "#ffffff"),
-    "accent-ink": ("#245a96", "#8db9ee"),
-    "accent-soft": ("#dde9f7", "#1c3352"),
+    "accent-ink": ("#245a96", "#a9a6ff"),
+    "accent-soft": ("#dde9f7", "#25234a"),
     "tier-green": ("#4a9e72", "#86dcaa"),
     "on-tier-green": ("#0b2416", "#0c2a19"),
     "tier-green-ink": ("#1d6b43", "#8fe2b2"),
