@@ -44,11 +44,6 @@ from fastapi.responses import (  # noqa: E402
 from ui import activity_log, design_tokens, os_open, timer_lease_js, ui_facade, window_js  # noqa: E402
 from ui import chooser as ui_chooser  # noqa: E402
 from ui.burn_cell import BURN_JOB_LABEL, BurnCell  # noqa: E402
-from ui.final_edit_ui import (  # noqa: E402
-    FINAL_EDIT_CSS,
-    REVIEW_TAB_KEY,
-    FinalEditPanel,
-)
 from ui.timeline_cell import JOB_LABEL as TIMELINE_JOB_LABEL  # noqa: E402
 from ui.timeline_cell import TimelineCell  # noqa: E402
 from ui.timeline_player import TIMELINE_PLAYER_CSS, TimelinePlayer  # noqa: E402
@@ -456,6 +451,8 @@ GLOBAL_ORDER_CONFIRM_LABEL = "전체 원본 순서 확정(촬영 시각 순)"
 # 화면 맞춤(D50) — 머리줄(W-17 B의 44px 줄)과 정리 탭은 CSS가 범위로 쓰는 이름을 단다.
 APP_HEADER_ID = "app-header"
 REVIEW_TAB_ID = "review-tab"
+REVIEW_TAB_KEY = "review"
+"""「편집」 탭의 아이디 — 다른 칸(타임라인 보내기)이 그 탭을 고를 때 쓴다."""
 REVIEW_TAB_LABEL = "편집"
 """Final Cut식 창 하나(W-86d, D151) — 옛 이름 「영상 정리」(추천 · 타임라인 · 공유가 한 창)."""
 REVIEW_TICK_SECONDS = 2
@@ -527,9 +524,6 @@ FOLDER_PATH_INFO = (
 FOLDER_IMPORT_STARTED_TEXT = (
     "「{name}」 폴더를 불러옵니다 — 영상을 촬영 시각 순으로 연결하고 미리보기를 만듭니다."
 )
-RENDER_EXPORT_LABEL = "추천만 이어붙여 내보내기"
-"""명령 줄의 내보내기 단추(W-46a, D100 §7a) — 추천(초록)만 이은 초안 영상 + SRT + 보고서."""
-RENDER_EXPORT_ID = "vl-render-export"
 SRT_ENGLISH_ID = "vl-srt-english"
 """「영어 SRT로 변환」 칸(W-63, D114) — 한국어 SRT 하나를 영어 SRT로 옮긴다. 내보내기와 따로다."""
 SRT_ENGLISH_PATH_LABEL = "영어로 옮길 한국어 SRT"
@@ -586,10 +580,6 @@ STATUS_MEMO_MAX_AGE_SECONDS = 5.0
 """1초 상태 틱의 기억(승인 단추·상태 줄·실사용 줄)의 최대 나이 — 외부 근거 없는 조정 대상
 (W-46b, D100 §7b). 열쇠(작업 상태·선택 상태 도장·기억의 셈·알림·단계)가 같아도 이만큼 지나면
 다시 짓는다 — 열쇠가 모르는 칸(모델 설정 등)이 바뀌어도 화면이 그보다 오래 옛 글을 보이지 않는다."""
-RENDER_EXPORT_STARTED_TEXT = (
-    "추천 구간만 이어붙인 초안을 만듭니다 — 끝나면 승인 칸 아래에 결과 카드가 뜹니다."
-)
-RENDER_EXPORT_ATTACHED_TEXT = "이미 초안을 만드는 중입니다 — 끝나면 결과 카드가 뜹니다."
 RENDER_EXPORT_OPEN_LABEL = "초안 폴더 열기"
 RENDER_EXPORT_OPEN_ID = "vl-export-open"
 RENDER_EXPORT_SRT_AGAIN_LABEL = "SRT만 다시 내보내기"
@@ -931,7 +921,6 @@ CSS = (
     + design_tokens.token_css()
     + BASE_CSS
     + ui_facade.WORKBENCH_CSS
-    + FINAL_EDIT_CSS
     + TIMELINE_PLAYER_CSS
     + window_js.window_css()
 )
@@ -2039,11 +2028,6 @@ class RawWorkspaceUi:
         self._tick_parts: list[TickPart] = []
         self._toast_part: TickPart | None = None
         self._review_tab_item: gr.Tab | None = None
-        # 「최종 편집」 탭(W-66, D117) — 초안 렌더가 끝나면 이 탭으로 넘어온다.
-        self._final_edit = FinalEditPanel(
-            self, raw_service.RawWorkspaceError, raw_service.RENDER_EXPORT_JOB_KIND
-        )
-        self._render_export_started: Any = None
         # 「타임라인으로 보내기」(W-71b, D126) — 렌더 없이 원본 범위 타임라인. 타임라인은 같은 창
         # 아래 덱에 있다(W-85, D145) — 끝나도 「영상 정리」에 머문다.
         self._timeline_cell = TimelineCell(
@@ -4674,12 +4658,10 @@ class RawWorkspaceUi:
             )
             self._cancel_button = gr.Button("선택 분석 취소", scale=0)
             self._cancel_all_button = gr.Button("전체 분석 취소", scale=0, variant="stop")
-            # 「추천만 이어붙여 내보내기」(W-46a, D100 §7a) — Final Cut 보내기 둘은 서랍의
-            # 「고급 · Final Cut」으로 옮겼다(`_finalcut_panel`).
-            self._render_export_button = gr.Button(
-                RENDER_EXPORT_LABEL, variant="primary", elem_id=RENDER_EXPORT_ID
-            )
-            # 「타임라인으로 보내기」(W-71b, D126) — 옆에 둔다(렌더·번인은 아직 초안 길, W-71e까지).
+            # 「타임라인으로 보내기」(W-71b, D126) — 추천 구간을 렌더 없이 원본 범위 타임라인으로.
+            # 「추천만 이어붙여 내보내기」는 은퇴했다(W-91, D161 — 사용자 결정 UI-3): 길은
+            # 「타임라인으로 보내기 → 편집 → 공유」 하나다. Final Cut 보내기 둘은 서랍의
+            # 「고급 · Final Cut」에 있다.
             self._timeline_cell.build_button()
             # 일괄 확인의 원천 — 화면의 단추는 제외 제안 대기열의 「남은 M개 모두 제외 유지」이고,
             # 그것이 이 숨은 단추를 누른다(옛 「자동 제외 확인」의 처리기·입출력 그대로, D57 C).
@@ -4749,7 +4731,6 @@ class RawWorkspaceUi:
                     size="sm",
                     elem_id=RENDER_EXPORT_SRT_AGAIN_ID,
                 )
-                self._final_edit.build_open_button()  # 「최종 편집 열기」(W-66, D117)
                 self._srt_english_cell()
                 # 자막 입히기(W-65, D116)
                 self._burn_cell = BurnCell(self, raw_service.RawWorkspaceError)
@@ -4914,21 +4895,6 @@ class RawWorkspaceUi:
         shown = gr.State(None)
         again = self._export_srt_again_button
         card = [self._export_card_html, self._export_open_button, again, shown]
-        started = self._render_export_button.click(
-            self.render_export_view,
-            self._signature_state,
-            status,
-            concurrency_limit=1,
-            js=ui_facade.EXPORT_WAKE_JS,
-        )
-        self._report_activity(started, status)
-        self._render_export_started = started  # 최종 편집 탭의 자동 전환이 무장한다(D117)
-        started.then(
-            self.render_export_card_tick,
-            [self._signature_state, shown],
-            card,
-            show_progress="hidden",
-        )
         self._wire_srt_english(status)
         self._burn_cell.wire(status)
         opened = self._export_open_button.click(
@@ -5042,23 +5008,6 @@ class RawWorkspaceUi:
         return (
             _srt_english_text(facts[0]) if facts else SRT_ENGLISH_JOINED_TEXT.format(name=srt.name)
         )
-
-    def render_export_view(self, signature: str | None) -> str:
-        """「추천만 이어붙여 내보내기」 — 초안 렌더 작업을 건다(무료 로컬). 끝은 결과 카드가 보인다.
-
-        확인하지 않은 비추천이 있어도 막지 않는다 — 빠진 구간은 보고서와 카드 경고가 말한다
-        (사용자 결정 2026-10-27, D100). 이미 만드는 중이면 그 작업에 다시 붙는다. 무료 로컬이다 —
-        영어 자막은 낸 SRT를 「영어 SRT로 변환」이 따로 옮긴다(D114).
-        """
-        closed = self._library_first_reply()
-        if closed is not None:
-            return closed
-        root = self._require_current_selection(signature)
-        try:
-            handle = self.raw.start_render_export(root)
-        except (raw_service.RawWorkspaceError, raw_service.AnalysisApprovalError) as error:
-            raise gr.Error(str(error)) from error
-        return RENDER_EXPORT_ATTACHED_TEXT if handle.reattached else RENDER_EXPORT_STARTED_TEXT
 
     def render_export_card_tick(self, signature: str | None, shown: tuple | None) -> tuple:
         """결과 카드 — (카드 글, 「초안 폴더 열기」, 「SRT만 다시 내보내기」, 새 열쇠).
@@ -11486,7 +11435,6 @@ class RawWorkspaceUi:
             # 탭 묶음을 드러내 둔다 — 초안 렌더가 끝나면 「최종 편집」으로 넘긴다(D117).
             with gr.Tabs(elem_id="vl-tabs") as tabs:
                 self._review_tab()
-                self._final_edit.build_tab()
                 self._caption_tab()
             # 오른쪽 서랍은 탭 뒤에 짓는다 — 두 탭 사이에 끼면 탭 묶음이 둘로 갈린다.
             extract_button, refresh_segment, profile_dd, analysis_plan = self._settings_drawer()
@@ -11584,8 +11532,6 @@ class RawWorkspaceUi:
                 closed,
             )
             self._wire_model_refresh(switched)
-            assert self._render_export_started is not None
-            self._final_edit.wire(tabs, self._add_tick_part, self._render_export_started, switched)
             self._wire_review_tick()
             self._wire_timer_rest()
             status = self._capcut_status
@@ -11616,12 +11562,11 @@ class RawWorkspaceUi:
         프로그램 전환(자동 전환·「최종 편집 열기」)·로드에서 뜬다(그라디오 6.30 실측). 멈춘 동안
         머리줄 상태 칸은 그대로 있고 활동 띠(`/vl-activity`)는 계속 돈다."""
         assert self._review_tab_item is not None and self._review_timer is not None
-        gates = (
-            (self._review_tab_item, self.timers_resume),
-            (self._final_edit.tab, self.timers_rest),
+        # 「편집」 탭으로 오면 켠다 — 옛 「초안 편집」 탭(그 탭에서 쉬던 D134)은 은퇴했다
+        # (W-91, D161).
+        self._review_tab_item.select(
+            self.timers_resume, None, self._review_timer, queue=False, show_progress="hidden"
         )
-        for tab, gate in gates:
-            tab.select(gate, None, self._review_timer, queue=False, show_progress="hidden")
         # 같은 창 아래 덱의 임대(W-85, D145) — 덱을 만지는 동안 쉬고, 놓으면 켠다.
         assert self._timers_rest_button is not None and self._timers_resume_button is not None
         leases = (

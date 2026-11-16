@@ -4,8 +4,8 @@
 키 표는 macOS 글자(⌘ ⌥ ⇧ ⌫)로 적고, macOS가 아니면 「Mod = Ctrl」로 읽는다
 (Final Cut과 Subtitle Edit `GetCommandOrWin`과 같은 규칙). macOS 바이트는 그대로다.
 
-브라우저 판정(`metaKey` 대 `ctrlKey`)은 `final_edit_js.FE.keyAction`의 `ctx.mac`이 이미 한다 —
-여기는 사람이 읽는 글자만 바꾼다.
+브라우저 판정(`metaKey` 대 `ctrlKey`)은 재생기 키 표(`ui/keymap.py`의 `__vlKeys.match`)가
+이미 한다 — 여기는 사람이 읽는 글자만 바꾼다.
 """
 
 from __future__ import annotations

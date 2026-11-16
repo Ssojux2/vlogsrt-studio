@@ -44,7 +44,6 @@ from ui.workspace_service import (  # noqa: E402
     FOLDER_IMPORT_LABEL,
     FOLDER_SUBMIT_LABEL,
     LIBRARY_APPROVE_LABEL,
-    RENDER_EXPORT_LABEL,
     RENDER_EXPORT_OPEN_LABEL,
     RENDER_EXPORT_SRT_AGAIN_LABEL,
     TIER_CRITERIA_FIELDS,
@@ -343,8 +342,8 @@ def test_final_cut_import_and_export_live_only_in_the_drawers(
     server, app, by_id, buttons = _built(tmp_path)
     bar = by_id["vl-command-bar"]
     assert buttons[FOLDER_IMPORT_LABEL].parent is bar
-    assert buttons[RENDER_EXPORT_LABEL].parent is bar
-    assert buttons[RENDER_EXPORT_LABEL].variant == "primary"
+    # 「추천만 이어붙여 내보내기」는 은퇴했다(W-91, D161) — 명령 줄에 없다.
+    assert "추천만 이어붙여 내보내기" not in buttons
     for label in (
         FINALCUT_LIBRARY_LABEL,
         FINALCUT_SEND_LABEL,
@@ -406,33 +405,16 @@ def test_the_red_tier_reads_not_recommended_on_screen() -> None:
     assert workspace_service.UNREVIEWED_KEYWORD == "제외 제안(미검토)"
 
 
-# ── 추천만 이어붙여 내보내기 ──────────────────────────────────────────────────
+# ── 추천만 이어붙여 내보내기(은퇴, W-91 · D161) ─────────────────────────────
 
 
-def test_the_export_button_starts_the_render_job(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, local_socket: None
+def test_the_recommended_only_export_is_retired_from_the_screen(
+    tmp_path: Path, local_socket: None
 ) -> None:
-    server, app, _by_id, buttons = _built(tmp_path)
-    root = server.workspace_root()
-    calls: list[Path] = []
-
-    def start(at: Path) -> raw_service.JobHandle:
-        calls.append(at)  # 내보내기는 무료 로컬이다 — 영어는 따로 변환한다(D114)
-        return raw_service.JobHandle(job_id="job-1", reattached=len(calls) > 1)
-
-    monkeypatch.setattr(server.raw, "start_render_export", start)
-    signature = server.current_signature()
-    assert server.render_export_view(signature) == workspace_service.RENDER_EXPORT_STARTED_TEXT
-    assert server.render_export_view(signature) == workspace_service.RENDER_EXPORT_ATTACHED_TEXT
-    assert calls == [root, root]
-    deps = app.config["dependencies"]
-    clicks = [d for d in deps if d["targets"] == [(buttons[RENDER_EXPORT_LABEL]._id, "click")]]
-    (click,) = [d for d in clicks if app.fns[d["id"]].fn == server.render_export_view]
-    assert click["inputs"] == [server._signature_state._id]  # 견적 문구가 없다(D110)
-    assert click["outputs"] == [server._capcut_status._id]
-    tails = [d for d in deps if d.get("trigger_after") == click["id"]]
-    assert any(d.get("js") == ui_facade.ACTIVITY_REPLY_JS for d in tails)  # 답은 활동 칸으로
-    assert any(app.fns[d["id"]].fn == server.render_export_card_tick for d in tails)
+    """사용자 결정 UI-3 — 길은 「타임라인으로 보내기 → 편집 → 공유」 하나다. 렌더 작업 자체는
+    타임라인 공유가 그대로 쓴다(활동 이름 그대로)."""
+    server, app, by_id, buttons = _built(tmp_path)
+    assert "vl-render-export" not in by_id and not hasattr(server, "render_export_view")
     assert workspace_service.ACTIVITY_JOB_LABELS["render_export"] == "추천만 이어붙이기"
 
 
@@ -452,9 +434,7 @@ def test_import_export_and_approve_wake_the_activity_poller(
     for dep in imports:
         assert dep["js"] == ui_facade.ACTIVITY_WAKE_JS
         assert dep["inputs"] == [server._folder_path_box._id]
-    clicks = [d for d in deps if d["targets"] == [(buttons[RENDER_EXPORT_LABEL]._id, "click")]]
-    (export,) = [d for d in clicks if app.fns[d["id"]].fn == server.render_export_view]
-    assert export["js"] == ui_facade.EXPORT_WAKE_JS  # 서명을 그대로 넘긴다
+    # 「타임라인으로 보내기」가 이 깨우기를 쓴다(내보내기 단추는 은퇴, D161).
     assert "__vlServer.wake(true)" in ui_facade.EXPORT_WAKE_JS
     assert ui_facade.EXPORT_WAKE_JS.rstrip().endswith("return signature; }")
     assert "__vlServer.wake(true)" in ui_facade.ACTIVITY_WAKE_JS
@@ -546,11 +526,6 @@ def test_the_convert_button_without_a_workspace_answers_folder_first(tmp_path: P
 class _Transport:
     def semantic_client(self, model: str) -> str:
         return f"client:{model}"
-
-
-def test_the_export_button_without_a_workspace_answers_folder_first(tmp_path: Path) -> None:
-    server = RawWorkspaceUi(state_path=tmp_path / "ui-state.json")
-    assert server.render_export_view(None) == workspace_service.LIBRARY_FIRST_TEXT
 
 
 SUMMARY = {

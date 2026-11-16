@@ -21,8 +21,6 @@ import pytest
 pytest.importorskip("gradio", reason="웹 UI extra(gradio)가 없다", exc_type=ImportError)
 
 from ui import timeline_player  # noqa: E402
-from ui.final_edit_app_js import APP_JS  # noqa: E402
-from ui.final_edit_ui import KEYMAP  # noqa: E402
 from ui.timeline_player import (  # noqa: E402
     PLAYER_BLOCK_ID,
     PLAYER_JS,
@@ -166,8 +164,6 @@ def test_the_cue_keys_follow_the_draft_editor_and_delete_prefers_a_picked_cue() 
     타임라인 창에서는 클립을 지운다."""
     from ui.keymap import PLAYER_KEYMAP
 
-    keys = {key.action: key.code for key in KEYMAP}
-    assert keys["cue-start"] == "BracketLeft" and keys["cue-end"] == "BracketRight"
     player = {(k.code, k.shift, k.alt, k.mod): k.action for k in PLAYER_KEYMAP if k.pane == "any"}
     assert player[("BracketLeft", False, False, False)] == "cue-start"
     assert player[("BracketRight", False, False, False)] == "cue-end"
@@ -202,11 +198,6 @@ def test_the_cue_buttons_do_not_move_when_a_text_commit_changes_the_status_or_wa
     warn = css[css.index(".tl-cue-edit .tl-cue-warn {") :].split("}")[0]
     assert "min-height" in warn
     assert "warn.hidden" not in PLAYER_JS and "status.title = S.status;" in PLAYER_JS
-
-
-def test_d117_keys_leave_the_player_alone() -> None:
-    """초안 편집의 문서 키 처리기(캡처 단계)가 재생기 안의 Space·화살표를 가로채지 않는다."""
-    assert 'closest("[data-vl-own-keys]")' in APP_JS
 
 
 def test_the_view_is_empty_without_a_timeline_and_carries_media_with_one(
@@ -410,12 +401,11 @@ def test_share_with_burn_captions_starts_the_share_job_and_none_stays_a_render(
     assert 'burn: burnPick ? burnPick.value : "none"' in PLAYER_JS
 
 
-def test_job_reports_a_render_job_and_the_script_reopens_the_draft_panel_on_success(
+def test_job_reports_a_render_job_and_the_script_watches_it_to_the_end(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """W-71h — 「최종 편집」 탭은 타이머가 쉰다(D134). 재생기가 렌더를 묻고 끝나면 칸을 연다."""
-    from ui.final_edit_ui import RELOAD_ID
-
+    """W-71h — 재생기가 제 렌더(공유) 작업을 묻고 끝을 안다. 옛 「초안 편집」 칸을 다시 여는 일은
+    그 탭과 함께 은퇴했다(W-91, D161)."""
     server, _root, signature = _server(tmp_path)
     player = server._timeline_player
     jobs = {
@@ -433,9 +423,9 @@ def test_job_reports_a_render_job_and_the_script_reopens_the_draft_panel_on_succ
     assert stale["ok"] is False and stale["stale"] is True
     assert "tl_job" in [f.__name__ for f in player.server_functions()]
     model = client_model("sig", "tok", _opened(), _media(), TIERS)
-    assert model["reloadId"] == RELOAD_ID
+    assert "reloadId" not in model
     assert "S.server.tl_job(" in PLAYER_JS and "watchRender(got.jobId)" in PLAYER_JS
-    assert "S.reloadId" in PLAYER_JS
+    assert "reloadId" not in PLAYER_JS and "reopenDraft" not in PLAYER_JS
 
 
 def test_tiers_are_asked_per_source_when_a_clip_is_picked(

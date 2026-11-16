@@ -170,16 +170,12 @@ def test_blocks_place_top_bar_command_bar_and_stage(tmp_path: Path, local_socket
         LIBRARY_APPROVE_LABEL,
         "선택 분석 취소",
         "전체 분석 취소",
-        workspace_service.RENDER_EXPORT_LABEL,
         CONFIRM_ALL_SOURCE_LABEL,  # 숨은 원천 — 화면의 단추는 제외 제안 대기열 안이다(D57 C)
     ):
         assert buttons[label].parent is bar, label
     in_bar = [b for b in app.blocks.values() if isinstance(b, gr.Button) and b.parent is bar]
-    # 주 단추는 단계마다 하나 — 분석 승인(견적에 묶인 돈의 문)과 초안 내보내기(W-46a).
-    assert [b.value for b in in_bar if b.variant == "primary"] == [
-        LIBRARY_APPROVE_LABEL,
-        workspace_service.RENDER_EXPORT_LABEL,
-    ]
+    # 주 단추는 분석 승인 하나 — 초안 내보내기(W-46a)는 은퇴했다(W-91, D161).
+    assert [b.value for b in in_bar if b.variant == "primary"] == [LIBRARY_APPROVE_LABEL]
     assert FINALCUT_SEND_LABEL not in [b.value for b in in_bar]  # 서랍의 「고급 · Final Cut」
     # 취소 단추는 늘 보이고 늘 누를 수 있다 — 도는 작업을 못 멈추는 일이 없다.
     for label in ("선택 분석 취소", "전체 분석 취소"):

@@ -79,5 +79,5 @@ def test_translation_mode_adds_a_read_only_english_column() -> None:
     assert '(S.translation ? englishCell(row.text) : "")' in PLAYER_APP_JS
     assert '<span id="tl-cue-en" class="tl-cue-en-note" hidden></span>' in PLAYER_APP_JS
     # 공유가 끝나면 새 초안의 영어를 다시 찾는다.
-    done = PLAYER_APP_JS[PLAYER_APP_JS.index("reopenDraft();") :][:400]
+    done = PLAYER_APP_JS[PLAYER_APP_JS.index('showInspector("share"); }') :][:400]
     assert "S.english = null;" in done and "askEnglish();" in done

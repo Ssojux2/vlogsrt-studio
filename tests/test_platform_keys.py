@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from ui import final_edit_ui, platform_keys, timeline_player
+from ui import keymap, platform_keys, timeline_player
 
 
 @pytest.mark.parametrize(
@@ -32,13 +32,12 @@ def test_mac_keeps_the_glyphs(keys: str) -> None:
 def test_keysheet_follows_the_platform(monkeypatch: pytest.MonkeyPatch) -> None:
     """키 표(시트·브라우저 표)가 이 운영체제의 글자를 쓴다 — macOS는 예전 바이트 그대로."""
     monkeypatch.setattr(platform_keys.sys, "platform", "darwin")
-    mac_rows = {row["action"]: row["keys"] for row in final_edit_ui.keymap_payload()}
-    assert mac_rows["blade"] == "⌘B"
-    assert mac_rows["redo"] in {"⌘⇧Z", "Ctrl+Y"}
+    # 옛 초안 편집 키 표는 은퇴했다(W-91, D161) — 재생기 키 표(D154)의 시트가 같은 규칙을 쓴다.
+    mac = keymap.keysheet_html()
+    assert "<kbd>⌘B</kbd>" in mac and "<kbd>⌘⇧Z</kbd>" in mac
     monkeypatch.setattr(platform_keys.sys, "platform", "win32")
-    win_rows = [row for row in final_edit_ui.keymap_payload() if row["action"] == "blade"]
-    assert [row["keys"] for row in win_rows] == ["Ctrl+B"]
-    assert all("⌘" not in str(row["keys"]) for row in final_edit_ui.keymap_payload())
+    other = keymap.keysheet_html()
+    assert "<kbd>Ctrl+B</kbd>" in other and "⌘" not in other
 
 
 def test_player_buttons_follow_the_platform(monkeypatch: pytest.MonkeyPatch) -> None:

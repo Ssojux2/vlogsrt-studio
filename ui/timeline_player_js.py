@@ -70,7 +70,6 @@ PLAYER_APP_JS = r"""
     S.media = m.media || {};
     S.tiers = m.tiers || {};
     S.settings = m.settings || {};
-    S.reloadId = m.reloadId || "";
     if (!keepLocal) {
       S.doc = m.doc;
       S.baseRevision = m.revision;
@@ -1532,23 +1531,15 @@ PLAYER_APP_JS = r"""
           say("렌더가 끝나지 못했습니다(" + got.status + ") — 「기록」에서 까닭을 보세요.", true);
           return;
         }
-        say("공유를 마쳤습니다 — 결과 카드의 「초안 폴더 열기」에 영상이 있습니다(자막을" +
-          " 입혔으면 <이름>.burned.mp4 · 영어 번역이 아직 없으면 한국어만)." +
-          " 「초안 편집(이전)」 탭도 새 초안으로 열었습니다.", false);
-        reopenDraft();
+        say("공유를 마쳤습니다 — 인스펙터 「공유」의 결과 카드 「초안 폴더 열기」에 영상이" +
+          " 있습니다(자막을 입혔으면 <이름>.burned.mp4 · 영어 번역이 아직 없으면 한국어만).",
+          false);
         if (W.__vlWindow && W.__vlWindow.showInspector) { W.__vlWindow.showInspector("share"); }
         // 새 초안의 저장된 영어가 생겼을 수 있다 — 번역 모드면 다시 찾는다.
         S.english = null;
         if (S.translation) { askEnglish(); }
       });
     }, POLL_MS);
-  }
-  function reopenDraft() {
-    var source = S.reloadId ? document.getElementById(S.reloadId) : null;
-    if (source && source.tagName !== "BUTTON" && source.querySelector) {
-      source = source.querySelector("button") || source;
-    }
-    if (source && typeof source.click === "function") { source.click(); }
   }
 
   // ─── 문서 바꾸기 · 되돌리기 · 저장 ──────────────────────────────

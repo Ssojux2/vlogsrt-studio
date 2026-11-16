@@ -24,7 +24,6 @@ import gradio as gr
 from ui import keymap, platform_keys
 from ui.caption_grid_js import CAPTION_GRID_JS
 from ui.caption_lane_js import CAPTION_LANE_JS
-from ui.final_edit_ui import JOB_ENDED, RELOAD_ID
 from ui.timeline_edit_js import TIMELINE_CORE_JS
 from ui.timeline_player_js import PLAYER_APP_JS
 
@@ -33,6 +32,8 @@ PLAYER_ROOT_ID = "tl-root"
 TAB_LABEL = "원본 범위 타임라인"
 BURN_NONE = "none"
 """「번인 캡션: 없음」 — 예전 렌더 그대로(`timeline_share.BURN_NONE`과 같다, 시험이 대조한다)."""
+JOB_ENDED = frozenset({"succeeded", "failed", "cancelled"})
+"""끝난 작업 상태 — 렌더 작업을 묻는 `tl_job`이 끝을 알린다."""
 PLAYER_JS = (
     TIMELINE_CORE_JS + CAPTION_GRID_JS + CAPTION_LANE_JS + keymap.keymap_js() + PLAYER_APP_JS
 )
@@ -84,7 +85,6 @@ def client_model(
         "media": media["sources"],
         "tiers": tiers,
         "settings": opened["settings"],
-        "reloadId": RELOAD_ID,
     }
 
 

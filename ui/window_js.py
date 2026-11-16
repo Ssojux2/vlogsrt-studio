@@ -34,7 +34,6 @@ INSPECTOR_TABS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "vl-export-card",
             "vl-export-open",
             "vl-export-srt-again",
-            "vl-export-edit",
             "vl-srt-english",
             "vl-burn",
         ),
