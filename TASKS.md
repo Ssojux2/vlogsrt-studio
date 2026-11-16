@@ -4,6 +4,8 @@
 > 조각 길이로 막고, 그래도 난 구간만 다시 물어 갈아끼우고, gpt-transcribe의 검증은
 > 표시만 한다** (근거: `docs/DECISIONS.md` D25 + D27 + D28)
 > 한 세션에 태스크 하나. DoD = `make check` 통과 → 커밋.
+> **2026-11-16 사용자 지시**: 브랜치는 `main` 하나에서 시작하고(태스크마다 `bp_cc/<이름>` → PR), 남은 태스크는 대화 하나에서 차례로 한다 —
+> 계획 정본 `docs/plans/2026-11-16-fcp-window.md`(Final Cut식 창 · Subtitle Edit식 자막 · 세 운영체제 · 남은 계획 전부).
 > 옛 보드(T·P·Q·R 시리즈)는 git 히스토리에 있다.
 
 ---
@@ -29,10 +31,10 @@
 | S14 | 짧은 큐를 한 줄(16자)까지 합친다 (D31) | ✅ |
 | S15 | 조각 꼬리 싱크 — **죽어 있던 게이트를 살리고 자를 만든다** (D32) | ✅ |
 | S16 | 사람 인수 — 현재 설정으로 재실행해 원인을 확정한다 | 🧑 대기 |
-| S17 | **마지막 조각이 0.2초 밀린다** — 전제를 재현 못 했다. 진단은 다른 것을 짚는다 | 🔎 진단 완료·보류 |
+| S17 | **마지막 조각이 0.2초 밀린다** — 전제를 재현 못 했다. 진단은 다른 것을 짚는다 | ⛔ 닫음(2026-11-16) — 진단이 「구현으로 내보내지 마라」(`docs/orchestration/reviews/opus-s17-diagnosis.md`) |
 | S18 | **조판이 큐 시작을 0.24초 뒤로 민다** — D32 원인 4번 (D33) | ✅ |
 | **Q0** | **파형 기준 측정 도구** — VAD로 환각·손실을 잰다 | ✅ |
-| **Q1** | **재전사 채택에 심판 승인과 커버리지를 요구한다** | ⚠️ **구현 완료·머지 보류** (`899efbc`) |
+| **Q1** | **재전사 채택에 심판 승인과 커버리지를 요구한다** | ⛔ 닫음(2026-11-16) — 검토 UNSOUND, whisper 재전사는 작업대 기본 경로가 아니다(D104) (`899efbc`) |
 | **Q2** | 온도 0.6 재검토 — 깨끗한 음성의 정확도(D28이 인정한 대가) | 📋 유료 A/B 필요 |
 | **Q3-1** | 2번째 모델로 글자 교정 — 엔진 · 규칙 1·5 개정 (D37) | ✅ |
 | **Q3-2** | 글자 교정을 파생 계층(`vlogsrt/project/`)에 켠다 (D39) | ✅ |
@@ -134,6 +136,7 @@ Final Cut 전체 타임라인(D44·D45·D56). 플러그인은 제거됐다. 계�
 | W-29 | GPT-Transcribe 글자 위주 · 추천 늘리기 · 빨강만 끄기(사용자 지시 2026-10-23 「GPT-transcribe가 들은게 더 정확해 · 초록색을 추천하는 것을 충분히 늘려주고 · 추천하지 않는 곳은 disable · 노란색은 disable 하지 않도록」 · 「자막 추출이 SRT로」) — **세션 a**(D77): 1단계 whisper에 단수 `language`(계약 예상 언어 첫째 "ko", 요청에만 — 청크 열쇠·승인 지문 그대로) · 「확인 필요」 넷: 다른 귀가 다르게 들음(화면만, D65 몫 밖) · 끝 인사말 실측 6구절 · 작은 어휘 런(3종 이하 6줄+) · 부호뿐인 줄(6자+) — 실측 환각 17개 영상 모두 표시(이전 6) · **세션 b**(D78): 다른 귀 기준 재전사 — 다른 귀 답을 받은 청크 중 조각 게이트를 못 지나거나 whisper가 못 들은 청크만 엔진 `repair_*` 온도(0.8→1.0)로 다시 물어 다른 귀와 맞는 첫 답 채택(시각은 whisper, 글자는 D37 게이트로 다른 귀) · 다른 귀 빈 답·온도 없는 제공자는 묻지 않음 · 모두 어긋나면 1차 그대로 · 채택 표지로 다음 실행에 되돌아가지 않음 · 캐시(1차 열쇠 그대로) · 견적 상한 `rescue_chunk_count`·`rescue_usd`(교차 확인 켜짐만, digest) · 승인 `rescue_chunk_budget`(사람이 본 견적 줄만) · `rescue_gate` · 견적 문장 · `ear_rescue` 순수 불변식 · 시험 `tests/raw/test_ear_rescue.py` · **세션 c**(D79): 추천 규칙 `raw-tier/v6` — usable×발화 많음·recommended×무음·recommended×발화 적음 → 초록(설정 손잡이 셋) · 화면 문제 제한은 어두움·과노출만(`visual_issue_caps`) · 조각은 빨강 없이 녹색 ≥ 절반이면 초록(`segment_green_share`) · 빨강·경계 그대로 · 실측 추천 조각 0 → 15개·146.8초(35%) · 시험 `tests/raw/test_tiering_v6.py` · **세션 d**(D80): Final Cut 출력은 미검토 빨강도 끔(`finalcut_timeline._clip` 한 자리 — 노랑·보류·미분석인 미검토 제외·되살린 빨강은 켬, 키워드 그대로, D35 관문은 잘라 내는 확정 내보내기에 그대로) · 대기열 안내 문구 · 고정 문서 셋 다시 고정(`enabled="0"`만 다름) · **세션 f**(D81): Final Cut 캡션 역할 `iTT?captionFormat=ITT.ko` → `SRT?captionFormat=SRT.ko`(Final Cut 12.4 자신의 철자 틀 — 캡션 내보내기가 `.srt`) · 캡션 있는 고정 문서 넷 다시 고정(역할만 다름) · 사람 확인: Final Cut에서 캡션 내보내기 · **세션 g**(D82): 제안된 적 없는 빨강(분석 전에 세운 머리 · 컷을 다 덮지 못한 빨강)도 사람 결정(`human_decided` — 기존 `_human_segment`)이 없으면 끔 · 키워드 `제외 제안(미검토)` · 실측 꺼진 빨강 5개·49.1초 → 9개·70.4초 · **계획**: W-30 Gemini 선택지 · (선택) W-29e | 세션 a·b·c·d·f ✅ 2026-10-23 · g ✅ 2026-10-24 |
 | W-30 | Gemini를 고를 수 있는 영상 분석 모델로(사용자 지시 2026-10-23 「영상 분석에 google api를 추가하는 방안 · api 선택해서 진행할 수 있도록」 · 계획 질문에서 「이번에 포함」, 규칙 7 변경 승인) — **세션 a**(D83): 전송 `vlogsrt/gemini_messages.py`(urllib · https만 · 리다이렉트 거절 · 재시도 없음 · 키는 `x-goog-api-key` 헤더만 · 모델 이름은 경로 조각 검사 · 오류는 `error.status`·`ErrorInfo.reason`) · 문 `transcribe.request_gemini_generate`(online · 본문 model 금지 · 클라이언트 종류 · 관찰 연산 `models.generateContent` · 취소) · `provider_error`가 `API_KEY_INVALID`(400)를 인증으로 · 키 이름 `GEMINI_API_KEY`(가림 · 옛 비전 역할 `GOOGLE_API_KEY`와 따로 · 비전 역할이 물려받지 못함) · 불변식: 네트워크 경계 = 전송 파일 둘(정확 경로) · 전송은 transcribe만 · 전송끼리 서로 모름 · Google SDK 금지 · 순수 계층 금지 목록에 `gemini_messages` · 시험 `tests/test_gemini_messages.py` · **세션 b**(D84): `RawGeminiAnalysisProfile` 둘(3.8 Flash $0.75/$3.75 ~2026-12-31 · 4 Argon $2/$10 ~2026-11-30, `price_valid_through` 뒤 가격 미정) · `gemini_profile_problems` · 순수 `gemini_cost`(창당 상한 — 이미지 1120토큰 고정 · 생각은 출력 한도 안, 페이로드 상한 — 아는 칸·고정 해상도 JPEG만) · 불변식: raw config에 gemini 리터럴 허용(glm은 여전히 금지) · 아직 고를 수 없음 · 시험 `tests/raw/test_gemini_cost.py` · **사용자 지시 2026-10-25**: 「주로 Flash를 이용해서 처리 · 영상을 직접 모델이 보고 평가해도 돼」 → 창마다 클립(그림 + 소리) + 프레임 여덟 장 · 새 작업공간과 지금 작업공간 모두 Flash · **세션 c1**(D85): 창 클립 자르기 `preprocess.extract_analysis_clip`(원본 한 구간 · 고른 소리 트랙 하나 모노 AAC · 긴 변 640 · `+bitexact` 같은 바이트 · 크기 상한 · O_EXCL 임시 뒤 옮김) · 조리법 `AnalysisClipRecipe` · `media_refs.ClipSampler`(구간마다 캐시 + sha256 원장, 망가지면 다시 자름) · 아직 분석 경로에 잇지 않음 · 시험 `tests/raw/test_analysis_clip.py` · **세션 c2**(D86): 공급자 세 갈래(`analysis_provider` google · `official_price_model`) · 역할 검사(Gemini는 문구·시간 역할 금지, 등록표만) · 본문 `build_gemini_payload`(클립 → 프레임 → 안내문 · 해상도 HIGH 고정 · 클립 `videoMetadata` 길이·fps · `responseJsonSchema` · `thinkingLevel`) · 안내문 클립 줄(Gemini에만 — Claude·Luna 본문·신원 그대로) · 판정 `_gemini_text`(STOP의 생각 아닌 text만 · MAX_TOKENS·SAFETY·막힘 거부) · 클라이언트 종류·전송 세 갈래 · 예산(공식 상한, 인상일 뒤 가격 미정 → 실행 거부) · 실제 페이로드 상한 + 인라인 20 MB · 영수증(입력 + 출력·생각, modelVersion·유효 기간) · `LiveAnalysisTransport.gemini_clients`·`semantic_client`(키 없으면 유료 호출 전 `GEMINI_API_KEY`) · 키 찍기·UI 전달 · 견적·CLI 문구 · 작업 흐름 `_window_clips`(Gemini만 · 파일 시각 = 창 시각 + 원점 · 실패한 창은 프레임만) · 창당 상한 Flash $0.068 · Argon $0.180 · 시험 `tests/raw/test_gemini_analysis.py` · **세션 d**(D87): 기본 분석 모델 Gemini 3.8 Flash(새 작업공간) · 예전 기본(Sonnet 5.5)에 머문 기존 작업공간은 열 때 한 번 옮김(`adopt_default_analysis_model` · `meta` 표지 · 분석 중엔 다음 열기로 · 사람이 고른 Opus·Luna·Gemini는 그대로) · 선택지 Flash · Argon · Sonnet · Opus · Luna · 견적 꼬리 「Gemini 비용 상한 $…」·상한 빠지면 「가격 미정」(0원 아님) · 단가 상태(인상일 뒤 가격 미정) · 견적 단가 줄(클립 + 프레임) · 키 상태 줄 Gemini·Claude 둘 + 결제 연결 키 경고 · 키 없으면 `GEMINI_API_KEY` · 소리가 일찍 끝나는 원본의 뒤 창 클립은 소리 없이 성공 · 시험 `tests/raw/test_flash_default.py`·`tests/raw/test_gemini_analysis_flow.py`(작업대 전체 흐름 — 실제 클립 + 가짜 Gemini) · **세션 e**(D88, 사용자 지시 2026-10-25 「자막 검증에 gemini flash 음성인식 결과도 반영」 · 고른 것: 표시 + 편집기 참고): Gemini 판정에 `heard_speech`(창 클립에서 들린 말, Gemini schema에만 — Luna·Claude 본문·신원·문서 그대로) · 줄은 가운데가 코어에 드는 창에 속하고 줄 글자 가운데 들은 말에서 찾은 몫 < 0.5면 「확인 필요 · Gemini가 다르게 들음」(들은 말이 비면 「듣지 못함」, 2자 미만 줄·Gemini만 들은 말은 짚지 않음) · 가장 최근 분석이 Gemini일 때만 · D65 몫 밖 · 편집기 「Gemini가 들은 말(이 구간 전체)」 + 「가져오기」(문구 칸만) · 실패한 창은 Google이 말한 까닭(키 가림)을 남김 · 시험 `tests/raw/test_gemini_heard.py` · **세션 f**(D91 — 같은 날 D89 캡션 모드 → D90 타이틀만 있는 프로젝트 → D91로 대체, 사용자 지시 2026-10-26 「SRT로 Final Cut 보내기를 누르면 영상 + Basic Title이 출력되도록 — 복사·붙여넣기 없이」): 「Final Cut으로 보내기」와 같은 전체 타임라인에 원본 자막 캡션 대신 SRT 줄마다 Basic Title을 그 줄이 시작하는 스파인 클립에 레인 1로(시작은 클립 안 원본 시각 · 길이는 시퀀스 시간 · 컷을 넘어도 한 타이틀 · 꺼진 클립 위는 함께 꺼짐 · 섞인 레이트는 클립 안 시각) · 겹친 줄은 다음 줄 시작에서 끝을 줄이고 셈 · 같은 프레임 시작은 둘 다 · 끝 꼬리 자름·밖은 싣지 않고 셈 · 빈 SRT 거부 · 순수 `finalcut_titles.with_srt_titles` · 설정 `FinalCutTitleSettings`(Apple SD Gothic Neo Bold · 크기 높이×7/120 · 아래 높이×5/12) · `export(titles_srt)`·서비스 `export_finalcut_titles` · `_titles` · 리포트 `titles` · 작업대 단추·CLI `--srt` · 시험 `tests/raw/test_finalcut_titles.py` | 세션 a·b·c1·c2·d·e ✅ 2026-10-25 · f ✅ 2026-10-26 |
 | W-31 | 작업대 1단계 시간 엔진을 Gemini 3.5 Transcribe로(사용자 지시 2026-10-26 「whisper SRT 정확도가 떨어지는데 대안 — doc 조사·계획」 · 고른 것: 교체 · 기존 영상은 사람이 「다시 듣기」 · 규칙 1 변경 승인, D92) — **세션 a**(D92): 전송 `gemini_messages.post_interaction`(본문 모델 검사·https·리다이렉트 거절·재시도 없음) · 문 `transcribe.request_gemini_transcription`(online·관찰·취소, 인라인 base64 WAV, `store:false`, verbatim + 단어 시각, `ko-KR`, 길이·크기 한도는 승인 전 거부, 관찰 기록에 오디오 대신 sha256·크기) · 등록표 `RawGeminiTranscribeProfile`(분당 $0.003 + $0.002, 재확인 기한 2027-01-26) · 불변식 `check_gemini_timing_request_lane` · 사람 전용 `scripts/record_gemini_transcribe.py` · CLAUDE.md 규칙 1·6·7 · **세션 b**(D92, 합성 픽스처로 — H1 뒤로): 응답 해석 `gemini_transcribe_parse`(엄격 · 정확 유리수 · 부호를 단어에 붙임 · 자리 없는 글자·시각 없는 단어·닫은 끝은 셈) · 단어 → 줄 `word_cues`(문장 끝·쉼 0.6초·32자·7초 · 줄 시각은 단어 시각 그대로) · `WordCueSettings` · 불변식 `check_word_cues_stays_pure` · **세션 c**(D92): 엔진 표 `TIMING_ENGINES` · `timing_engine_view`(whisper는 같은 객체) · 제공자·형식·입자 한 짝 · `engine_problems` · 역할(시간에 등록된 Gemini 전사만) · 능력표 Gemini 스냅샷(`all_capability_snapshots`·`capability_snapshot(role, model)`) · 사전 검사 엔진마다(Gemini는 whisper 종료일에 안 막힘, 재확인 기한에 닫힘) · `GeminiTranscribeTimingProvider`·`timing_provider_for`(1단계·빈칸 재전사) · 다시 묻기는 온도 없는 제공자에 거부 · 영수증 `measure_gemini_transcribe_usage` · 불변식 `check_gemini_timing_builder_lane` · **세션 d**(D92): 원본마다 엔진 `timing_engine`(정하기 · 고정 표 `source_timing_engines` · 「새로 듣는 엔진」 표지, whisper 원본은 같은 설정 객체라 바이트 그대로) · 견적 `timing_model`·`timing_usd`(Gemini만) · 결속 꼬리표 · 승인·실제 시작이 원본의 엔진을 묶음(키 없으면 보내기 전 거부) · 다른 귀는 Gemini 원본에서 후보만 · D78 다시 묻기 끔 · 빈칸 재전사는 고정 엔진·그 단가 · **세션 e**(D92): 「API 연결」의 「새로 듣는 전사 엔진」 칸(Gemini 앞 · whisper는 종료일 표시 · 상태 줄에 단가 상태·키 이름·결제 키 경고, 금액 없음) · 견적 문장(Gemini로 들을 영상만 엔진·분·공식 단가·금액) · 승인 문(Gemini 키·가격 미정, 두 범위 모두) · 다시 듣기 칸의 엔진 문구 · 편집기 후보 표시 `candidate`·「확인 필요 · 다른 귀」 · **세션 f 보고서**(D92): `scripts/engine_compare_report.py`(읽기 전용 — 새 엔진 전사 대 바로 앞 리비전 · 정답 가장 가까운 경계 · 환각류 줄 · Pτ/Rτ · 판정 `EngineCompareSettings`) · 불변식 `check_engine_compare_report_only` · **남음**: H1 녹화(사람, 약 $0.01) · H2 뒤 보고서를 보고 기본 엔진 결정(사람) → `DEFAULT_NEW_HEARING_ENGINE` 한 줄 → H2 다시 듣기 3–5개(사람) → f 비교·기본값 · W-32 예전 CLI·최종 자막 경로(2027-02-26 전) | 세션 a·b·c ✅ 2026-10-26 · d·e·f(보고서) ✅ 2026-10-27 |
+| W-32 | whisper 종료(2027-02-26) 앞 정리 — 옛 CLI `vlogsrt run/record`와 숨은 「자막」 탭의 최종 자막 길은 whisper 뿐이다 · 종료 뒤에는 유료 호출 **앞에서** 까닭을 대고 거부한다(`~/.claude/plans/purring-forging-flamingo.md` §4 · 행이 빠져 있었다) | 📋 W-91에서 (기한 2027-02-26) |
 | W-33 | Final Cut 보내기는 추천(초록)만 켠다(사용자 지시 2026-10-27 「노란색도 비활성하고 초록색만 활성해서 나가는 형식」, D93) — 설정 `FinalCutTimelineSettings.recommended_only`(보내기 `FINALCUT_TIMELINE`이 켬 · 빌더 기본은 D80) · 사람이 「사용」으로 정한 조각은 켬 · 보통·판정 보류·미분석은 끈 채(지우지 않음) · 꺼진 보통 안의 묻힌 추천에도 「추천」 범위 · 방향·레이트 표는 켠 클립만 · 시험 `test_finalcut_green_only` | ✅ 2026-10-27 |
 | W-34 | 「꺼진 클립 빼고 보내기」 옵션(사용자 지시 2026-10-27 「disable된 클립을 프로젝트에서 제외하는 옵션 — 초록색 클립만 출력」, D94 — 고른 것: 미검토 제외 제안은 먼저 확인하게 막기 · 두 보내기 모두) — 작업공간 표지 `finalcut_drop_disabled`(기본 끔) · 설정 서랍 칸 · 빌더 `drop_disabled`(켠 클립만 스파인 · 캡션 차례 옮김 · 분석 전 원본도 브라우저 클립) · 레이트 섞임 누적 배치 일반화(빼지 않으면 바이트 그대로) · 관문 `UnreviewedDropError` · 이름 꼬리 `_green`·「추천만」 · 리포트 `dropped_*` · 시험 `test_finalcut_drop` | ✅ 2026-10-27 |
 | W-35 | whisper는 시각만, 자막 글자는 Gemini가 메인(사용자 지시 2026-10-27, D95 — 고른 것: Gemini 단어 시각으로 whisper 줄에 배정 · 종료일 뒤 Gemini 시각으로 전환, 계획 `docs/plans/2026-10-27-whisper-timing-gemini-text.md`) — **a** 단어 배정 `raw/word_text.py`(순수) + 규칙 1·5 문서 · **b** 1단계 연결(whisper 원본 글자 경로 = Gemini 3.5 Transcribe, 견적·승인·캐시) · **c** 화면·「확인 필요」 둘 · **d** 「글자만 다시 듣기」(저장된 whisper 청크 + Gemini 글자만) · **e** 종료일 뒤 새로 듣는 엔진 자동 전환 · 사람: H1 녹화 · H2′ · W-31f 기본 엔진 결정은 대체됨 | 계획 ✅ · a ✅ 2026-10-27 · b ✅ 2026-10-29 · c 보류 · d 접음 · e는 W-52a에 흡수(D104) |
@@ -194,6 +197,32 @@ Final Cut 전체 타임라인(D44·D45·D56). 플러그인은 제거됐다. 계�
 | W-81 | Gemini 429 재시도(결정 D-1, D141) — 공급자가 대기를 말한(본문 `RetryInfo` 먼저, 없으면 `Retry-After` 정수 초) 분당 한도 429만, 60초 이하면 그만큼 기다렸다 3번까지 다시 보낸다 · 하루 한도·대기 없는 429·503·시간 초과는 예전처럼 한 번 · 문(`transcribe._gemini_rate_retry`)이 의미 분석·전사 둘 다 · 시도마다 새 승인·취소 문 · 기다리는 동안 0.5초마다 취소 확인 · Claude 그대로 · 설정 `GEMINI_RATE_RETRY` · 시험 `test_gemini_rate_retry` · 사람: 다음 429 문구로 대기를 말하는지 확인 | ✅ 2026-11-16 |
 | W-82 | 의미 분석 창 병렬 전송(계획 Phase 4-1, D142) — `annotate_windows`가 조립·재사용·취소 확인은 창 차례대로, 묻기만 묶인 풀의 일꾼(`copy_context`)이 한다 · 결과는 창 차례, `on_annotations`는 이어진 접두만 · 치른 판정은 끝나는 순간 `on_settled`로 캐시에(멈출 때도 나간 창은 거둔다) · 공급자별 동시 수 `PROVIDER_CONCURRENCY`(Gemini 4 — 사용자 결정 · Claude·OpenAI 1 = 예전 직렬) · 1을 넘으면 프로세스 전체 상한(영상 셋이 나눠 쓴다) · 예약 문 잠금 · 창·요청 신원·예약·비용 그대로 · 시험 `test_semantic_window_parallel` · 사람: 다음 분석의 429 줄·2단계 시간 확인 | ✅ 2026-11-16 |
 | W-83 | 「영상 정리」 화면 타이머를 하나로(D143, 성능 계획 Phase 2-6) — 타이머 셋 · 의존 다섯(2초에 디스패치 6)을 `gr.Timer(2)` 하나 · 대기열 의존 `review_tick` 하나로(처리기 그대로 · `TickPart`로 실어 차례대로 이어 붙임 · 알림은 맨 앞) · 쉬는 문은 갱신 하나(1-튜플이면 주기가 NaN이 되어 4 ms마다 틱 — 실측) · 원인: 그라디오가 디스패치마다 모든 칸의 진행 상태를 두 번 다시 매긴다(프로파일 215/245 ms) · 실측(헤드리스 크롬 · 원본 40 + 초안 5분): 타이머 몫 약 1.0–1.16초 → 약 0.3초 / 10초(약 72%↓), 긴 프레임 0 · 머리줄 상태 갱신 1초 → 2초 · 시험 `test_status_tick`·`test_final_edit_ui`·`test_cross_check_ui`·`test_cross_check`·`test_transcribe_only`·`test_frame_batch` · 도우미 `review_tick_parts` | ✅ 2026-11-15 (실제 브라우저 · 실제 라이브러리 반응과 보내기 알림은 🧑) |
+| W-84 | 세 운영체제 기반(D144) — CI 행렬 macos·windows·ubuntu(오프라인 · mac 막음 · win·linux 처음엔 보고) · `scripts/check_all.py`(Makefile `check`를 파이썬으로) · `scripts/smoke_ui.py` · 리눅스 실행기 `실행.sh` · `launch_check` tkinter·libass 안내 · 번인 ffmpeg 후보 운영체제별 · `scripts/preview_workbench.py`(합성 라이브러리 · 격리 · 오프라인) · `ui/platform_keys.py`(Mod = ⌘/Ctrl) · 키 가로채기 측정 html | 📋 다음 |
+| W-84a… | 첫 CI가 드러낸 Windows → Linux 실패 고치기 · 다 초록이면 막는 게이트로 | 📋 |
+| W-85 | Final Cut식 창 골격(D145) — 위 [브라우저·뷰어·인스펙터] 아래 타임라인 한 창 · 트랙 크기 토큰 · 작업공간 자리 · `[data-vl-own-keys]` 키 새는 버그 · 타이머 임대(D134 탭 기준을 대신) | 📋 |
+| W-86 | 창 DOM · FCP 이름 · 골든 한 번 — 뷰어 하나 · 인스펙터 탭(정보·자막·공유) · 타임라인 인덱스 · 트랙 손잡이 | 📋 |
+| W-87 | 「자막」 작업공간 — Subtitle Edit식(D146) — 자막 목록·입력칸·파형 자막 레인 · SE 조작·키(A/D/S/T · F11/F12 …) · 한/영 번역 모드 · `splitText` 하나로 · 프레임 단위 밀기(D138 남은 것) | 📋 |
+| W-88 | 「공유」(D147) — 타임라인에서 렌더 + 한/영 번인 한 작업 · 결과 카드·영어 변환·번인 손잡이를 공유 탭으로 · 입구 두 단추(UI-3)는 그때 묻는다 | 📋 |
+| W-89 | 창 기준 키 맵 하나(D148) — 포커스한 창이 정한다 · Mod/Alt 표기 · 측정 통과 키만 · 영어 칸 직접 편집은 그때 묻는다 | 📋 |
+| W-90 | 어두움 짝을 Final Cut 쪽으로 — 채움 #645FF0 · 표시 #706BFF · 대비 기준 그대로 | 📋 |
+| W-91 | 초안 편집(D117)·숨은 「자막」 탭 은퇴 + W-32(D149) | 📋 |
+| P-1 | 성능 4-2 창 payload 한 번 짓기 | 📋 |
+| P-2 | 성능 4-6 일괄 승인 `unanalyzed` upsert O(N²) → 한 행 · 영어 묶음 병렬은 `srt_english.py` 기준으로 다시 본다 | 📋 |
+| P-3 | 성능 3-5 미리보기·렌더 디코드 `-hwaccel`(macOS만)과 실패 기억 | 📋 |
+| P-4 | 성능 4-4 1단계 동안 Gemini 클립 미리 인코드(「전사만」 제외) | 📋 |
+| P-5 | 성능 4-3 1단계 청크 병렬 — 동시 수 결정 필요 | 📋 결정 대기 |
+| P-6 | 성능 4-5 캐시 열쇠 안정화 — 결정 D-3(옛 열쇠 이행) 필요 | 📋 결정 대기 |
+
+
+### 🧑 사람 확인 모음 (2026-11-16 — 흩어진 🧑을 한자리에, 정본 `docs/plans/2026-11-16-fcp-window.md`)
+
+| 묶음 | 항목 |
+|---|---|
+| 실제 원본 라이브러리 | W-71b–i 전부(보내기 · 재생 · 범위 조정 · 클립 편집 · 원본 넣기 · 자막 칸 · 렌더) · 실제 초안 번인 W-65·W-67 · 공유 W-88 |
+| 보이는 브라우저 | W-74 lazy 썸네일 · W-75 핀치 · W-69 payload · W-10·W-11·W-17 배치·테마 · W-84 키 가로채기 측정(mac Chrome·Safari · win Chrome·Edge · linux Chrome·Firefox) · D127 원본 재생 컷 공백 |
+| 유료 | D139 분석 중 겹침 · D141 다음 429 문구 · D142 동시 4개의 429·2단계 시간 · W-52 H2 · **H3 가격 재확인(2027-01-26 앞)** · W-39 H-C1 · W-14 · W-55 · W-57 · W-53·W-63·W-68 실제 번역 · 옛 인수(W-4·W-6·V3·V4·S11·S16·Q3-H·Q2) |
+| 실기 | 실제 Windows 첫 실행(README WP2) · 리눅스 첫 실행(W-84) |
+| 결정 | W-8 Luna 가격 · W-14b · D-2 요청 사이 캐시 · D-3 캐시 열쇠 이행 · D-4 바이트 신원 · 1단계 청크 동시 수(P-5) · 입구 두 단추(W-88) · 영어 칸 직접 편집(W-89) |
 
 ---
 
@@ -271,7 +300,7 @@ D27은 되풀이를 **치우는** 층이었다. 만들어지지 않게 하는 �
 7. 잘 돌면 `vlogsrt record`로 픽스처를 갱신한다. 지금 `tests/fixtures/api/`는 온도 0.0
    시절 응답이다 — 낱자 오검출 회귀의 표본으로는 그대로 유효하다
 
-## S12 — 줄 폭 16자를 지키게 한다 📋
+## S12 — 줄 폭 16자를 지키게 한다 ✅ (D38)
 
 실측 (77분 회차 `fr_day_1_2_fhd.srt` — 큐 1689장 · 줄 2067줄):
 
@@ -571,7 +600,7 @@ Q1이 끝나면 유료 재실행으로 위 두 굵은 숫자가 줄어드는지 
 
     vlogsrt record <video>      # whisper + gpt. 약 $0.012/분
 
-### Q3-2 파생 계층 📋
+### Q3-2 파생 계층 ✅ (D39)
 
 - `project/speech.py`·`project/boundary.py`는 지금 `pipeline.spine_to_cues`(whisper 전용)만
   부른다. 켜려면 `retext.plan` + `apply_retext`를 거기에 배선한다.
