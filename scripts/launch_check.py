@@ -1,4 +1,4 @@
-"""더블클릭 실행 파일(`실행.command`·`실행.bat`)이 함께 쓰는 확인 (D100 §8).
+"""더블클릭 실행 파일(`실행.command`·`실행.bat`·`실행.sh`)이 함께 쓰는 확인 (D100 §8, W-84).
 
 두 실행 파일이 같은 판단을 따로 짜면 한쪽만 고쳐지고 갈린다. 그래서 판단은 여기 한 곳에 두고,
 실행 파일은 이 명령의 종료 코드만 본다. 표준 라이브러리만 쓰고 앱(`vlogsrt`·`ui`)을 import하지
@@ -9,6 +9,7 @@
     python scripts/launch_check.py write-stamp   # 설치가 끝났다고 표지를 남긴다
     python scripts/launch_check.py importable    # 설치가 실패했어도 필요한 꾸러미가 다 있으면 0
     python scripts/launch_check.py tools         # ffmpeg·ffprobe가 PATH에 있으면 0
+    python scripts/launch_check.py advice        # 없어도 뜨지만 알려 줄 것(tkinter) — 언제나 0
 """
 
 from __future__ import annotations
@@ -108,11 +109,34 @@ def _write_stamp() -> int:
     return 0
 
 
+def advice_lines(platform: str, tkinter_present: bool) -> list[str]:
+    """막지 않는 안내 — macOS는 선택 창을 AppleScript로 연다(tkinter가 필요 없다, D106).
+
+    다른 운영체제의 「찾아보기」는 tkinter 자식 프로세스다. 없으면 앱이 단추를 감추고 경로 입력만
+    남긴다(W-46a) — 그래서 막지 않고 까는 명령만 알린다."""
+    if platform == "darwin" or tkinter_present:
+        return []
+    lines = ["「찾아보기」 선택 창에 tkinter가 필요합니다 — 없으면 경로를 직접 입력하세요."]
+    if platform == "win32":
+        lines.append("python.org 설치 프로그램의 「tcl/tk and IDLE」을 켜고 다시 설치하세요.")
+    else:
+        lines.append("예: sudo apt install python3-tk (Fedora: sudo dnf install python3-tkinter)")
+    return lines
+
+
+def _advice() -> int:
+    present = importlib.util.find_spec("tkinter") is not None
+    for line in advice_lines(sys.platform, present):
+        print(line, file=sys.stderr)
+    return 0
+
+
 COMMANDS: dict[str, Callable[[], int]] = {
     "stamp-ok": lambda: 0 if stamp_current(PROJECT_DIR) else 1,
     "write-stamp": _write_stamp,
     "importable": _check_importable,
     "tools": _check_tools,
+    "advice": _advice,
 }
 
 

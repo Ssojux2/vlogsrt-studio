@@ -34,7 +34,7 @@
 순서가 **컷 → 자막**으로 뒤집혔다. 규칙 4·9의 파생 계층 조항(D35)을 반드시 함께 읽어라.
 
 **지금 제품 표면은 로컬 브라우저 작업대다**(`vlogsrt/project/raw/`, `ui/`, 실행은
-`실행.command`·`실행.bat` 또는 `make ui`). **API 키는 `.env`에서만 읽는다** — 화면에 키 입력 칸이 없고,
+`실행.command`·`실행.bat`·`실행.sh`(리눅스, D144) 또는 `make ui` — 세 운영체제 CI가 오프라인 검사를 돈다, D144). **API 키는 `.env`에서만 읽는다** — 화면에 키 입력 칸이 없고,
 키를 넣었으면 앱을 다시 띄운다(D102). **주 흐름은 촬영 영상 폴더다**(D100): 명령 줄 「폴더 불러오기」로
 폴더를 고르면(경로 입력 · 「찾아보기」 — macOS NSOpenPanel, 그 밖 tkinter 자식 프로세스) 원본을 복사하지 않고
 `<폴더>/_vlogsrt/`(쓸 수 없으면 형제 `-vlogsrt`)에 작업공간을 두고 촬영 시각 순으로 참조해 들인다(영상이 없으면
@@ -474,6 +474,9 @@ zlib 헤더에 눌린다(`'F '` 10회=1.58 · 15회=2.42 · 20회=3.00). 되풀�
 ```bash
 # 검증 (가장 자주 쓴다)
 make check              # lint + type + test + invariant 전부
+python scripts/check_all.py      # 같은 단계를 파이썬 하나로(Windows에는 make가 없다, D144)
+python scripts/smoke_ui.py       # 오프라인 작업대가 이 운영체제에서 뜨는가(CI 첫 단계)
+python scripts/preview_workbench.py  # 합성 원본 셋으로 오프라인 작업대(7871) — 화면 확인용, 무료
 pytest                  # 테스트만
 
 # 파이프라인

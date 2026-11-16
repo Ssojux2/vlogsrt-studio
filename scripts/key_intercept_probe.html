@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>단축키 가로채기 측정</title>
+<style>
+  :root { --bg: #fff; --ink: #111; --line: #ddd; --ok: #1f7a3a; --bad: #b3261e; --dim: #666; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1c1c1e; --ink: #eee; --line: #3a3a3c; --ok: #6fd08c; --bad: #ff8a80; --dim: #aaa; }
+  }
+  body { background: var(--bg); color: var(--ink); font: 14px/1.5 system-ui, sans-serif; margin: 16px; }
+  table { border-collapse: collapse; width: 100%; max-width: 760px; }
+  th, td { border-bottom: 1px solid var(--line); padding: 4px 8px; text-align: left; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); } .dim { color: var(--dim); }
+  pre { white-space: pre-wrap; border: 1px solid var(--line); padding: 8px; max-width: 760px; }
+</style>
+</head>
+<body>
+<h1>단축키 가로채기 측정 (W-84, D144)</h1>
+<p>이 파일을 브라우저에서 열고(네트워크 없음), 아래 표의 키를 하나씩 누르세요.
+페이지가 키를 받았는지(✓)와, 누른 뒤에도 이 탭에 머물렀는지를 적습니다.
+브라우저나 운영체제가 먼저 가져가면 「받음」이 비어 있고, 탭이 바뀌거나 창이 닫히면 돌아와서 「놓침」을 누르세요.
+다 누른 뒤 「결과 복사」의 글을 <code>docs/plans/2026-11-16-fcp-window.md</code> 측정표에 붙입니다.</p>
+<p class="dim" id="env"></p>
+<table>
+  <thead><tr><th>키(맥 표기)</th><th>쓰임</th><th>받음</th><th>탭 유지</th><th></th></tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+<p><button type="button" id="copy">결과 복사</button></p>
+<pre id="out"></pre>
+<script>
+(function () {
+  var mac = /Mac|iPhone|iPad/.test(navigator.platform || "");
+  // [표시, code, mod, shift, alt, 쓰임]
+  var CHORDS = [
+    ["⌘1", "Digit1", true, false, false, "브라우저 창으로"],
+    ["⌘2", "Digit2", true, false, false, "타임라인 창으로"],
+    ["⌘3", "Digit3", true, false, false, "뷰어 창으로"],
+    ["⌘4", "Digit4", true, false, false, "인스펙터 보이기"],
+    ["⇧⌘2", "Digit2", true, true, false, "타임라인 인덱스"],
+    ["⌘E", "KeyE", true, false, false, "공유"],
+    ["⌘L", "KeyL", true, false, false, "반복 재생"],
+    ["⌘B", "KeyB", true, false, false, "블레이드"],
+    ["⌘=", "Equal", true, false, false, "확대"],
+    ["⌘−", "Minus", true, false, false, "축소"],
+    ["⌘S", "KeyS", true, false, false, "지금 저장"],
+    ["⌘Z", "KeyZ", true, false, false, "실행 취소"],
+    ["⌘T", "KeyT", true, false, false, "입력칸 ↔ 파형 (SE)"],
+    ["⌥C", "KeyC", false, false, true, "캡션(자막) 추가"],
+    ["⌥[", "BracketLeft", false, false, true, "시작 부분 다듬기"],
+    ["⌥]", "BracketRight", false, false, true, "끝 부분 다듬기"],
+    ["⌥↑", "ArrowUp", false, false, true, "이전 줄 (SE)"],
+    ["⌥↓", "ArrowDown", false, false, true, "다음 줄 (SE)"],
+    ["⇧⌘E", "KeyE", true, true, false, "다음 줄로 늘리기 (SE)"],
+    ["⇧⌘M", "KeyM", true, true, false, "합치기 (SE)"],
+    ["⌥⌘V", "KeyV", true, false, true, "커서에서 나누기 (SE)"],
+    ["F8", "F8", false, false, false, "다음 오류 (SE)"],
+    ["F11", "F11", false, false, false, "시작점 설정 (SE)"],
+    ["F12", "F12", false, false, false, "종료점 설정 (SE)"],
+    ["⌫", "Backspace", false, false, false, "삭제 · 제외"],
+    ["Space", "Space", false, false, false, "재생 · 멈춤"],
+  ];
+  function label(text) {
+    if (mac) { return text; }
+    return text.replace(/⌫/g, "Backspace").replace(/−/g, "-")
+      .replace(/⌘/g, "Ctrl+").replace(/⌥/g, "Alt+").replace(/⇧/g, "Shift+");
+  }
+  var state = CHORDS.map(function () { return { got: false, lost: false }; });
+  var body = document.getElementById("rows");
+  CHORDS.forEach(function (c, i) {
+    var tr = document.createElement("tr");
+    tr.innerHTML = "<td><kbd>" + label(c[0]) + "</kbd></td><td>" + c[5] + "</td>" +
+      '<td data-got></td><td data-kept></td><td><button type="button" data-lost>놓침</button></td>';
+    tr.querySelector("[data-lost]").addEventListener("click", function () {
+      state[i].lost = true; paint();
+    });
+    body.appendChild(tr);
+  });
+  function paint() {
+    var rows = body.querySelectorAll("tr");
+    state.forEach(function (s, i) {
+      rows[i].querySelector("[data-got]").innerHTML = s.got ? '<span class="ok">✓</span>' : "";
+      rows[i].querySelector("[data-kept]").innerHTML = s.lost ? '<span class="bad">✗</span>'
+        : (s.got ? '<span class="ok">✓</span>' : "");
+    });
+  }
+  document.addEventListener("keydown", function (ev) {
+    var mod = mac ? ev.metaKey : ev.ctrlKey;
+    CHORDS.forEach(function (c, i) {
+      if (ev.code === c[1] && mod === c[2] && ev.shiftKey === c[3] && ev.altKey === c[4]) {
+        state[i].got = true;
+        ev.preventDefault();
+      }
+    });
+    paint();
+  }, true);
+  document.getElementById("env").textContent = navigator.userAgent;
+  document.getElementById("copy").addEventListener("click", function () {
+    var lines = ["| 키 | 쓰임 | 받음 | 탭 유지 |", "|---|---|---|---|"];
+    CHORDS.forEach(function (c, i) {
+      var s = state[i];
+      lines.push("| " + label(c[0]) + " | " + c[5] + " | " + (s.got ? "✓" : "✗") + " | " +
+        (s.lost ? "✗" : (s.got ? "✓" : "?")) + " |");
+    });
+    var text = navigator.userAgent + "\n\n" + lines.join("\n");
+    document.getElementById("out").textContent = text;
+    if (navigator.clipboard) { navigator.clipboard.writeText(text).catch(function () {}); }
+  });
+  paint();
+})();
+</script>
+</body>
+</html>

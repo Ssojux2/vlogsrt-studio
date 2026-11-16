@@ -18,11 +18,12 @@
 
 ### 준비물
 
-| | macOS | Windows |
-|---|---|---|
-| Python 3.11 이상 | `brew install python@3.12` | `winget install Python.Python.3.12` |
-| ffmpeg · ffprobe | `brew install ffmpeg` | `winget install Gyan.FFmpeg` |
-| 자막 입히기(번인)용 libass ffmpeg — 선택 | `brew install ffmpeg-full` | `winget install Gyan.FFmpeg`(이미 든다) |
+| | macOS | Windows | Linux(예: Ubuntu) |
+|---|---|---|---|
+| Python 3.11 이상 | `brew install python@3.12` | `winget install Python.Python.3.12` | `sudo apt install python3.12 python3.12-venv` |
+| ffmpeg · ffprobe | `brew install ffmpeg` | `winget install Gyan.FFmpeg` | `sudo apt install ffmpeg` |
+| 자막 입히기(번인)용 libass ffmpeg — 선택 | `brew install ffmpeg-full` | `winget install Gyan.FFmpeg`(이미 든다) | 배포판 `ffmpeg`(대개 이미 든다) |
+| 「찾아보기」 선택 창 — 선택 | 필요 없음 | python.org 설치의 tcl/tk | `sudo apt install python3-tk` |
 
 Homebrew 기본 `ffmpeg`에는 libass가 없어 「자막 입히기」만 쓰지 못한다. `ffmpeg-full`은 PATH를 건드리지 않고
 자막 입히기에만 쓰인다(D116).
@@ -36,6 +37,10 @@ Homebrew 기본 `ffmpeg`에는 libass가 없어 「자막 입히기」만 쓰지
 - **Mac**: `실행.command`를 더블클릭한다. 처음 한 번은 「확인되지 않은 개발자」 경고가 뜰 수 있다 —
   파일을 **오른쪽 클릭 → 열기 → 열기**로 한 번 열면 다음부터는 더블클릭으로 열린다.
 - **Windows**: `실행.bat`을 더블클릭한다. 「Windows의 PC 보호」가 뜨면 **추가 정보 → 실행**.
+- **Linux**: 터미널에서 프로젝트 폴더로 가서 `./실행.sh`(W-84). 「찾아보기」 창이 없으면 경로를 직접 입력한다.
+
+세 운영체제 모두 같은 확인(`scripts/launch_check.py`)을 같은 차례로 거친다. 저장소의 CI가 macOS·Windows·Linux에서
+오프라인 검사를 돈다 — 지금은 macOS만 막는 게이트이고 Windows·Linux는 결과를 보고한다(`docs/plans/2026-11-16-cross-platform.md`).
 
 처음 실행하면 실행 환경(`.venv`)을 만들고 필요한 꾸러미를 깐다 — 인터넷이 필요하고 몇 분 걸린다.
 그다음부터는 바로 뜨고, 프로그램이 업데이트되어 `pyproject.toml`이 바뀌면 그때만 다시 깐다.
@@ -76,7 +81,8 @@ SD 카드처럼 **쓸 수 없는 폴더**면 그 옆에 `<폴더>-vlogsrt/`를 �
 | `7860 포트가 사용 중입니다` | 작업대가 이미 떠 있다 — 열린 창을 찾거나 브라우저에서 `http://127.0.0.1:7860`을 연다 |
 | 브라우저가 안 열린다 | 창에 찍힌 주소(`http://127.0.0.1:…`)를 브라우저에 붙여 넣는다 |
 | 분석이 시작되지 않는다 | `.env`에 키가 있는지 확인한다. **승인** 단추를 눌러야 분석이 돈다 |
-| 돈이 드는 호출 없이 화면만 보고 싶다 | 터미널에서 `./실행.command --offline`(Windows는 `실행.bat --offline`) — 이 실행의 유료 호출을 막는다 |
+| 돈이 드는 호출 없이 화면만 보고 싶다 | 터미널에서 `./실행.command --offline`(Windows는 `실행.bat --offline`, Linux는 `./실행.sh --offline`) — 이 실행의 유료 호출을 막는다 |
+| 내 원본 없이 화면만 둘러보고 싶다 | `python scripts/preview_workbench.py` — 합성 원본 셋으로 오프라인 작업대를 7871에 띄운다(무료) |
 
 > 이전 Final Cut 라이브러리 흐름(Final Cut으로 보내기, D56)도 설정 서랍에 남아 있다.
 > 그 절차는 `docs/raw-video-workflow.md`에 있다.

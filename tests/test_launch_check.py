@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "launch_check.py"
 MAC_LAUNCHER = ROOT / "실행.command"
 WIN_LAUNCHER = ROOT / "실행.bat"
+LINUX_LAUNCHER = ROOT / "실행.sh"
 
 
 def _load() -> ModuleType:
@@ -146,13 +147,62 @@ def test_module_stays_stdlib_only() -> None:
     assert "subprocess" not in imported
 
 
-@pytest.mark.parametrize("launcher", [MAC_LAUNCHER, WIN_LAUNCHER], ids=["mac", "win"])
+LAUNCHERS = [MAC_LAUNCHER, WIN_LAUNCHER, LINUX_LAUNCHER]
+LAUNCHER_IDS = ["mac", "win", "linux"]
+STEP_ORDER = ("stamp-ok", "write-stamp", "importable", "tools", "advice")
+
+
+@pytest.mark.parametrize("launcher", LAUNCHERS, ids=LAUNCHER_IDS)
 def test_launchers_install_the_stamped_extras(launcher: Path) -> None:
     text = launcher.read_text(encoding="utf-8")
     assert f'pip install -e ".[{launch_check.INSTALL_EXTRAS}]"' in text
-    for command in ("stamp-ok", "write-stamp", "importable", "tools"):
+    for command in STEP_ORDER:
         assert f"launch_check.py {command}" in text
     assert "-u -m ui.app" in text
+
+
+@pytest.mark.parametrize("launcher", LAUNCHERS, ids=LAUNCHER_IDS)
+def test_launchers_run_the_checks_in_the_same_order(launcher: Path) -> None:
+    """세 실행 파일이 같은 확인을 같은 차례로 — 한쪽만 고쳐 갈리지 않게(W-84)."""
+    text = launcher.read_text(encoding="utf-8")
+    first = [text.index(f"launch_check.py {command}") for command in STEP_ORDER]
+    assert first == sorted(first)
+    assert text.index("launch_check.py advice") < text.index("-u -m ui.app")
+
+
+@pytest.mark.parametrize("launcher", [MAC_LAUNCHER, LINUX_LAUNCHER], ids=["mac", "linux"])
+def test_posix_launchers_pass_arguments_through(launcher: Path) -> None:
+    assert '-u -m ui.app "$@"' in launcher.read_text(encoding="utf-8")
+
+
+def test_linux_launcher_is_bash_and_lf() -> None:
+    raw = LINUX_LAUNCHER.read_bytes()
+    assert raw.startswith(b"#!/usr/bin/env bash\n")
+    assert b"\r" not in raw
+
+
+@pytest.mark.parametrize(
+    ("platform", "present", "expected"),
+    [
+        ("darwin", False, 0),
+        ("linux", True, 0),
+        ("linux", False, 2),
+        ("win32", False, 2),
+    ],
+)
+def test_tkinter_advice_only_where_the_picker_needs_it(
+    platform: str, present: bool, expected: int
+) -> None:
+    lines = launch_check.advice_lines(platform, present)
+    assert len(lines) == expected
+    if platform == "linux" and not present:
+        assert "python3-tk" in lines[1]
+
+
+def test_advice_never_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(launch_check.importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setattr(launch_check.sys, "platform", "linux")
+    assert launch_check.main(["advice"]) == 0
 
 
 def test_windows_launcher_is_crlf_utf8_without_bom() -> None:
@@ -174,3 +224,8 @@ def test_windows_launcher_labels_exist() -> None:
 @pytest.mark.skipif(os.name == "nt", reason="실행 비트는 POSIX에만 있다")
 def test_mac_launcher_is_executable() -> None:
     assert os.access(MAC_LAUNCHER, os.X_OK)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="실행 비트는 POSIX에만 있다")
+def test_linux_launcher_is_executable() -> None:
+    assert os.access(LINUX_LAUNCHER, os.X_OK)

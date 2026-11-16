@@ -286,3 +286,16 @@
 - **태스크마다**: 워크트리에서 `make check`(W-84부터는 `scripts/check_all.py`도) → PR CI(ccd_pr `get_status`) → 화면 태스크는 `preview_start vlogsrt-ui-offline`으로 띄운 뒤 `read_page` · 콘솔 · 상호작용 · 스크린샷을 본다. 성능은 Long Animation Frame을 잰다.
 - **0단계**: `git branch -a --no-merged main`이 비어 있다. `gh repo view --json defaultBranchRef`가 `main`이다.
 - **인수 문서 확인 목록**(`2026-11-16-ui-integration-checklist.md`): W-86과 W-88 뒤에 오프라인 앱으로 상자를 채운다.
+
+---
+
+## 키 가로채기 측정표 (W-84 — 사람이 `scripts/key_intercept_probe.html`로 잰 결과를 붙인다)
+
+| 운영체제 · 브라우저 | 결과 |
+|---|---|
+| macOS Chrome | (미측정) |
+| macOS Safari | (미측정) |
+| Windows Chrome | (미측정) |
+| Windows Edge | (미측정) |
+| Linux Chrome | (미측정) |
+| Linux Firefox | (미측정) |

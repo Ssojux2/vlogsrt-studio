@@ -24,6 +24,7 @@ from typing import Any
 
 import gradio as gr
 
+from ui import platform_keys
 from ui.final_edit_app_js import APP_JS
 from ui.final_edit_js import CORE_JS
 
@@ -133,6 +134,7 @@ def keymap_payload() -> list[dict[str, object]]:
     for binding in KEYMAP:
         row = asdict(binding)
         row["inText"] = row.pop("in_text")
+        row["keys"] = platform_keys.display(binding.keys)
         rows.append(row)
     return rows
 
@@ -151,7 +153,7 @@ def _sheet_html() -> str:
     parts = []
     for group, bindings in groups.items():
         rows = "".join(
-            f"<dt><kbd>{html.escape(b.keys)}</kbd></dt><dd>{html.escape(b.label)}</dd>"
+            f"<dt><kbd>{html.escape(platform_keys.display(b.keys))}</kbd></dt><dd>{html.escape(b.label)}</dd>"
             for b in bindings
         )
         parts.append(f"<h4>{html.escape(group)}</h4><dl>{rows}</dl>")

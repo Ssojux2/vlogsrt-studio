@@ -52,6 +52,7 @@ echo [vlogsrt] 꾸러미 설치에 실패했지만 이미 깔린 것으로 계�
 :check_tools
 "%PY%" scripts\launch_check.py tools
 if errorlevel 1 goto :pause_fail
+"%PY%" scripts\launch_check.py advice
 
 echo [vlogsrt] Starting. A browser window opens shortly. Press Ctrl+C to quit.
 echo [vlogsrt] 브이로그 작업대를 시작합니다. 잠시 뒤 브라우저가 열립니다. 종료하려면 Ctrl+C.

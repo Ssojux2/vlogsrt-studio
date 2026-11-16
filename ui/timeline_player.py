@@ -21,6 +21,7 @@ from typing import Any
 
 import gradio as gr
 
+from ui import platform_keys
 from ui.final_edit_ui import JOB_ENDED, RELOAD_ID
 from ui.timeline_edit_js import TIMELINE_CORE_JS
 from ui.timeline_player_js import PLAYER_APP_JS
@@ -103,48 +104,53 @@ def timeline_player_html(model: dict[str, Any] | None) -> str:
         '<video id="tl-deck-b" class="tl-deck is-standby" preload="auto" playsinline></video>'
         '<div id="tl-missing" class="tl-missing" hidden></div>'
         '<div id="tl-overlay" class="tl-overlay"></div></div></div>'
-        '<div class="tl-transport">'
-        '<button type="button" data-tl="prev-cut" title="이전 컷 (↑)">⏮</button>'
-        '<button type="button" data-tl="toggle" id="tl-toggle"'
-        ' title="재생 · 멈춤 (Space)">▶</button>'
-        '<button type="button" data-tl="next-cut" title="다음 컷 (↓)">⏭</button>'
-        '<span id="tl-timecode" class="tl-timecode">00:00:00:00</span>'
-        '<span id="tl-source" class="tl-source"></span>'
-        '<span class="tl-gap"></span>'
-        '<button type="button" data-tl="blade"'
-        ' title="플레이헤드에서 클립 자르기 (⌘B)">자르기</button>'
-        '<button type="button" data-tl="delete-clip"'
-        ' title="고른 클립 지우기 — 뒤가 당겨 온다 (⌫)">클립 지우기</button>'
-        '<button type="button" data-tl="join"'
-        ' title="고른 클립을 맞닿은 다음 조각과 합치기">합치기</button>'
-        '<button type="button" data-tl="undo" id="tl-undo" title="되돌리기 (⌘Z)">되돌리기</button>'
-        '<button type="button" data-tl="redo" id="tl-redo"'
-        ' title="다시 하기 (⌘⇧Z)">다시 하기</button>'
-        '<button type="button" data-tl="force-save" id="tl-force" hidden>내 편집으로 덮기</button>'
-        '<button type="button" data-tl="prepare" id="tl-prepare" hidden>미리보기 준비</button>'
-        '<button type="button" data-tl="render" id="tl-render"'
-        ' title="저장한 타임라인을 원본에서 한 번 렌더한다(무료 로컬)">'
-        "이 타임라인으로 렌더</button>"
-        '<span id="tl-status" class="tl-status" aria-live="polite"></span></div>'
-        '<div class="tl-strip"><canvas id="tl-canvas"></canvas></div>'
-        '<div class="tl-range"><div class="tl-range-head"><span id="tl-source-head"></span>'
-        '<span class="tl-gap"></span>'
-        '<select id="tl-add-pick" class="tl-add-pick" aria-label="클립이 없는 원본" hidden>'
-        "</select>"
-        '<button type="button" data-tl="add-source" id="tl-add" hidden'
-        ' title="고른 원본 전체를 촬영 차례 자리에 클립으로 넣는다">원본 넣기</button>'
-        '<button type="button" data-tl="trim-start" title="클립 앞을 커서로 (⌥[)">앞 ⌥[</button>'
-        '<button type="button" data-tl="trim-end" title="클립 뒤를 커서로 (⌥])">뒤 ⌥]</button>'
-        "</div>"
-        '<div class="tl-source-bar"><canvas id="tl-source-canvas"'
-        ' aria-label="고른 클립의 원본 범위 — 손잡이를 끌어 앞뒤를 조정"></canvas></div></div>'
-        f"{_cue_panel_html()}</div>"
+        + platform_keys.display(
+            '<div class="tl-transport">'
+            '<button type="button" data-tl="prev-cut" title="이전 컷 (↑)">⏮</button>'
+            '<button type="button" data-tl="toggle" id="tl-toggle"'
+            ' title="재생 · 멈춤 (Space)">▶</button>'
+            '<button type="button" data-tl="next-cut" title="다음 컷 (↓)">⏭</button>'
+            '<span id="tl-timecode" class="tl-timecode">00:00:00:00</span>'
+            '<span id="tl-source" class="tl-source"></span>'
+            '<span class="tl-gap"></span>'
+            '<button type="button" data-tl="blade"'
+            ' title="플레이헤드에서 클립 자르기 (⌘B)">자르기</button>'
+            '<button type="button" data-tl="delete-clip"'
+            ' title="고른 클립 지우기 — 뒤가 당겨 온다 (⌫)">클립 지우기</button>'
+            '<button type="button" data-tl="join"'
+            ' title="고른 클립을 맞닿은 다음 조각과 합치기">합치기</button>'
+            '<button type="button" data-tl="undo" id="tl-undo"'
+            ' title="되돌리기 (⌘Z)">되돌리기</button>'
+            '<button type="button" data-tl="redo" id="tl-redo"'
+            ' title="다시 하기 (⌘⇧Z)">다시 하기</button>'
+            '<button type="button" data-tl="force-save" id="tl-force" hidden>'
+            "내 편집으로 덮기</button>"
+            '<button type="button" data-tl="prepare" id="tl-prepare" hidden>미리보기 준비</button>'
+            '<button type="button" data-tl="render" id="tl-render"'
+            ' title="저장한 타임라인을 원본에서 한 번 렌더한다(무료 로컬)">'
+            "이 타임라인으로 렌더</button>"
+            '<span id="tl-status" class="tl-status" aria-live="polite"></span></div>'
+            '<div class="tl-strip"><canvas id="tl-canvas"></canvas></div>'
+            '<div class="tl-range"><div class="tl-range-head"><span id="tl-source-head"></span>'
+            '<span class="tl-gap"></span>'
+            '<select id="tl-add-pick" class="tl-add-pick" aria-label="클립이 없는 원본" hidden>'
+            "</select>"
+            '<button type="button" data-tl="add-source" id="tl-add" hidden'
+            ' title="고른 원본 전체를 촬영 차례 자리에 클립으로 넣는다">원본 넣기</button>'
+            '<button type="button" data-tl="trim-start"'
+            ' title="클립 앞을 커서로 (⌥[)">앞 ⌥[</button>'
+            '<button type="button" data-tl="trim-end" title="클립 뒤를 커서로 (⌥])">뒤 ⌥]</button>'
+            "</div>"
+            '<div class="tl-source-bar"><canvas id="tl-source-canvas"'
+            ' aria-label="고른 클립의 원본 범위 — 손잡이를 끌어 앞뒤를 조정"></canvas></div></div>'
+        )
+        + f"{_cue_panel_html()}</div>"
     )
 
 
 def _cue_panel_html() -> str:
     """자막 칸(W-71i) — 보이는 자막 목록과 고른 자막의 편집 칸. 내용은 실행본이 그린다."""
-    return (
+    return platform_keys.display(
         '<div class="tl-cues"><div class="tl-cues-head"><strong>자막</strong>'
         '<span id="tl-cue-count" class="tl-cue-count"></span><span class="tl-gap"></span>'
         '<button type="button" data-tl="cue-insert"'

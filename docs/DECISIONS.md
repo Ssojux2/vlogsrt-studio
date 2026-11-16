@@ -11172,3 +11172,36 @@ Phase 2-6 「유휴 수다」가 이 몫이다. 지시: 「영상 정리」 탭�
 - **2초가 놓치는 것은 없다**: 상태 틱이 걷는 승인 알림·끝난 승인 작업은 사건(작업 상태)으로 걷히고 시간으로 사라지지 않는다.
   상태 칸 기억의 나이 한도(`STATUS_MEMO_MAX_AGE_SECONDS = 5`)도 2초보다 길다.
 - **사람 확인 🧑**: 실제 브라우저(사파리 · 크롬)와 실제 라이브러리에서 「영상 정리」의 반응. Final Cut 보내기 성공 · 실패 알림이 그대로 뜨는가.
+
+## D144 — 세 운영체제에서 바로 쓴다: CI 행렬 · 리눅스 실행기 · 운영체제별 단축키 표기 · 오프라인 미리보기 (2026-11-16, W-84, 사용자 지시)
+
+사용자 지시(2026-11-16): 「맥과 윈도우, 리눅스에서 바로 사용할 수 있었으면 좋겠는데, 그게 힘들다면 맥과 윈도우 먼저.
+브라우저로 열리는 형식 UI는 그대로」. 지금까지 Windows 분기는 가짜 모듈·`mypy --platform win32`로만 봤고(D100 §1) 실제로 돌린
+적이 없으며, 리눅스는 코드 분기(`xdg-open`·tkinter 선택 창)만 있고 실행기가 없었다. 계획 정본 `docs/plans/2026-11-16-fcp-window.md`.
+
+- **CI** `.github/workflows/check.yml`: macos·windows·ubuntu × Python 3.11, `VLOGSRT_OFFLINE=1`, 비밀 값 없음, 이벤트 글을 명령에
+  넣지 않는다. 단계: 꾸러미(`.[ui,project,dev]`) → `scripts/smoke_ui.py`(작업대가 127.0.0.1에 떠 `/`·`/vl-activity`가 200) →
+  PATH ffmpeg의 libass 확인(경고만) → `scripts/check_all.py`(Makefile `check`와 같은 단계·명령·차례 — 시험이 Makefile을 읽어 대조).
+  **macOS만 막는 게이트**이고 Windows·Linux는 `continue-on-error`로 결과를 보고한다 — 실패는 skip·xfail하지 않고 W-84a…로 나눠
+  고친 뒤 막는 쪽으로 올린다(Windows 먼저). ffmpeg는 brew / choco `ffmpeg-full`(gyan, libass 포함) / apt(+ `python3-tk`).
+- **리눅스 실행기** `실행.sh`(bash · LF · 755): `실행.command`와 같은 판단 — `.venv` · 설치 표지 · `importable` · `tools` · `advice`.
+  세 실행 파일이 같은 확인을 같은 차례로 부르는지 시험이 잠근다.
+- **막지 않는 안내** `launch_check.py advice`: macOS가 아니고 tkinter가 없으면 「찾아보기」 대신 경로 입력을 쓰라며 까는 명령을
+  알린다(종료 코드 0 — 앱은 단추를 감추고 경로 입력만 남긴다, W-46a). 프로세스를 띄우지 않는다는 약속 그대로라 libass는 여기서
+  보지 않는다 — 번인이 누를 때 `preprocess.subtitle_ffmpeg`가 PATH ffmpeg 먼저 찾고 운영체제별 설치 명령을 이미 댄다(D116).
+  그래서 `BurnSettings.ffmpeg_candidates`(Homebrew `ffmpeg-full` 자리)는 바꾸지 않았다 — 계획의 「운영체제별 후보 표」는 필요 없었다.
+- **단축키 표기** `ui/platform_keys.py`(순수): 키 표는 macOS 글자로 적고, macOS가 아니면 Final Cut·Subtitle Edit처럼 Mod = Ctrl
+  (⌘→Ctrl+ · ⌥→Alt+ · ⇧→Shift+ · ⌫→Backspace). 서버와 브라우저가 같은 컴퓨터라 서버의 `sys.platform`이 곧 화면의 운영체제다.
+  초안 편집 키 시트·브라우저 키 표(`keymap_payload`)·타임라인 재생기 단추 설명에 썼다. **macOS 바이트는 그대로다.** 판정
+  (`metaKey` 대 `ctrlKey`)은 `FE.keyAction`의 `ctx.mac`이 이미 하고 있었다. JS 안에 박힌 단추 글자(초안 편집 막대의 「⌘Z」 등)는
+  W-89 키 맵 통합에서 같은 표로 옮긴다.
+- **오프라인 미리보기** `scripts/preview_workbench.py`: UI 통합 인수 정리 부록 B와 같은 합성 라이브러리(4K·HD·세로 24fps 30초 원본
+  셋 · 폴더 불러오기 · 재생 분석 · 원본 범위 타임라인 하나)를 운영체제 임시 폴더 `vlogsrt-preview/`에 만들고(다시 부르면 캐시,
+  반쯤 만든 것은 처음부터) 전용 상태 파일로 `RawWorkspaceUi`를 127.0.0.1에 띄운다. `VLOGSRT_OFFLINE=1` 강제 · `UiInstance`를
+  쓰지 않는다(같은 저장소의 실제 앱에 붙지 않게). **저장소 안은 안 된다** — `.claude/worktrees/…`·`.vlogsrt-cache/`는 숨김 경로라
+  폴더 불러오기가 원본을 거부했다(실측). 실측: 처음 77초 · 두 번째 0.04초.
+- **키 가로채기 측정** `scripts/key_intercept_probe.html`(정적, 네트워크 없음): Final Cut·Subtitle Edit 키(⌘1–4 · ⌘E · ⌘L · ⌘B ·
+  ⌥C · F8 · F11 · F12 …)를 브라우저가 페이지에 넘기는지 사람이 잰다(mac Chrome·Safari · win Chrome·Edge · linux Chrome·Firefox).
+  W-89는 통과한 키만 싣는다.
+- **바뀌지 않는 것**: 앱 동작·지문·캐시 열쇠·승인, macOS 키 글자, `make check`.
+- **사람 확인 🧑**: 실제 Windows·Linux 첫 실행(README 확인 목록), 키 측정.
