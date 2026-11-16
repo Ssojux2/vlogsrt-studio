@@ -37,7 +37,7 @@ from datetime import UTC, datetime
 from datetime import date as date_type
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, ParamSpec, Protocol, TypeVar, cast
+from typing import Any, ClassVar, ParamSpec, Protocol, TypeVar, cast
 
 from vlogsrt import log, oscompat, preprocess
 from vlogsrt.project.raw import asr_epoch as asr_epoch_store
@@ -376,6 +376,10 @@ class ReplayAsrProvider:
     Gemini 해석기로 재생하고, 없으면 보이는 실패다(W-52b1).
     """
 
+    CACHE_ORIGIN: ClassVar[str] = "ReplayAsrProvider"
+    """청크 캐시 열쇠의 제공자 칸(P-6, D160) — 클래스 이름이 아니라 이 고정 값이다. 지금 이름과
+    같아 열쇠 바이트가 그대로다 — 클래스 이름을 바꿔도 이 값은 그대로 둔다."""
+
     declared: Sequence[tuple[float, float, str]] | None
     exact: Mapping[str, tuple[tuple[float, float, str], ...]] = field(default_factory=dict)
     gemini_exact: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
@@ -502,6 +506,10 @@ class ApprovedTimingProvider:
     (`inner`)로 간다 — 그 안에서 오늘 날짜의 수명주기 검사가 먼저 돈다.
     """
 
+    CACHE_ORIGIN: ClassVar[str] = "ApprovedTimingProvider"
+    """청크 캐시 열쇠의 제공자 칸(P-6, D160) — 클래스 이름이 아니라 이 고정 값이다. 지금 이름과
+    같아 열쇠 바이트가 그대로다 — 클래스 이름을 바꿔도 이 값은 그대로 둔다."""
+
     inner: TimingProvider
     workflow: RawWorkflowConfig
     audio: SelectedAudio
@@ -554,6 +562,10 @@ class ApprovedPhaseAsrProvider:
     (`CountingAsrGate`)은 승인 예산을 넘지 않는다. 수명주기(종료 예정일)는 안쪽
     전송 경계가 맨 먼저 돈다(§11.10·§14.3).
     """
+
+    CACHE_ORIGIN: ClassVar[str] = "ApprovedPhaseAsrProvider"
+    """청크 캐시 열쇠의 제공자 칸(P-6, D160) — 클래스 이름이 아니라 이 고정 값이다. 지금 이름과
+    같아 열쇠 바이트가 그대로다 — 클래스 이름을 바꿔도 이 값은 그대로 둔다."""
 
     inner: TimingProvider
     workflow: RawWorkflowConfig
@@ -2094,6 +2106,37 @@ def _start_clip_preencode(
     return _ClipPreencode(run)
 
 
+def _window_cache_dirs(
+    workspace: RawWorkspace,
+    asset: SourceAsset,
+    settings: RawUnderstandingSettings,
+    workflow: RawWorkflowConfig,
+) -> tuple[Path, Path]:
+    """의미 판정 캐시 폴더 — (지금 쓰는 곳, 읽기만 하는 옛 곳)(P-6, D160).
+
+    판정 파일 이름은 요청 신원 sha이고 그 신원이 모델 · 증거(발화 글 포함)를 묶는다 — 그래서
+    폴더 열쇠에는 의미 분석 모델만 둔다. 예전 열쇠는 시간 · 글자 모델까지 묶어 시간 엔진만 바꿔도
+    같은 판정을 다른 폴더에서 찾지 못했다. 옛 폴더는 읽기만 한다 — 이미 산 판정을 다시 사지
+    않는다."""
+
+    def folder(models: object) -> Path:
+        key = hashlib.sha256(
+            json.dumps(
+                {
+                    "settings": asdict(settings),
+                    "models": models,
+                    "media": media_refs.fingerprint(workspace, asset.asset_id),
+                    "source": asset.content_sha256,
+                },
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        return workspace.root / "cache" / "source-luna" / asset.asset_id / key
+
+    current = folder({"luna_model": workflow.models.luna_model})
+    return current, folder(asdict(workflow.models))
+
+
 def _window_clips(
     context: JobContext,
     workspace: RawWorkspace,
@@ -2203,23 +2246,15 @@ def _finish_source(
             },
         )
 
-    cache_settings = hashlib.sha256(
-        json.dumps(
-            {
-                "settings": asdict(settings),
-                "models": asdict(workflow.models),
-                "media": media_refs.fingerprint(workspace, asset.asset_id),
-                "source": asset.content_sha256,
-            },
-            sort_keys=True,
-        ).encode()
-    ).hexdigest()
-    cache_dir = workspace.root / "cache" / "source-luna" / asset.asset_id / cache_settings
+    cache_dir, legacy_dir = _window_cache_dirs(workspace, asset, settings, workflow)
     cache_dir.mkdir(parents=True, exist_ok=True)
     cached_annotations = {}
     for evidence in evidence_windows:
         digest = luna.semantic_request_sha256(evidence, settings, workflow.models.luna_model)
         candidate = cache_dir / (digest + ".json")
+        if not candidate.is_file():
+            # 옛 폴더(D160 이전)도 읽는다 — 이미 산 판정을 다시 사지 않는다.
+            candidate = legacy_dir / (digest + ".json")
         if candidate.is_file():
             try:
                 annotation = SemanticAnnotation(**json.loads(candidate.read_text(encoding="utf-8")))

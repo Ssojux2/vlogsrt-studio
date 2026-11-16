@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from fractions import Fraction
 from pathlib import Path
-from typing import cast
+from typing import ClassVar, cast
 
 from vlogsrt import env, oscompat, preprocess
 from vlogsrt.config import Config
@@ -208,6 +208,10 @@ class CachedTimingProvider:
     다시 묻지 않고 재생한다.
     """
 
+    CACHE_ORIGIN: ClassVar[str] = "CachedTimingProvider"
+    """청크 캐시 열쇠의 제공자 칸(P-6, D160) — 클래스 이름이 아니라 이 고정 값이다. 지금 이름과
+    같아 열쇠 바이트가 그대로다 — 클래스 이름을 바꿔도 이 값은 그대로 둔다."""
+
     def __init__(
         self,
         inner: TimingProvider,
@@ -301,6 +305,10 @@ class TemperedCachedTimingProvider(CachedTimingProvider):
     조용히 사라지므로, 원본이 손잡이를 가질 때만 이 갈래를 쓴다 — 서명이 곧
     능력의 증거다.
     """
+
+    CACHE_ORIGIN: ClassVar[str] = "TemperedCachedTimingProvider"
+    """청크 캐시 열쇠의 제공자 칸(P-6, D160) — 클래스 이름이 아니라 이 고정 값이다. 지금 이름과
+    같아 열쇠 바이트가 그대로다 — 클래스 이름을 바꿔도 이 값은 그대로 둔다."""
 
     def timed_transcript(
         self,

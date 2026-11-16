@@ -300,7 +300,7 @@ def plan_heard_chunks(
     처음 듣는 원본과 「다시 듣기」로 차례가 오른 원본만 조용한 계획이다. 청크 수는 같다."""
     fixed = plan_audio_chunks(audio, understanding)
     if len(fixed) == 1 or _heard_before(
-        audio, fixed, settings, type(provider).__name__, workdir, cache_dir, asr_epoch
+        audio, fixed, settings, provider_origin(provider), workdir, cache_dir, asr_epoch
     ):
         return ChunkPlan(fixed, CHUNK_PLAN_FIXED)
     return ChunkPlan(plan_quiet_chunks(audio, understanding), CHUNK_PLAN_QUIET)
@@ -507,7 +507,7 @@ def _transcribe_span(
     )
     chunk_request_id = f"{request_id}:chunk-{position:04d}"
     fingerprint = asr_chunk_key(
-        _sha256_file(wav_path), type(provider).__name__, settings, span, asr_epoch
+        _sha256_file(wav_path), provider_origin(provider), settings, span, asr_epoch
     )
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -684,7 +684,7 @@ def _rescue_slot(outcome: AsrChunkOutcome, context: _RescueContext) -> _RescueSl
     span = SampleSpan(outcome.sample_start, outcome.sample_end)
     wav_path = chunk_wav_path(context.workdir, outcome.chunk_index)
     write_pcm_slice(context.audio, span, wav_path)
-    origin = type(context.provider).__name__
+    origin = provider_origin(context.provider)
     base = asr_chunk_key(_sha256_file(wav_path), origin, context.settings, span, context.asr_epoch)
     return _RescueSlot(span, outcome.chunk_index, wav_path, base)
 
@@ -846,6 +846,16 @@ def _outcome_from_cache(raw: Mapping[str, Any]) -> AsrChunkOutcome:
 def chunk_wav_path(workdir: Path, position: int) -> Path:
     """청크 WAV의 자리 — 1단계 글자 경로(D59 19c)가 whisper와 **같은 WAV**를 다시 쓴다."""
     return workdir / f"asr-chunk-{position:04d}.wav"
+
+
+def provider_origin(provider: object) -> str:
+    """청크 캐시 열쇠의 제공자 칸(P-6, D160) — 제공자 클래스의 고정 값 `CACHE_ORIGIN`.
+
+    예전에는 `type(provider).__name__`이라 클래스 이름을 바꾸면 이미 산 전사를 다시 샀다. 고정
+    값은 지금 이름과 같아 열쇠 바이트가 그대로다. 값이 없는 제공자(시험의 가짜)는 예전처럼 클래스
+    이름이다."""
+    origin = getattr(provider, "CACHE_ORIGIN", None)
+    return origin if isinstance(origin, str) and origin else type(provider).__name__
 
 
 def asr_chunk_key(

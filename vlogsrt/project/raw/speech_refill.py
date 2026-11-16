@@ -28,7 +28,7 @@ from dataclasses import dataclass, replace
 from datetime import date
 from fractions import Fraction
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from vlogsrt import log, oscompat
 from vlogsrt.project.raw import source_text
@@ -429,6 +429,10 @@ class ApprovedRefillTimingProvider:
     스트림·범위·예약을 다시 본다. 이 층은 그 앞에서 **어느 소리의 어느 조각인가**를 본다.
     """
 
+    CACHE_ORIGIN: ClassVar[str] = "ApprovedRefillTimingProvider"
+    """청크 캐시 열쇠의 제공자 칸(P-6, D160) — 클래스 이름이 아니라 이 고정 값이다. 지금 이름과
+    같아 열쇠 바이트가 그대로다 — 클래스 이름을 바꿔도 이 값은 그대로 둔다."""
+
     inner: Any
     audio: SelectedAudio
     pcm_sha256: str
@@ -453,8 +457,8 @@ class ApprovedRefillTimingProvider:
         )
 
 
-WHISPER_ORIGIN = ApprovedRefillTimingProvider.__name__
-"""whisper 캐시 열쇠의 제공자 칸 — 실행(`type(provider).__name__`)과 범위 재기가 같은 값을 쓴다."""
+WHISPER_ORIGIN = ApprovedRefillTimingProvider.CACHE_ORIGIN
+"""whisper 캐시 열쇠의 제공자 칸 — 실행(`provider_origin`)과 범위 재기가 같은 값을 쓴다."""
 
 
 @dataclass(frozen=True, slots=True)

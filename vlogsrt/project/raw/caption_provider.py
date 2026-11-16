@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import date
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Protocol, TypeGuard
+from typing import Any, ClassVar, Protocol, TypeGuard
 
 from vlogsrt import log
 from vlogsrt.config import Config
@@ -664,6 +664,10 @@ class TransportTimingProvider:
     확인받은 유일한 실전송 구현이다.
     """
 
+    CACHE_ORIGIN: ClassVar[str] = "TransportTimingProvider"
+    """청크 캐시 열쇠의 제공자 칸(P-6, D160) — 클래스 이름이 아니라 이 고정 값이다. 지금 이름과
+    같아 열쇠 바이트가 그대로다 — 클래스 이름을 바꿔도 이 값은 그대로 둔다."""
+
     sender: TranscriptionSender
     cfg: Config
 
@@ -805,6 +809,10 @@ class GeminiTranscribeTimingProvider:
     묻기(D78)는 이 엔진에 없다(`RescueTimingProvider`가 아니다). 관찰자·취소는 whisper 전송과 같은
     것을 받는다(`timing_provider_for`가 그 전송에서 옮겨 준다).
     """
+
+    CACHE_ORIGIN: ClassVar[str] = "GeminiTranscribeTimingProvider"
+    """청크 캐시 열쇠의 제공자 칸(P-6, D160) — 클래스 이름이 아니라 이 고정 값이다. 지금 이름과
+    같아 열쇠 바이트가 그대로다 — 클래스 이름을 바꿔도 이 값은 그대로 둔다."""
 
     client: Any
     observer: Any = None
