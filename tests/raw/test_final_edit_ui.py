@@ -21,6 +21,7 @@ pytest.importorskip("fastapi", reason="웹 UI extra(fastapi)가 없다", exc_typ
 import gradio as gr  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+from tests.raw.review_tick_parts import review_tick_dep, tick_part  # noqa: E402
 from ui import final_edit_ui  # noqa: E402
 from ui.final_edit_ui import (  # noqa: E402
     FINAL_EDIT_TAB_ID,
@@ -240,10 +241,12 @@ def test_blocks_wire_the_tabs_and_the_switch(tmp_path: Path, local_socket: None)
     deps = config["dependencies"]
     fns = {dep["id"]: app.fns[dep["id"]].fn for dep in deps}
     panel = server._final_edit
-    (tick,) = [d for d in deps if fns[d["id"]] == panel.switch_tick]
-    tabs_id = tick["outputs"][0]
+    # 자동 전환은 화면 틱 하나에 실린다(W-83, D143) — 그 몫의 칸은 예전 의존 그대로다.
+    tick = tick_part(app, server, panel.switch_tick)
+    assert tick.inputs[0] == server._signature_state._id
+    tabs_id = tick.outputs[0]
     assert by_id[tabs_id]["type"] == "tabs"
-    assert tick["outputs"][1] == panel.block._id and tick["outputs"][2] == panel.open_button._id
+    assert tick.outputs[1] == panel.block._id and tick.outputs[2] == panel.open_button._id
     (armed,) = [d for d in deps if fns[d["id"]] == panel.arm]
     started = [d for d in deps if fns[d["id"]] == server.render_export_view]
     assert armed["trigger_after"] == started[0]["id"]
@@ -252,7 +255,7 @@ def test_blocks_wire_the_tabs_and_the_switch(tmp_path: Path, local_socket: None)
     assert opened["outputs"] == [tabs_id, panel.block._id]
     (reloaded,) = [d for d in deps if fns[d["id"]] == panel.reload]
     assert reloaded["outputs"][:2] == [panel.block._id, panel.open_button._id]
-    assert reloaded["outputs"][2] == tick["outputs"][3]  # 틱과 같은 기억
+    assert reloaded["outputs"][2] == tick.outputs[3] == tick.inputs[1]  # 틱과 같은 기억
     hidden = by_id[reloaded["targets"][0][0]]
     assert hidden["props"]["elem_id"] == RELOAD_ID and hidden["props"]["visible"] == "hidden"
     views = [d for d in deps if fns[d["id"]] == panel.view]
@@ -270,16 +273,17 @@ def test_keymap_has_no_duplicate_chords_and_every_action_is_known() -> None:
 def test_the_timers_rest_while_the_final_edit_tab_is_in_front(
     tmp_path: Path, local_socket: None
 ) -> None:
-    """W-75, D134 — 최종 편집 탭이 앞이면 1·2초 타이머 셋을 멈추고 「영상 정리」로 오면 켠다.
+    """W-75, D134 — 최종 편집 탭이 앞이면 화면 타이머를 멈추고 「영상 정리」로 오면 켠다.
 
-    실측: 타이머 한 번의 `dispatch('tick')`이 브라우저 주 스레드를 약 260 ms 막아 2초에 1.3초를
-    먹었다 — 확대·끌기·재생이 최대 0.5초 걸렸다. 탭의 `select`는 누름·프로그램 전환·로드에 뜬다."""
+    W-83(D143)부터 타이머는 화면 틱 하나다. 출력이 하나라 문은 갱신 하나를 돌려준다 — 묶음을
+    돌려주면 그라디오가 그 묶음을 값으로 받아 주기가 NaN이 되고 브라우저가 4 ms마다 틱을 쐈다(실측).
+    탭의 `select`는 누름·프로그램 전환·로드에 뜬다."""
     server, _root, _signature = _server(tmp_path)
     app = server.build_blocks()
     config = app.config
     by_id = {component["id"]: component for component in config["components"]}
     timers = [c["id"] for c in config["components"] if c["type"] == "timer"]
-    assert len(timers) == 3
+    assert len(timers) == 1 and review_tick_dep(app, server)["targets"] == [(timers[0], "tick")]
     gates = {}
     for dep in config["dependencies"]:
         (target, event), *_ = dep["targets"]
@@ -287,7 +291,7 @@ def test_the_timers_rest_while_the_final_edit_tab_is_in_front(
             gates[by_id[target]["props"]["elem_id"]] = dep
     for tab, active in ((FINAL_EDIT_TAB_ID, False), ("review-tab", True)):
         dep = gates[tab]
-        assert sorted(dep["outputs"]) == sorted(timers) and dep["queue"] is False
-        replies = app.fns[dep["id"]].fn()
-        assert [reply.active for reply in replies] == [active] * 3
-        assert all("value" not in reply._constructor_args[0] for reply in replies)
+        assert dep["outputs"] == timers and dep["queue"] is False
+        reply = app.fns[dep["id"]].fn()
+        assert isinstance(reply, gr.Timer) and reply.active is active  # 묶음이 아니다
+        assert "value" not in reply._constructor_args[0]  # 주기는 그대로 둔다

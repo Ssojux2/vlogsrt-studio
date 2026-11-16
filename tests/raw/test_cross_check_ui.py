@@ -33,6 +33,7 @@ pytest.importorskip(
 
 import gradio as gr  # noqa: E402
 
+from tests.raw.review_tick_parts import tick_part  # noqa: E402
 from tests.raw.test_cross_check import (  # noqa: E402
     EarsSender,
     _cache_live_answer,
@@ -403,8 +404,9 @@ def test_blocks_put_the_glossary_in_the_settings_drawer_and_wire_save_and_refres
     assert clicked["outputs"] == [status._id, box._id, ui._capcut_progress_md._id, loaded._id]
     assert not [d for d in deps if (box._id, "change") in d["targets"]]  # 저장은 단추뿐이다
     # 쓰지 않은 칸만 맞추는 `glossary_tick`은 1초 상태 틱 하나 안에서 돈다(D63 세션 C).
-    (tick,) = [f for f in app.fns.values() if getattr(f.fn, "__name__", "") == "status_tick"]
-    inputs, outputs = [b._id for b in tick.inputs], [b._id for b in tick.outputs]
+    # 상태 틱은 화면 틱 하나에 실린 처리기다(W-83, D143) — 그 몫의 칸이 예전 의존 그대로다.
+    tick = tick_part(app, ui, ui.status_tick)
+    inputs, outputs = tick.inputs, tick.outputs
     assert inputs[0] == ui._signature_state._id and inputs[3:5] == [box._id, loaded._id]
     assert outputs[2:5] == [box._id, status._id, loaded._id]
     refreshers = [

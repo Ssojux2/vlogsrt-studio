@@ -299,16 +299,16 @@ class FinalEditPanel:
 
     # ── 잇기 ──────────────────────────────────────────────────────────
 
-    def wire(self, tabs: Any, timer: Any, started: Any, refresh_events: tuple[Any, ...]) -> None:
-        """자동 전환(누른 내보내기 성공) · 「최종 편집 열기」 · 작업공간이 바뀌면 다시 그리기."""
+    def wire(self, tabs: Any, tick: Any, started: Any, refresh_events: tuple[Any, ...]) -> None:
+        """자동 전환(누른 내보내기 성공) · 「최종 편집 열기」 · 작업공간이 바뀌면 다시 그리기.
+
+        `tick`은 화면 틱에 처리기를 싣는다(W-83, D143) — 자동 전환은 화면 틱 한 번에 함께 돈다."""
         signature = self.owner._signature_state
         seen = gr.State(None)
         outputs = [tabs, self.block, self.open_button, seen]
         # 성공한 누름에서만 — 오류로 끝난 누름은 옛 작업을 무장하지 않는다.
         started.success(self.arm, [signature, seen], seen, show_progress="hidden")
-        timer.tick(
-            self.switch_tick, [signature, seen], outputs, queue=False, show_progress="hidden"
-        )
+        tick(self.switch_tick, [signature, seen], outputs)
         self.open_button.click(self.open_view, signature, [tabs, self.block])
         self.reload_button.click(
             self.reload, [signature, seen], outputs[1:], queue=False, show_progress="hidden"

@@ -162,17 +162,19 @@ def test_lightweight_status_does_not_wait_for_workbench_render(tmp_path, monkeyp
         future.result(timeout=2)
 
 
-def test_progress_timer_is_unqueued_and_old_render_cannot_overwrite_it(tmp_path, local_socket):
+def test_only_the_status_tick_writes_the_progress_line_not_the_redraw(tmp_path, local_socket):
+    from tests.raw.review_tick_parts import tick_part
     from ui.workspace_service import RawWorkspaceUi
 
     ui = RawWorkspaceUi(state_path=tmp_path / "state.json")
     app = ui.build_blocks()
-    # 상태 줄은 1초 상태 틱 하나가 쓴다(D63 세션 C) — 대기열 밖, 다시 그리기와 따로.
-    status = next(f for f in app.fns.values() if f.fn == ui.status_tick)
-    render = next(f for f in app.fns.values() if f.fn == ui.capcut_tick_view)
-    assert status.queue is False
-    assert ui._capcut_progress_md in status.outputs
-    assert ui._capcut_progress_md not in render.outputs
+    # 상태 줄은 상태 틱 하나가 쓴다(D63 세션 C) — 다시 그리기와 따로. 둘은 화면 틱 하나에
+    # 실린 처리기다(W-83, D143 — 의존은 대기열이다, 알림이 대기열에서만 뜬다). 다시 그리기의
+    # 몫에는 상태 줄 칸이 없다 — 옛 그리기가 상태 줄을 덮어쓰지 못한다.
+    status = tick_part(app, ui, ui.status_tick)
+    render = tick_part(app, ui, ui.capcut_tick_view)
+    assert ui._capcut_progress_md._id in status.outputs
+    assert ui._capcut_progress_md._id not in render.outputs
 
 
 def test_cancel_during_batch_resumes_without_second_stt_call(tmp_path, monkeypatch):

@@ -36,6 +36,7 @@ pytest.importorskip(
 
 import gradio as gr  # noqa: E402
 
+from tests.raw.review_tick_parts import tick_part  # noqa: E402
 from tests.raw.test_background_library import setup_library  # noqa: E402
 from tests.raw.test_relisten import approve, pre_19b_bindings, pre_19b_digest, stage  # noqa: E402
 from tests.raw.test_selection_analysis import wait_until  # noqa: E402
@@ -803,10 +804,13 @@ def test_blocks_put_the_cross_check_under_the_scope_and_wire_it_like_the_radio(
     (chosen,) = [d for d in deps if d["targets"] == [(box._id, "input")]]
     assert chosen["inputs"] == [ui._signature_state._id, box._id]
     assert chosen["outputs"] == [ui._capcut_progress_md._id]
-    # 틱은 1초 상태 틱 하나다(D63 세션 C) — 교차 확인 칸은 범위 칸 다음 칸이다.
+    # 틱은 상태 틱 하나다(D63 세션 C) — 교차 확인 칸은 범위 칸 다음 칸이다. 상태 틱은 화면 틱
+    # 하나에 실린 처리기다(W-83, D143) — 그 몫의 입력이 예전 의존 그대로다.
     refresh = {d["targets"][0][1]: d for d in deps if box._id in d["outputs"]}
     assert sorted(refresh) == ["load", "tick"]
-    assert refresh["tick"]["inputs"][:3] == [ui._signature_state._id, radio._id, box._id]
+    status = tick_part(app, ui, ui.status_tick)
+    assert refresh["tick"] == status.dep
+    assert status.inputs[:3] == [ui._signature_state._id, radio._id, box._id]
     css = ui_facade.WORKBENCH_CSS
     assert "#review-tab:has(#library-approve:disabled) #vl-cross-check { display: none; }" in css
 
