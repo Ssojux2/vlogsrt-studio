@@ -544,6 +544,7 @@ def test_missing_requested_dtd_propagates_unavailable(
 
 
 @needs_xmllint
+@needs_installed_dtd
 def test_validate_roundtrip_delegates_to_the_p1_04_boundary_exactly_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

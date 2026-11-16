@@ -2209,16 +2209,23 @@ def _ensure_full_source_preview(
     try:
         # 로컬 미디어 동시 한도(D100 §2) — 분석 프록시와 같은 자리를 다투되 먼저 얻는다(D136).
         with media_refs.local_media_slot(urgent=True):
-            extraction = preprocess.extract_visual_review_preview(
-                selection.path,
-                target,
-                audio_stream_index=selection.audio_stream_index,
-                encoding=_preview_encoding(probe.video),
-                # 한도는 원본 길이를 따라 자란다 — 0018(1359초)이 고정 1800초에 걸렸다(D62).
-                timeout_seconds=REVIEW_MEDIA.preview_timeout(float(probe.duration)),
-                priority=REVIEW_MEDIA.process_niceness,
-            )
-        built = True
+            # 자리를 기다리는 사이 동시 준비가 같은 키를 먼저 게시했을 수 있다 — 그러면 그
+            # 파일이 곧 결과다. 다시 보지 않으면 추출의 스테이징 안전장치가 「이미 있다」로
+            # 실패한다(CI 실측).
+            published = target.is_file()
+            if not published:
+                extraction = preprocess.extract_visual_review_preview(
+                    selection.path,
+                    target,
+                    audio_stream_index=selection.audio_stream_index,
+                    encoding=_preview_encoding(probe.video),
+                    # 한도는 원본 길이를 따라 자란다 — 0018(1359초)이 고정 1800초에 걸렸다(D62).
+                    timeout_seconds=REVIEW_MEDIA.preview_timeout(float(probe.duration)),
+                    priority=REVIEW_MEDIA.process_niceness,
+                )
+        if published:
+            extraction = _measure_preview(target)
+        built = not published
     except RuntimeError as error:
         if "게시 경로가 이미 있다" not in str(error):
             _write_record(
