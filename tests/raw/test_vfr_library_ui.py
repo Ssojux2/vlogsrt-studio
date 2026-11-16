@@ -159,6 +159,9 @@ def test_selection_analysis_publishes_a_review_with_a_vfr_source_present(
     wait_until(lambda: server._quick.get("stage") in (DONE, FAILED))
 
     assert server._quick["stage"] == DONE, server._quick
+    # 화면 단계는 작업의 끝 알림에서 DONE이 되고, 작업 기록은 그 뒤에 「succeeded」로 적힌다 —
+    # 느린 기계(CI)에서는 그 사이를 읽을 수 있다(W-84a). 기록이 끝날 때까지 기다린다.
+    wait_until(lambda: server.raw.get_job(root, server._quick["job_id"]).status != "running")
     job = server.raw.get_job(root, server._quick["job_id"])
     assert job.kind == "selection_analysis" and job.status == "succeeded"
     head = server.raw.review_workspace_facade(root).load_head().revision
