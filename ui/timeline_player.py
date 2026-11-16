@@ -30,6 +30,8 @@ from ui.timeline_player_js import PLAYER_APP_JS
 PLAYER_BLOCK_ID = "vl-timeline-player"
 PLAYER_ROOT_ID = "tl-root"
 TAB_LABEL = "원본 범위 타임라인"
+BURN_NONE = "none"
+"""「번인 캡션: 없음」 — 예전 렌더 그대로(`timeline_share.BURN_NONE`과 같다, 시험이 대조한다)."""
 PLAYER_JS = TIMELINE_CORE_JS + CAPTION_GRID_JS + PLAYER_APP_JS
 READY = "ready"
 
@@ -127,9 +129,15 @@ def timeline_player_html(model: dict[str, Any] | None) -> str:
             '<button type="button" data-tl="force-save" id="tl-force" hidden>'
             "내 편집으로 덮기</button>"
             '<button type="button" data-tl="prepare" id="tl-prepare" hidden>미리보기 준비</button>'
+            # 「공유」(W-88, D147) — Final Cut 공유 패널의 「번인 캡션:」(없음 · 언어)을 옮겼다.
+            '<label class="tl-burn" title="공유할 때 영상에 입힐 자막(Final Cut 「번인 캡션」)">'
+            '번인 캡션 <select id="tl-burn" aria-label="번인 캡션">'
+            '<option value="none">없음 — 렌더만</option>'
+            '<option value="ko">한국어</option>'
+            '<option value="ko-en">한국어 + 영어</option></select></label>'
             '<button type="button" data-tl="render" id="tl-render"'
-            ' title="저장한 타임라인을 원본에서 한 번 렌더한다(무료 로컬)">'
-            "이 타임라인으로 렌더</button>"
+            ' title="저장한 타임라인을 원본에서 한 번 렌더하고, 고르면 자막을 입힌다(무료 로컬)">'
+            "공유</button>"
             '<span id="tl-status" class="tl-status" aria-live="polite"></span></div>'
             '<div class="tl-strip"><canvas id="tl-canvas"></canvas></div>'
             '<div class="tl-range"><div class="tl-range-head"><span id="tl-source-head"></span>'
@@ -220,6 +228,9 @@ TIMELINE_PLAYER_CSS = """
 .tl-transport button:disabled { opacity: 0.5; cursor: default; }
 .tl-strip canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: pointer;
   touch-action: none; }
+.tl-burn { display: inline-flex; gap: 4px; align-items: center; font-size: 12px;
+  color: var(--vl-ink-muted); }
+.tl-burn select { font: inherit; font-size: 12px; }
 .tl-cues { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
 .tl-cues-head { display: flex; gap: 6px; align-items: center; }
 .tl-cue-count { color: var(--vl-ink-muted); }
@@ -410,9 +421,16 @@ class TimelinePlayer:
     def _render(
         self, root: Any, timeline_id: str | None, payload: dict[str, object]
     ) -> dict[str, object]:
-        """저장된 리비전 하나를 렌더하는 작업을 건다 — 작업이 그 리비전을 다시 확인한다(D130)."""
+        """저장된 리비전 하나를 렌더하는 작업을 건다 — 작업이 그 리비전을 다시 확인한다(D130).
+
+        「번인 캡션」을 고르면 같은 작업이 렌더 뒤 자막을 입힌다(「공유」, W-88 · D147).
+        「없음」이면 예전 렌더 그대로다."""
         revision = payload.get("revision")
         if timeline_id is None or not isinstance(revision, int) or isinstance(revision, bool):
             raise ValueError("렌더 요청의 모양이 틀렸습니다(타임라인 · 리비전).")
-        handle = self.owner.raw.start_timeline_render(root, timeline_id, revision)
+        burn = self.owner._serve_str(payload, "burn") or BURN_NONE
+        if burn == BURN_NONE:
+            handle = self.owner.raw.start_timeline_render(root, timeline_id, revision)
+        else:
+            handle = self.owner.raw.start_timeline_share(root, timeline_id, revision, burn)
         return {"ok": True, "jobId": handle.job_id}

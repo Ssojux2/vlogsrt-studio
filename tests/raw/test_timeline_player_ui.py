@@ -356,6 +356,44 @@ def test_render_needs_the_token_and_starts_the_timeline_render_at_that_revision(
     assert player.action({**payload, "revision": "5"}, "render")["ok"] is False
 
 
+def test_share_with_burn_captions_starts_the_share_job_and_none_stays_a_render(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W-88(D147) — 「번인 캡션」을 고르면 같은 렌더 단추가 공유 작업(렌더 + 입히기)을 건다."""
+    from vlogsrt.project.raw import timeline_share
+
+    assert timeline_player.BURN_NONE == timeline_share.BURN_NONE
+    server, _root, signature = _server(tmp_path)
+    player = server._timeline_player
+    shared: list[tuple[str, int, str]] = []
+    rendered: list[tuple[str, int]] = []
+
+    def share(_root: Path, timeline_id: str, revision: int, burn: str) -> Any:
+        shared.append((timeline_id, revision, burn))
+        return SimpleNamespace(job_id="s1")
+
+    def render(_root: Path, timeline_id: str, revision: int) -> Any:
+        rendered.append((timeline_id, revision))
+        return SimpleNamespace(job_id="r1")
+
+    monkeypatch.setattr(server.raw, "start_timeline_share", share)
+    monkeypatch.setattr(server.raw, "start_timeline_render", render)
+    payload: dict[str, object] = {
+        "signature": signature,
+        "token": server._visual_lifetime_token,
+        "timelineId": "t1",
+        "revision": 5,
+    }
+    assert player.action({**payload, "burn": "ko-en"}, "render") == {"ok": True, "jobId": "s1"}
+    assert player.action({**payload, "burn": "none"}, "render") == {"ok": True, "jobId": "r1"}
+    assert shared == [("t1", 5, "ko-en")] and rendered == [("t1", 5)]
+    page = timeline_player_html(client_model("sig", "tok", _opened(), _media(), TIERS))
+    assert 'id="tl-burn"' in page and ">공유</button>" in page
+    for value in timeline_share.BURN_MODES:
+        assert f'<option value="{value}"' in page, value
+    assert 'burn: burnPick ? burnPick.value : "none"' in PLAYER_JS
+
+
 def test_job_reports_a_render_job_and_the_script_reopens_the_draft_panel_on_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

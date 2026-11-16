@@ -4024,6 +4024,27 @@ class RawWorkspaceService:
         fingerprint = f"render_export/timeline/{timeline_id}@{revision}"
         return self.submit_job(root, RENDER_EXPORT_JOB_KIND, fingerprint, body)
 
+    def start_timeline_share(
+        self, root: Path, timeline_id: str, revision: int, burn: str
+    ) -> JobHandle:
+        """「공유」(W-88, D147) — 렌더(D130)하고 `burn`이 「없음」이 아니면 자막을 입힌다(D116).
+
+        작업 종류·지문 머리는 렌더와 같다(결과 카드·「다시 열기」가 그대로 본다). 번인을 고르면
+        libass ffmpeg를 작업 전에 확인한다. 영어는 사지 않는다(D114) — 저장된 번역만 쓴다.
+        무료 로컬이다."""
+        from vlogsrt.project.raw import burn_export, timeline_share
+
+        mode = timeline_share.require_mode(burn)
+        style = burn_export.saved_style(self, root)
+        if mode != timeline_share.BURN_NONE:
+            burn_export.executable()
+
+        def body(context: JobContext) -> None:
+            timeline_share.share(self, root, timeline_id, revision, mode, style, context)
+
+        fingerprint = f"render_export/timeline/{timeline_id}@{revision}/{mode}"
+        return self.submit_job(root, RENDER_EXPORT_JOB_KIND, fingerprint, body)
+
     def export_srt_again(self, root: Path) -> Any:
         """「SRT만 다시 내보내기」(D115) — 마지막 초안 폴더에 지금 원본 자막으로 새 SRT를 쓴다.
 

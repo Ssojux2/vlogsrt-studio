@@ -1024,13 +1024,15 @@ PLAYER_APP_JS = r"""
       return;
     }
     if (S.playing) { stopPlayback(); }
+    var burnPick = $("tl-burn");
     var payload = { signature: S.signature, token: S.token, timelineId: S.timelineId,
-      revision: S.baseRevision };
+      revision: S.baseRevision, burn: burnPick ? burnPick.value : "none" };
     if (W.__vlServer) { W.__vlServer.wake(true); }
     S.server.tl_render(payload).then(function (got) {
-      if (!got || !got.ok) { say((got && got.error) || "렌더를 걸지 못했습니다.", true); return; }
-      say("리비전 " + payload.revision + "을 렌더합니다(무료 로컬) — 활동 띠에서 진행을 보고," +
-        " 끝나면 아래 초안 편집과 「영상 정리」 결과 카드에 나옵니다.", false);
+      if (!got || !got.ok) { say((got && got.error) || "공유를 걸지 못했습니다.", true); return; }
+      say("리비전 " + payload.revision + "을 공유합니다(렌더" +
+        (payload.burn === "none" ? "" : " + 자막 입히기") + ", 무료 로컬) — 활동 띠에서 진행을" +
+        " 보고, 끝나면 결과 카드와 초안 폴더에 나옵니다.", false);
       watchRender(got.jobId);
     });
   }
@@ -1050,7 +1052,9 @@ PLAYER_APP_JS = r"""
           say("렌더가 끝나지 못했습니다(" + got.status + ") — 「기록」에서 까닭을 보세요.", true);
           return;
         }
-        say("렌더가 끝났습니다 — 아래 초안 편집 칸에 새 초안을 열었습니다.", false);
+        say("공유를 마쳤습니다 — 결과 카드의 「초안 폴더 열기」에 영상이 있습니다(자막을" +
+          " 입혔으면 <이름>.burned.mp4 · 영어 번역이 아직 없으면 한국어만). 「최종 편집」 탭도" +
+          " 새 초안으로 열었습니다.", false);
         reopenDraft();
       });
     }, POLL_MS);
