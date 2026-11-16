@@ -17,7 +17,7 @@ import json
 import math
 import unicodedata
 from collections.abc import Mapping
-from dataclasses import dataclass, fields, is_dataclass, replace
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from fractions import Fraction
@@ -825,7 +825,10 @@ class RawGeminiTranscribeProfile:
     timeout_seconds: float = 300.0
     mode: str = "verbatim"
     granularities: tuple[str, ...] = ("word",)
-    language_codes: Mapping[str, str] = MappingProxyType({"ko": "ko-KR"})
+    # 3.11 dataclass는 해시할 수 없는 기본값(mappingproxy)을 거부한다 — 인스턴스마다 만든다.
+    language_codes: Mapping[str, str] = field(
+        default_factory=lambda: MappingProxyType({"ko": "ko-KR"})
+    )
     max_audio_seconds_with_word_times: float = 900.0
     inline_request_max_bytes: int = 20_000_000
     audio_input_per_minute: Decimal = Decimal("0.003")
