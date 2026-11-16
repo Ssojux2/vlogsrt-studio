@@ -60,6 +60,13 @@ CAPTION_GRID_JS = r"""
     return String(text).split("\n").map(function (line) { return textChars(line); });
   };
   G.oneLine = function (text) { return String(text).split("\n").join(" ⏎ "); };
+  // 영어 열(W-87d) — 저장된 번역의 열쇠는 공백을 한 칸으로 이은 한국어(`translation.cue_lines`)다.
+  // 짝이 없으면 null(글을 고쳤거나 아직 옮기지 않았다). 빈 글은 옮기지 않으므로 ""(빈 칸).
+  G.englishOf = function (text, pairs) {
+    var key = String(text).trim().split(/\s+/).filter(Boolean).join(" ");
+    if (!key) { return ""; }
+    return Object.prototype.hasOwnProperty.call(pairs || {}, key) ? pairs[key] : null;
+  };
   root.__vlCaptionGrid = G;
   if (typeof module !== "undefined" && module.exports) { module.exports = G; }
 })(typeof window !== "undefined" ? window : globalThis);

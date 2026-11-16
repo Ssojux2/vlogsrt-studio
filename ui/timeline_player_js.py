@@ -24,6 +24,7 @@ PLAYER_APP_JS = r"""
   }
   S.server = server;
   var POLL_MS = 2000;
+  var TRANSLATION_KEY = "vlogsrt.translationMode";
 
   function $(id) { return document.getElementById(id); }
   function clamp(value, low, high) { return Math.max(low, Math.min(high, value)); }
@@ -79,9 +80,10 @@ PLAYER_APP_JS = r"""
     S.deck = 0;
     if (!same) {
       S.playhead = 0; S.sel = 0; S.cursor = null; S.status = ""; S.statusError = false;
-      S.cue = null; S.picked = []; S.anchor = null;
+      S.cue = null; S.picked = []; S.anchor = null; S.english = null;
     }
     bindDom();
+    restoreTranslation();
     // 뷰어 하나(W-86b) — 화면(.tl-stage)을 위 덱 뷰어 칸으로 옮긴다(노드째, 청취자 그대로).
     if (W.__vlWindow && W.__vlWindow.adoptProgram) { W.__vlWindow.adoptProgram(S.rootEl); }
     showDeck();
@@ -843,7 +845,7 @@ PLAYER_APP_JS = r"""
       count.textContent = "보이는 " + S.proj.cues.length + "개" + (S.proj.hidden.length
         ? " · 컷에 가려진 " + S.proj.hidden.length + "개(클립을 늘리면 돌아온다)" : "");
     }
-    var pickedKey = S.picked.join("\n");
+    var pickedKey = S.picked.join("\n") + (S.translation ? "\u0001" + englishKey() : "");
     if (list.__tlProj === S.proj && list.__tlCue === S.cue && list.__tlPicked === pickedKey) {
       paintCueFollow();
       return;
@@ -859,8 +861,10 @@ PLAYER_APP_JS = r"""
     }
     // Subtitle Edit식 표(W-87, D146) — # · 시작 · 끝 · 길이 · 텍스트 · 간격 · 문자/초.
     // 경고는 그 칸만 붉게(지우거나 숨기지 않는다), 까닭은 줄의 title에. F8·⇧F8로 오간다.
+    list.classList.toggle("is-translation", !!S.translation);
     list.innerHTML = '<div class="tl-cue-grid-head" aria-hidden="true"><span>#</span>' +
-      "<span>시작</span><span>끝</span><span>길이</span><span>텍스트</span><span>간격</span>" +
+      "<span>시작</span><span>끝</span><span>길이</span><span>텍스트</span>" +
+      (S.translation ? "<span>영어</span>" : "") + "<span>간격</span>" +
       "<span>문자/초</span></div>" + captionRows().map(function (row) {
         var warn = warnText(row.id);
         return '<div class="tl-cue-row' + (isPicked(row.id) ? " is-selected" : "") +
@@ -871,6 +875,7 @@ PLAYER_APP_JS = r"""
           '<span class="tl-cue-time">' + timecode(row.endFrame) + "</span>" +
           cell("tl-cue-num", row.bad.dur, row.seconds.toFixed(2)) +
           cell("tl-cue-words", row.bad.text, esc(CG.oneLine(row.text)) || "(빈 글)") +
+          (S.translation ? englishCell(row.text) : "") +
           cell("tl-cue-num", row.bad.gap,
             row.gapSeconds === null ? "" : row.gapSeconds.toFixed(2)) +
           cell("tl-cue-num", row.bad.cps, row.cps === null ? "" : row.cps.toFixed(1)) + "</div>";
@@ -900,6 +905,53 @@ PLAYER_APP_JS = r"""
   }
   function captionRows() {
     return CG.rows(S.proj.cues, S.warns, seqTicks(), TL.tickRate(S.doc.facts), TL.textChars);
+  }
+  // ─── 번역 모드(W-87d, D153) — 렌더한 초안의 저장된 영어를 한국어 글로 찾아 보인다(읽기만) ───
+  function englishKey() {
+    if (!S.english) { return "none"; }
+    return S.english === "pending" || S.english === "error" ? S.english : "ready";
+  }
+  function englishLabel(text) {
+    if (S.english === "pending") { return { text: "찾는 중…", missing: true }; }
+    if (!S.english || S.english === "error") { return { text: "번역을 읽지 못함", missing: true }; }
+    var en = CG.englishOf(text, S.english.pairs);
+    if (en === null) { return { text: "번역 없음", missing: true }; }
+    return { text: en, missing: false };
+  }
+  function englishCell(text) {
+    var label = englishLabel(text);
+    return '<span class="tl-cue-en' + (label.missing ? " is-missing" : "") + '"' +
+      (label.missing ? ' title="글을 고쳤거나 아직 옮기지 않았습니다 — 공유 뒤 결과 카드의' +
+        ' 「영어 SRT로 변환」으로 옮깁니다"' : "") + ">" + esc(label.text) + "</span>";
+  }
+  function askEnglish() {
+    S.english = "pending";
+    var asked = S.timelineId;
+    S.server.tl_english({ signature: S.signature, timelineId: asked }).then(function (got) {
+      if (asked !== S.timelineId) { return; }
+      S.english = got && got.ok ? { pairs: got.pairs || {} } : "error";
+      paintCues();
+      paintCueEditor(true);
+    });
+    paintCues();
+  }
+  // 번역 모드는 이 브라우저에만 기억한다 — 켜져 있으면 열 때 찾는다.
+  function restoreTranslation() {
+    try { S.translation = W.localStorage.getItem(TRANSLATION_KEY) === "on"; }
+    catch (error) { S.translation = false; }
+    var button = $("tl-translation");
+    if (button) { button.setAttribute("aria-pressed", S.translation ? "true" : "false"); }
+    if (S.translation && !S.english) { askEnglish(); }
+  }
+  function toggleTranslation() {
+    S.translation = !S.translation;
+    try { W.localStorage.setItem(TRANSLATION_KEY, S.translation ? "on" : ""); }
+    catch (error) { /* 기억은 편의일 뿐 */ }
+    var button = $("tl-translation");
+    if (button) { button.setAttribute("aria-pressed", S.translation ? "true" : "false"); }
+    if (S.translation && !S.english) { askEnglish(); return; }
+    paintCues();
+    paintCueEditor(true);
   }
   function cell(cls, bad, html) {
     return '<span class="' + cls + (bad ? " is-bad" : "") + '">' + html + "</span>";
@@ -1002,6 +1054,13 @@ PLAYER_APP_JS = r"""
     if (warn) { warn.textContent = warnText(id); }
     var text = $("tl-cue-text");
     if (text && !typing && text.value !== cue[4]) { text.value = cue[4]; }
+    var note = $("tl-cue-en");
+    if (note) {
+      note.hidden = !S.translation;
+      var label = englishLabel(cue[4]);
+      note.textContent = "영어 · " + label.text;
+      note.classList.toggle("is-missing", label.missing);
+    }
   }
   // 입력칸의 시각·길이·문자/초·줄 길이(Subtitle Edit 입력칸) — 고치는 중인 칸은 덮지 않는다.
   function paintCueTimes(id, cue) {
@@ -1036,6 +1095,7 @@ PLAYER_APP_JS = r"""
       '<span id="tl-cue-warn" class="tl-cue-warn"></span>' +
       '<textarea id="tl-cue-text" data-cue="' + esc(id) + '" spellcheck="false"' +
       ' aria-label="자막 글 — ⌘Enter·Esc로 확정"></textarea>' +
+      '<span id="tl-cue-en" class="tl-cue-en-note" hidden></span>' +
       '<div class="tl-cue-buttons">' +
       cueButton("cue-start", "시작을 여기로 [", "자막 시작을 플레이헤드로") +
       cueButton("cue-end", "끝을 여기로 ]", "자막 끝을 플레이헤드로") +
@@ -1476,6 +1536,9 @@ PLAYER_APP_JS = r"""
           " 「초안 편집(이전)」 탭도 새 초안으로 열었습니다.", false);
         reopenDraft();
         if (W.__vlWindow && W.__vlWindow.showInspector) { W.__vlWindow.showInspector("share"); }
+        // 새 초안의 저장된 영어가 생겼을 수 있다 — 번역 모드면 다시 찾는다.
+        S.english = null;
+        if (S.translation) { askEnglish(); }
       });
     }, POLL_MS);
   }
@@ -1665,7 +1728,7 @@ PLAYER_APP_JS = r"""
       "cue-insert": function () { commitText(); cueOp("insert"); },
       "force-save": function () { saveNow(true); }, render: render, index: toggleIndex,
       "index-clips": function () { indexTab("clips"); },
-      "index-cues": function () { indexTab("cues"); } };
+      "index-cues": function () { indexTab("cues"); }, translation: toggleTranslation };
     var act = acts[target.getAttribute("data-tl")];
     if (act) { act(); }
   }

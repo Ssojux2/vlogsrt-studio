@@ -174,7 +174,11 @@ def _cue_panel_html() -> str:
         '<div class="tl-cues"><div class="tl-cues-head"><strong>자막</strong>'
         '<span id="tl-cue-count" class="tl-cue-count"></span><span class="tl-gap"></span>'
         '<button type="button" data-tl="cue-insert"'
-        ' title="플레이헤드에 빈 자막 넣기 (⌥C)">새 자막 ⌥C</button></div>'
+        ' title="플레이헤드에 빈 자막 넣기 (⌥C)">새 자막 ⌥C</button>'
+        # 번역 모드(W-87d, D153) — Subtitle Edit 「번역 모드 전환」: 영어 열을 붙인다(읽기만).
+        '<button type="button" data-tl="translation" id="tl-translation" aria-pressed="false"'
+        ' title="번역 모드 전환 — 렌더한 초안의 저장된 영어를 한국어 글로 찾아 보인다'
+        '(사지 않는다)">번역 모드</button></div>'
         '<canvas id="tl-lane" class="tl-lane" tabindex="-1"'
         ' aria-label="파형 자막 레인 — 블록을 끌어 시각을 고치고,'
         ' 빈 곳을 끌어 새 선택(Enter로 넣기)">'
@@ -290,6 +294,13 @@ TIMELINE_PLAYER_CSS = """
    머리는 목록 위에 붙는다. */
 .tl-cue-row, .tl-cue-grid-head { display: grid; column-gap: 8px; padding: 3px 8px;
   grid-template-columns: 2.5em 6.5em 6.5em 3.5em minmax(0, 1fr) 3.5em 3.5em; }
+/* 번역 모드(W-87d) — 텍스트 옆에 영어 열. 짝이 없는 줄은 흐리게 「번역 없음」. */
+.tl-cue-list.is-translation .tl-cue-row, .tl-cue-list.is-translation .tl-cue-grid-head {
+  grid-template-columns: 2.5em 6.5em 6.5em 3.5em minmax(0, 1fr) minmax(0, 1fr) 3.5em 3.5em; }
+.tl-cue-en { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tl-cue-en.is-missing, .tl-cue-en-note.is-missing { color: var(--vl-ink-muted);
+  font-style: italic; }
+#tl-translation[aria-pressed="true"] { background: var(--vl-accent-soft); }
 .tl-cue-grid-head { position: sticky; top: 0; z-index: 1; background: var(--vl-surface-raised);
   color: var(--vl-ink-muted); border-bottom: 1px solid var(--vl-line-strong); }
 .tl-cue-row { cursor: pointer; border-bottom: 1px solid var(--vl-line); }
@@ -389,7 +400,20 @@ class TimelinePlayer:
         def tl_wave(payload: dict[str, object]) -> dict[str, object]:
             return self.action(payload, "wave")
 
-        return [tl_media, tl_prepare, tl_save, tl_render, tl_tiers, tl_add_source, tl_job, tl_wave]
+        def tl_english(payload: dict[str, object]) -> dict[str, object]:
+            return self.action(payload, "english")
+
+        return [
+            tl_media,
+            tl_prepare,
+            tl_save,
+            tl_render,
+            tl_tiers,
+            tl_add_source,
+            tl_job,
+            tl_wave,
+            tl_english,
+        ]
 
     def action(self, payload: dict[str, object], kind: str) -> dict[str, object]:
         """어떤 예외도 500이 아니라 값으로 돌아간다. 준비·저장·렌더는 서명·수명 토큰에 묶인다."""
@@ -418,6 +442,9 @@ class TimelinePlayer:
                 source_id = owner._serve_str(payload, "sourceId")
                 wave = owner.raw.timeline_waveform(root, source_id)
                 return {"ok": True, "sourceId": source_id, "wave": wave}
+            if kind == "english":
+                pairs = owner.raw.timeline_english(root, timeline_id or "")
+                return {"ok": True, "timelineId": timeline_id, "pairs": pairs}
             if kind == "tiers":
                 source_id = owner._serve_str(payload, "sourceId")
                 tiers = owner.raw.timeline_tiers(root, [source_id])

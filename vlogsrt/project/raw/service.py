@@ -4152,6 +4152,14 @@ class RawWorkspaceService:
 
         return source_waveform.waveform(self._workspace(root), source_id)
 
+    def timeline_english(self, root: Path, timeline_id: str) -> dict[str, str]:
+        """타임라인 자막의 영어 열(W-87d) — 렌더한 초안들의 저장된 번역을 한국어 글로.
+
+        읽기만 한다(무료 — 사지 않는다)."""
+        from vlogsrt.project.raw import timeline_english
+
+        return timeline_english.english_by_text(self, root, timeline_id)
+
     def timeline_tiers(self, root: Path, source_ids: Sequence[str]) -> dict[str, list[list[str]]]:
         """원본마다 등급 구간 [시작 초, 끝 초, 등급](원본 시계, 원점 0) — 범위 조정의 띠(W-71d).
 
