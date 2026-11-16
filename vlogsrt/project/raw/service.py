@@ -4762,8 +4762,12 @@ class RawWorkspaceService:
         client: object | None = None,
         on: date | None = None,
         timing_client: object | None = None,
+        preencode_clips: bool = False,
     ) -> JobHandle:
         """의미 분석 작업을 제출한다 — 기본은 **오프라인 재생**, 실제 호출은 두 단계 승인만.
+
+        `preencode_clips`는 전체 승인(전사 + 영상 분석)이 1단계 동안 Gemini 창 클립을 미리 자르게
+        한다(P-4, D158) — 「전사만」 승인은 넘기지 않는다.
 
         재생(`mode="replay"`)은 단일 패스로 전부 재생한다. 실제 호출
         (`mode="live"`)은 **1단계(내부 ASR)**만 시작한다: 사람이 만든 원본별
@@ -4798,6 +4802,8 @@ class RawWorkspaceService:
             assets,
             timing_client=timing_client,
         )
+        if preencode_clips:
+            providers = replace(providers, preencode_clips=True)
         fingerprint = self._analysis_fingerprint(
             order.revision_id, assets, understanding, workflow, mode, root=root
         )

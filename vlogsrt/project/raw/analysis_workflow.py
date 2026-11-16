@@ -24,11 +24,13 @@ Luna 판정 → **비디오 격자 조정** → 불변 문서 기록.
 
 from __future__ import annotations
 
+import contextvars
 import functools
 import hashlib
 import inspect
 import json
 import math
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
@@ -976,6 +978,9 @@ class AnalysisProviders:
     asr_approvals: Mapping[str, AsrPhaseApproval] | None = None
     luna_approvals: Mapping[str, object] | None = None
     on: date_type | None = None
+    preencode_clips: bool = False
+    """1단계 동안 Gemini 창 클립을 미리 자른다(P-4, D158) — 전체 승인(전사 + 영상 분석)일 때만
+    참이다. 「전사만」 승인은 그 클립을 쓰지 않으니 거짓이다."""
 
     def is_live(self) -> bool:
         return self.origin == luna.ORIGIN_LIVE
@@ -1833,19 +1838,37 @@ def _asr_phase_source(
             document_path=str(artifact_path.relative_to(workspace.root)),
             window_count=int(artifact.get("window_count") or 0),
         )
-    asr_evidence, utterances, text_record = _transcribe_source(
-        context,
+    preencode = _start_clip_preencode(
         workspace,
-        revision,
         asset,
-        settings,
         workflow,
         providers,
-        audio=audio,
+        settings=settings,
         grid=grid,
-        source_dir=source_dir,
-        asr_epoch=asr_epoch,
+        audio=audio,
+        timeline=timeline,
     )
+    try:
+        asr_evidence, utterances, text_record = _transcribe_source(
+            context,
+            workspace,
+            revision,
+            asset,
+            settings,
+            workflow,
+            providers,
+            audio=audio,
+            grid=grid,
+            source_dir=source_dir,
+            asr_epoch=asr_epoch,
+        )
+    except BaseException:
+        if preencode is not None:
+            preencode.stop()
+        raise
+    finally:
+        if preencode is not None:
+            preencode.join()
     utterances, input_fp = _seed_stage1(
         workspace, asset, timeline, utterances, settings, workflow, input_fp, asr_epoch
     )
@@ -1997,6 +2020,75 @@ def _semantic_phase_source(
         source_dir=source_dir,
         frame_source=frame_source,
     )
+
+
+class _ClipPreencode:
+    """1단계(전사 API를 기다리는 동안) 창 클립을 미리 자르는 일꾼 하나(P-4, D158).
+
+    클립은 2단계가 쓰는 같은 캐시(`media_refs.clip_sampler` — 원본 sha · 소리 트랙 · 구간)에
+    들어가므로 2단계는 자르지 않고 원장 확인만 한다. 미리 자르기는 **덤**이다 — 실패는 경고만
+    남기고 2단계가 예전처럼 다시 자르거나 클립 없이 묻는다. 전사가 실패·취소되면 지금 클립
+    뒤에 멈춘다.
+    """
+
+    def __init__(self, run: Callable[[threading.Event], None]) -> None:
+        self._halt = threading.Event()
+        self._thread = threading.Thread(
+            target=contextvars.copy_context().run,
+            args=(run, self._halt),
+            name="vlogsrt-clip-preencode",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._halt.set()
+
+    def join(self) -> None:
+        self._thread.join()
+
+
+def _start_clip_preencode(
+    workspace: RawWorkspace,
+    asset: SourceAsset,
+    workflow: RawWorkflowConfig,
+    providers: AnalysisProviders,
+    *,
+    settings: RawUnderstandingSettings,
+    grid: VideoGrid,
+    audio: SelectedAudio | None,
+    timeline: CommonFileTimeline,
+) -> _ClipPreencode | None:
+    """전체 승인 · Gemini 분석이면 창 클립을 미리 자르기 시작한다 — 그 밖은 None(예전 그대로).
+
+    창의 문맥 구간은 길이 · 설정만으로 정해진다(발화는 창에 배정될 뿐 구간을 바꾸지 않는다) — 그래서
+    발화 없이 세운 창 계획이 2단계의 구간과 같다(시험이 잠근다)."""
+    if not providers.preencode_clips:
+        return None
+    if analysis_provider(workflow.models.luna_model) != ANALYSIS_PROVIDER_GOOGLE:
+        return None
+    windows = plan_common_windows(timeline, (), settings).windows
+    track = None if audio is None else audio.audio_stream_index
+    sampler = media_refs.clip_sampler(workspace, asset, audio_stream_index=track)
+
+    def run(halt: threading.Event) -> None:
+        made = 0
+        for window in windows:
+            seconds = window.context_end - window.context_start
+            if halt.is_set():
+                break
+            if seconds <= 0:
+                continue
+            try:
+                sampler.clip(start=window.context_start + grid.presentation_origin, seconds=seconds)
+                made += 1
+            except (RuntimeError, OSError) as error:
+                log.warn(
+                    f"분석 클립 미리 자르기 실패(2단계가 다시 한다) {asset.source_name}: {error}"
+                )
+        log.out(f"분석 클립 미리 자름: {asset.source_name} {made}/{len(windows)}")
+
+    return _ClipPreencode(run)
 
 
 def _window_clips(
