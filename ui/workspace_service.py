@@ -456,6 +456,8 @@ GLOBAL_ORDER_CONFIRM_LABEL = "전체 원본 순서 확정(촬영 시각 순)"
 # 화면 맞춤(D50) — 머리줄(W-17 B의 44px 줄)과 정리 탭은 CSS가 범위로 쓰는 이름을 단다.
 APP_HEADER_ID = "app-header"
 REVIEW_TAB_ID = "review-tab"
+REVIEW_TAB_LABEL = "편집"
+"""Final Cut식 창 하나(W-86d, D151) — 옛 이름 「영상 정리」(추천 · 타임라인 · 공유가 한 창)."""
 REVIEW_TICK_SECONDS = 2
 """화면 틱 하나의 주기(W-83, D143) — 상태 칸 · 작업대 · 초안 카드 · 자동 전환 · 보내기 알림이
 디스패치 하나다."""
@@ -4636,7 +4638,9 @@ class RawWorkspaceUi:
 
         한 줄짜리 탭 막대는 CSS가 감춘다(보이는 탭이 하나뿐일 때만). 숨은 「자막」 탭은 그대로다.
         """
-        with gr.Tab("영상 정리", id=REVIEW_TAB_KEY, elem_id=REVIEW_TAB_ID) as self._review_tab_item:
+        with gr.Tab(
+            REVIEW_TAB_LABEL, id=REVIEW_TAB_KEY, elem_id=REVIEW_TAB_ID
+        ) as self._review_tab_item:
             self._command_bar()
             # 단추 응답이 실리는 칸 — 그 값은 활동 칸이 받아 보인다(ACTIVITY_REPLY_JS).
             self._capcut_status = gr.Markdown(visible=False)

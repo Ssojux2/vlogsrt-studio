@@ -1380,8 +1380,8 @@ PLAYER_APP_JS = r"""
           return;
         }
         say("공유를 마쳤습니다 — 결과 카드의 「초안 폴더 열기」에 영상이 있습니다(자막을" +
-          " 입혔으면 <이름>.burned.mp4 · 영어 번역이 아직 없으면 한국어만). 「최종 편집」 탭도" +
-          " 새 초안으로 열었습니다.", false);
+          " 입혔으면 <이름>.burned.mp4 · 영어 번역이 아직 없으면 한국어만)." +
+          " 「초안 편집(이전)」 탭도 새 초안으로 열었습니다.", false);
         reopenDraft();
         if (W.__vlWindow && W.__vlWindow.showInspector) { W.__vlWindow.showInspector("share"); }
       });

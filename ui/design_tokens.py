@@ -115,6 +115,11 @@ SCALAR_TOKENS: dict[str, str] = {
     "inspector-fr": "403fr",
     "browser-min": "240px",
     "inspector-min": "280px",
+    # 뷰어 칸의 최소 폭 · 위·아래 덱의 최소 높이 — 트랙 손잡이가 이보다 좁히지 않는다(W-86d).
+    "viewer-min": "320px",
+    "deck-min": "160px",
+    # 타임라인 인덱스 칸의 폭 — Final Cut `timelineIndexContents` 318.
+    "index-w": "318px",
     "browser-card-min": "240px",
     # 아래 덱이 차 있으면 무대는 내용 높이다 — 위 덱 뷰어의 영상 높이(W-85, 좁은 화면 규칙과 같은
     # 값). 위·아래 0.5/0.5는 덱이 둘째 영상을 내려놓는 W-86에서 맞춘다(지금 덱의 재생기는 제 영상을

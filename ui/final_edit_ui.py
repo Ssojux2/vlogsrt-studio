@@ -33,14 +33,15 @@ FINAL_EDIT_TAB_KEY = "final-edit"
 REVIEW_TAB_KEY = "review"
 FINAL_EDIT_BLOCK_ID = "final-edit-block"
 FINAL_EDIT_ROOT_ID = "fe-root"
-TAB_LABEL = "최종 편집"
-OPEN_LABEL = "최종 편집 열기"
+TAB_LABEL = "초안 편집(이전)"
+"""렌더한 초안 위의 편집(D117) — 원본 타임라인 하나로 가며 은퇴한다(W-91). 옛 이름 「최종 편집」."""
+OPEN_LABEL = "초안 편집 열기"
 OPEN_ID = "vl-export-edit"
 RELOAD_ID = "vl-final-edit-reload"
 """숨은 「다시 열기」 — 타임라인 재생기가 자기 렌더가 끝나면 누른다(W-71h · 쉬는 타이머, D134)."""
 NO_WORKSPACE_TEXT = "작업공간을 열면 여기서 초안을 최종 편집합니다."
 NO_EXPORT_TEXT = (
-    "아직 내보낸 초안이 없습니다 — 「영상 정리」에서 「추천만 이어붙여 내보내기」를 하면"
+    "아직 내보낸 초안이 없습니다 — 「편집」에서 「추천만 이어붙여 내보내기」를 하면"
     " 끝나는 대로 이 탭이 열립니다."
 )
 FINAL_EDIT_JS = CORE_JS + APP_JS

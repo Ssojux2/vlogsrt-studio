@@ -43,6 +43,7 @@ INSPECTOR_TABS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
 STORAGE_KEY = "vlogsrt.inspectorTab"
 FIT_STORAGE_KEY = "vlogsrt.fitWindow"
 FIT_ON = "on"
+SPLIT_STORAGE_KEY = "vlogsrt.trackSplit"
 
 WINDOW_CORE_JS = r"""
 (function (root) {
@@ -52,6 +53,14 @@ WINDOW_CORE_JS = r"""
     if (zone === "browser" || zone === "source") { return "source"; }
     if (zone === "deck" || zone === "program") { return "program"; }
     return mode;
+  };
+  // 경계 끌기 — 두 칸(fr 비율 a·b, 지금 폭 pxA·pxB)의 경계를 delta 화소 옮긴
+  // 새 비율. 칸마다 최소 폭.
+  WIN.splitFr = function (frA, frB, pxA, pxB, delta, minA, minB) {
+    var total = pxA + pxB;
+    var a = Math.max(minA, Math.min(total - minB, pxA + delta));
+    var fr = frA + frB;
+    return [fr * a / total, fr * (total - a) / total];
   };
   root.__vlWindow = WIN;
   if (typeof module !== "undefined" && module.exports) { module.exports = WIN; }
@@ -192,6 +201,122 @@ _BIND_JS = r"""
     });
   }
   WIN.showInspector = function (key) { writeTab(key); paintTabs(); };
+  // ─── 트랙 손잡이(W-86d) — 열 경계 둘 · (화면 맞춤이면) 위·아래 덱 경계. 비율은 무대 변수 ───
+  function readSplit() {
+    try { return JSON.parse(W.localStorage.getItem(CFG.splitKey) || "{}") || {}; }
+    catch (error) { return {}; }
+  }
+  function writeSplit(value) {
+    try { W.localStorage.setItem(CFG.splitKey, JSON.stringify(value)); }
+    catch (error) { /* 편의 */ }
+  }
+  function frOf(name, saved) {
+    if (saved[name]) { return saved[name]; }
+    var value = getComputedStyle($(CFG.stage)).getPropertyValue("--vl-" + name + "-fr");
+    return parseFloat(value) || 1;
+  }
+  function pxOf(name) {
+    var value = getComputedStyle($(CFG.stage)).getPropertyValue("--vl-" + name);
+    return parseFloat(value) || 0;
+  }
+  function applySplit() {
+    var stage = $(CFG.stage);
+    if (!stage) { return; }
+    var saved = readSplit();
+    Object.keys(saved).forEach(function (name) {
+      stage.style.setProperty("--vl-" + name + "-fr", saved[name] + "fr");
+    });
+  }
+  var SPLITS = [
+    { key: "left", a: "browser", b: "viewer", elA: "vl-thumbs", elB: CFG.viewer, axis: "x",
+      minA: "browser-min", minB: "viewer-min" },
+    { key: "right", a: "viewer", b: "inspector", elA: CFG.viewer, elB: CFG.inspector, axis: "x",
+      minA: "viewer-min", minB: "inspector-min" },
+    // 위 덱의 높이는 브라우저 열이 잰다 — 그 열만 위 덱의 두 줄(뷰어 · 원본 레일)을 다 덮는다.
+    { key: "deck", a: "upper-deck", b: "lower-deck", elA: "vl-thumbs", elB: CFG.deck, axis: "y",
+      minA: "deck-min", minB: "deck-min" }
+  ];
+  function placeHandles() {
+    var stage = $(CFG.stage);
+    if (!stage) { return; }
+    var box = stage.getBoundingClientRect();
+    SPLITS.forEach(function (split) {
+      var handle = stage.querySelector('.vl-split[data-split="' + split.key + '"]');
+      if (!handle) {
+        handle = document.createElement("div");
+        handle.className = "vl-split";
+        handle.setAttribute("data-split", split.key);
+        handle.setAttribute("role", "separator");
+        handle.setAttribute("aria-orientation", split.axis === "x" ? "vertical" : "horizontal");
+        handle.addEventListener("pointerdown", function (ev) { startSplit(ev, split, handle); });
+        stage.appendChild(handle);
+      }
+      var a = $(split.elA);
+      var b = $(split.elB);
+      var fit = stage.getAttribute("data-vl-fit") === CFG.fitOn;
+      var show = a && b && a.offsetParent && b.offsetParent && (split.axis === "x" || fit);
+      var ra = show ? a.getBoundingClientRect() : null;
+      var rb = show ? b.getBoundingClientRect() : null;
+      // 좁은 화면은 칸을 쌓는다 — 나란히(가로) · 위아래(세로)로 붙어 있을 때만 손잡이를 보인다.
+      if (show) { show = split.axis === "x" ? ra.right <= rb.left + 1 : ra.bottom <= rb.top + 1; }
+      handle.hidden = !show;
+      if (!show) { return; }
+      if (split.axis === "x") {
+        handle.style.left = ((ra.right + rb.left) / 2 - box.left) + "px";
+        handle.style.top = (ra.top - box.top) + "px";
+        handle.style.height = Math.max(ra.height, 24) + "px";
+      } else {
+        handle.style.top = ((ra.bottom + rb.top) / 2 - box.top) + "px";
+        handle.style.left = "0px";
+        handle.style.width = box.width + "px";
+      }
+    });
+  }
+  function startSplit(ev, split, handle) {
+    var stage = $(CFG.stage);
+    var a = $(split.elA);
+    var b = $(split.elB);
+    if (!stage || !a || !b) { return; }
+    ev.preventDefault();
+    var saved = readSplit();
+    var size = split.axis === "x" ? "width" : "height";
+    var start = { at: split.axis === "x" ? ev.clientX : ev.clientY,
+      pxA: a.getBoundingClientRect()[size], pxB: b.getBoundingClientRect()[size],
+      frA: frOf(split.a, saved), frB: frOf(split.b, saved) };
+    try { handle.setPointerCapture(ev.pointerId); }
+    catch (error) { /* 잡지 못해도 손잡이 위 끌기는 된다 */ }
+    function move(e) {
+      var delta = (split.axis === "x" ? e.clientX : e.clientY) - start.at;
+      var next = WIN.splitFr(start.frA, start.frB, start.pxA, start.pxB, delta,
+        pxOf(split.minA), pxOf(split.minB));
+      saved[split.a] = Math.round(next[0] * 100) / 100;
+      saved[split.b] = Math.round(next[1] * 100) / 100;
+      stage.style.setProperty("--vl-" + split.a + "-fr", saved[split.a] + "fr");
+      stage.style.setProperty("--vl-" + split.b + "-fr", saved[split.b] + "fr");
+      placeHandles();
+    }
+    function up() {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+      writeSplit(saved);
+    }
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+  }
+  // 두 번 누르면 그 경계를 기본 비율로 돌린다.
+  document.addEventListener("dblclick", function (ev) {
+    var handle = ev.target.closest ? ev.target.closest(".vl-split") : null;
+    if (!handle) { return; }
+    var key = handle.getAttribute("data-split");
+    var split = SPLITS.filter(function (s) { return s.key === key; })[0];
+    var saved = readSplit();
+    delete saved[split.a];
+    delete saved[split.b];
+    writeSplit(saved);
+    $(CFG.stage).style.removeProperty("--vl-" + split.a + "-fr");
+    $(CFG.stage).style.removeProperty("--vl-" + split.b + "-fr");
+    placeHandles();
+  });
   // ─── 화면 맞춤(W-86c) — 켜면 무대를 화면 높이에 묶고 위·아래 덱을 토큰 비율로 나눈다 ───
   function readFit() {
     try { return W.localStorage.getItem(CFG.fitKey) === CFG.fitOn; } catch (error) { return false; }
@@ -208,6 +333,7 @@ _BIND_JS = r"""
     }
     var button = document.getElementById("vl-fit-toggle");
     if (button) { button.setAttribute("aria-pressed", on ? "true" : "false"); }
+    placeHandles();
   }
   function ensureFit() {
     var deck = $(CFG.deck);
@@ -234,8 +360,29 @@ _BIND_JS = r"""
     if (WIN.stageNode && !WIN.stageNode.isConnected) { ensureProgram(); }
     ensureTabs();
     ensureFit();
+    applySplit();
+    placeHandles();
+    watchSizes();
     paint();
   }
+  // 칸 크기는 글자·그림이 늦게 들어와도 바뀐다(문서 노드는 그대로) — 크기를 지켜 손잡이를 옮긴다.
+  var sizeWatch = null;
+  var sizePending = false;
+  function watchSizes() {
+    if (typeof ResizeObserver !== "function") { return; }
+    if (!sizeWatch) {
+      sizeWatch = new ResizeObserver(function () {
+        if (sizePending) { return; }
+        sizePending = true;
+        W.requestAnimationFrame(function () { sizePending = false; placeHandles(); });
+      });
+    }
+    [CFG.stage, "vl-thumbs", CFG.viewer, CFG.inspector, CFG.deck].forEach(function (id) {
+      var el = $(id);
+      if (el) { sizeWatch.observe(el); }
+    });
+  }
+  W.addEventListener("resize", function () { placeHandles(); });
   if (typeof MutationObserver === "function") {
     var pending = false;
     new MutationObserver(function () {
@@ -262,6 +409,7 @@ def window_bind_js() -> str:
         "storageKey": STORAGE_KEY,
         "fitKey": FIT_STORAGE_KEY,
         "fitOn": FIT_ON,
+        "splitKey": SPLIT_STORAGE_KEY,
         "tabs": [[key, label, list(ids)] for key, label, ids in INSPECTOR_TABS],
     }
     return WINDOW_CORE_JS + _BIND_JS.replace("__CONFIG__", json.dumps(config, ensure_ascii=False))
@@ -292,6 +440,14 @@ def window_css() -> str:
   color: var(--vl-ink); box-shadow: inset 0 -2px 0 var(--vl-accent-ink); }}
 {hide_share} {{ display: none !important; }}
 {hide_analysis} {{ display: none !important; }}
+/* 트랙 손잡이(W-86d, D151) — 열 경계 둘 · 화면 맞춤이면 위·아래 덱 경계.
+   끌면 비율, 두 번 누르면 기본. */
+#{STAGE_ID} {{ position: relative; }}
+.vl-split {{ position: absolute; z-index: 5; touch-action: none; }}
+.vl-split[hidden] {{ display: none; }}
+.vl-split[aria-orientation="vertical"] {{ width: 8px; margin-left: -4px; cursor: col-resize; }}
+.vl-split[aria-orientation="horizontal"] {{ height: 8px; margin-top: -4px; cursor: row-resize; }}
+.vl-split:hover {{ background: var(--vl-accent-soft); }}
 /* 화면 맞춤(W-86c, D150) — 덱 머리의 단추. 켜면(넓은 화면, 타임라인이 있을 때) 무대를
    화면 높이에 묶고 위 덱(재생기 줄)과 아래 덱을 토큰 비율로 나눈다 — 덱과 뷰어는 제 칸
    안에서 스크롤·맞춤한다. */

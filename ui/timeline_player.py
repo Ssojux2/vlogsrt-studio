@@ -265,6 +265,21 @@ TIMELINE_PLAYER_CSS = """
 .tl-index-row.is-selected { box-shadow: inset 3px 0 0 var(--vl-accent); }
 .tl-index-row > span:nth-child(3) { min-width: 0; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; }
+/* 인덱스는 덱의 왼쪽 열(W-86d, D151) — Final Cut처럼 타임라인 옆에 선다(넓은 화면만). 제 내용
+   높이로 덱을 늘리지 않고(`contain: size`) 옆 칸들 높이만큼 서서 목록이 그 안에서 스크롤한다. */
+@media (min-width: 1051px) {
+  .tl-root:has(> #tl-index:not([hidden])) { display: grid; row-gap: 6px; column-gap: 8px;
+    grid-template-columns: minmax(0, var(--vl-index-w)) minmax(0, 1fr);
+    grid-template-areas: "stage stage" "transport transport" "index strip" "index range"
+      "index cues"; }
+  .tl-root:has(> #tl-index:not([hidden])) > .tl-stage { grid-area: stage; }
+  .tl-root:has(> #tl-index:not([hidden])) > .tl-transport { grid-area: transport; }
+  .tl-root:has(> #tl-index:not([hidden])) > .tl-strip { grid-area: strip; }
+  .tl-root:has(> #tl-index:not([hidden])) > .tl-range { grid-area: range; }
+  .tl-root:has(> #tl-index:not([hidden])) > .tl-cues { grid-area: cues; }
+  .tl-root > #tl-index { grid-area: index; contain: size; min-height: 0; }
+  .tl-root > #tl-index .tl-index-list { flex: 1 1 auto; min-height: 0; max-height: none; }
+}
 .tl-lane { display: block; width: 100%; height: 96px; border-radius: 6px;
   touch-action: none; }
 .tl-cues-body { display: flex; gap: 8px; align-items: stretch; }

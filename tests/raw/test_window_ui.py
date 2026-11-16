@@ -118,3 +118,64 @@ def test_fit_window_splits_the_decks_by_tokens_and_folds_source_rows_for_the_pro
 def test_the_player_opens_the_share_tab_when_sharing_ends() -> None:
     body = PLAYER_APP_JS[PLAYER_APP_JS.index("reopenDraft();") :][:200]
     assert 'W.__vlWindow.showInspector("share")' in body
+
+
+_SPLIT = r"""
+const WIN = require(process.argv[2]);
+const r = (pair) => pair.map((v) => Math.round(v * 1000) / 1000);
+console.log(JSON.stringify([
+  r(WIN.splitFr(539, 539, 500, 500, 100, 240, 320)),   // 오른쪽으로 100px
+  r(WIN.splitFr(539, 539, 500, 500, -400, 240, 320)),  // 왼쪽 최소 240px에서 멈춘다
+  r(WIN.splitFr(539, 539, 500, 500, 400, 240, 320)),   // 오른쪽 최소 320px에서 멈춘다
+  r(WIN.splitFr(1, 1, 300, 300, 0, 160, 160)),         // 그대로
+]));
+"""
+
+
+@needs_node
+def test_a_track_handle_moves_the_boundary_inside_both_minimums(tmp_path: Path) -> None:
+    """W-86d(D151) — 경계를 끈 화소만큼 비율을 옮기되 두 칸 모두 최소 폭(토큰) 아래로 가지 않는다.
+    두 칸 비율의 합은 그대로라 나머지 열은 움직이지 않는다."""
+    core = tmp_path / "window.js"
+    core.write_text(window_js.WINDOW_CORE_JS, encoding="utf-8")
+    runner = tmp_path / "split.js"
+    runner.write_text(_SPLIT, encoding="utf-8")
+    done = subprocess.run(
+        ["node", str(runner), str(core)], capture_output=True, text=True, check=True, timeout=30
+    )
+    assert json.loads(done.stdout) == [
+        [646.8, 431.2],
+        [258.72, 819.28],
+        [733.04, 344.96],
+        [1, 1],
+    ]
+
+
+def test_track_handles_override_stage_tokens_and_remember_per_browser() -> None:
+    """손잡이는 무대의 열·덱 비율 변수만 덮는다(격자를 다시 쓰지 않는다) — 열 비율 변수는
+    무대 자신에 선언되어 있어 인라인 덮기가 그 칸에 먹는다.
+    기억은 이 브라우저에만(실패해도 된다)."""
+    js = window_js.window_bind_js()
+    config = json.loads(js[js.index("var CFG = ") + 10 : js.index(";\n  if (WIN.bound")])
+    assert config["splitKey"] == window_js.SPLIT_STORAGE_KEY
+    for name in ("browser", "viewer", "inspector", "upper-deck", "lower-deck"):
+        assert f'"{name}"' in js
+    assert 'stage.style.setProperty("--vl-" + split.a + "-fr"' in js
+    assert 'setAttribute("role", "separator")' in js
+    from ui import design_tokens
+
+    for token in ("browser-min", "viewer-min", "inspector-min", "deck-min", "index-w"):
+        assert token in design_tokens.SCALAR_TOKENS
+    css = workspace_service.CSS
+    assert "--vl-list-col: minmax(var(--vl-browser-min), var(--vl-browser-fr));" in css
+    assert '.vl-split[aria-orientation="vertical"]' in css
+
+
+def test_the_index_stands_left_of_the_timeline_on_wide_screens() -> None:
+    """Final Cut 인덱스처럼 덱의 왼쪽 열 — 넓은 화면에서만, 덱을 제 내용으로 늘리지 않는다."""
+    from ui.timeline_player import TIMELINE_PLAYER_CSS
+
+    wide = TIMELINE_PLAYER_CSS[TIMELINE_PLAYER_CSS.index("@media (min-width: 1051px)") :]
+    assert '"index strip" "index range"' in wide
+    assert "minmax(0, var(--vl-index-w))" in wide
+    assert "contain: size" in wide
