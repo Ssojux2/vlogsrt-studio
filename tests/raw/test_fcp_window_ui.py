@@ -46,7 +46,8 @@ def test_a_filled_deck_lets_the_stage_grow_and_an_empty_one_changes_nothing() ->
     filled = css[css.index("#visual-stage:has(#vl-timeline-deck .tl-root:not(.tl-empty)) {") :]
     filled = filled[: filled.index("}")]
     assert "height: auto;" in filled
-    assert "height: var(--vl-deck-viewer-h);" in css
+    assert "--vl-viewer-video-h: var(--vl-deck-viewer-h);" in filled
+    assert "height: var(--vl-viewer-video-h, auto)" in css
     wide = css[css.index("@media (min-width: 1051px)") :]
     wide = wide[: wide.index("\n}\n")]
     assert '#visual-stage[data-vl-advanced="open"]:has(#vl-timeline-deck' in wide

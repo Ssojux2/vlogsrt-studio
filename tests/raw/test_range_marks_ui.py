@@ -336,7 +336,8 @@ def test_the_main_view_shows_four_areas_and_folds_the_rest_behind_advanced() -> 
     # 1050px 이하(1024 노트북)·860px 이하에도 추천 구간 칸이 자리를 갖는다.
     narrow = css[css.index("@media (max-width: 1050px)") :]
     assert '"thumbs ranges"' in narrow
-    assert '"timeline" "ranges"' in css[css.index("@media (max-width: 860px)") :]
+    # 좁은 화면은 원본 레일 다음이 아래 덱(원본 범위 타임라인, W-85 · D145), 그다음 추천 구간이다.
+    assert '"timeline" "deck" "ranges"' in css[css.index("@media (max-width: 860px)") :]
     # 견적·승인 칸(D44)은 숨기는 규칙 밖이다 — 늘 무대 오른쪽 열 맨 위다.
     assert "#vl-quote { grid-area: quote;" in css
     assert "data-vl-advanced" not in _rules_for(css, "#vl-quote")
