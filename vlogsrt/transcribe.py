@@ -28,8 +28,9 @@ from typing import Any, Literal, Protocol
 from uuid import uuid4
 
 from . import env, log
-from .config import Config
+from .config import GEMINI_RATE_RETRY, Config, ProviderRateRetrySettings
 from .models import Chunk, Segment
+from .task_runtime import QUOTA_PER_DAY, check_cancel
 
 FIXTURE_KIND = "whisper"  # 자막을 만드는 호출
 VERIFY_KIND = "gpt"  # 대조용 호출. 출력을 바꾸지 못한다(규칙 5)
@@ -1217,23 +1218,28 @@ def request_gemini_generate(
 
     명시적 승인에서 온 ``online=True`` 없이는 클라이언트를 만지지 않는다. 지역 요청 결함(본문의
     모델 재정의·Gemini가 아닌 클라이언트)은 승인(유료 예약)을 쓰기 **전에** 닫는다. 모델은 본문이
-    아니라 경로에 실린다 — 관찰 메타에는 다른 경계처럼 `model`이 함께 비친다. 재시도는 없다.
+    아니라 경로에 실린다 — 관찰 메타에는 다른 경계처럼 `model`이 함께 비친다. 공급자가 대기
+    시간을 말한 분당 한도 429만 기다렸다 다시 보낸다(D141) — 시도마다 승인·취소 문을 다시 지난다.
     """
     _require_gemini_request(client, model, payload, online=online)
 
     def send(_prepared: Any) -> Any:
         return _generate_content(client, model, payload)
 
-    if observer is None:
+    def bare() -> dict[str, Any]:
         if cancellation is not None:
             cancellation()
         return _generate_content(client, model, payload)
-    reply: dict[str, Any] = _observed_call(
-        _AttemptWatch(observer=observer),
-        partial(_responses_attempt_meta, model, payload, GENERATE_CONTENT_OPERATION),
-        send,
-        gate=cancellation,
-    )()
+
+    attempt = bare
+    if observer is not None:
+        attempt = _observed_call(
+            _AttemptWatch(observer=observer),
+            partial(_responses_attempt_meta, model, payload, GENERATE_CONTENT_OPERATION),
+            send,
+            gate=cancellation,
+        )
+    reply: dict[str, Any] = _gemini_rate_retry(attempt, "Gemini 의미 분석", cancellation)
     return reply
 
 
@@ -1263,6 +1269,67 @@ def _generate_content(client: Any, model: str, payload: Mapping[str, object]) ->
     from . import gemini_messages
 
     return gemini_messages.post_generate_content(client, model, payload)
+
+
+_rate_sleep: Callable[[float], None] = time.sleep
+"""429 대기의 잠 — 시험이 가짜로 갈아 끼운다(실제로 자지 않는다)."""
+
+
+def _gemini_rate_retry(
+    attempt: Callable[[], Any],
+    what: str,
+    cancellation: Callable[[], None] | None,
+    settings: ProviderRateRetrySettings = GEMINI_RATE_RETRY,
+) -> Any:
+    """공급자가 대기 시간을 말한 분당 한도 429만 그만큼 기다렸다 다시 보낸다(D141).
+
+    `attempt` 한 번이 승인 → 취소 확인 → 요청 한 번 → 훅이라, 다시 보낸 시도도 새 승인·새 시도
+    신원이다. 그 밖의 실패(대기를 말하지 않은 429·하루 한도·상한보다 긴 대기·503·시간 초과·관찰자
+    실패)는 예전처럼 한 번의 명시적 실패로 그대로 올라간다.
+    """
+    for tried in range(settings.max_retries + 1):
+        try:
+            return attempt()
+        except Exception as exc:  # noqa: BLE001 - 재시도 판단 뒤 그대로 다시 던진다
+            wait = _told_rate_wait(exc, settings)
+            if wait is None or tried == settings.max_retries:
+                raise
+            log.warn(
+                f"{what} 429 — 공급자가 {wait:g}초 뒤를 말했다. 기다렸다 다시 보낸다"
+                f"({tried + 1}/{settings.max_retries})."
+            )
+            _wait_cancellable(wait, cancellation, settings.poll_seconds)
+    raise AssertionError("재시도 고리가 끝까지 돌았다")  # 마지막 시도는 돌려주거나 던진다
+
+
+def _told_rate_wait(error: Exception, settings: ProviderRateRetrySettings) -> float | None:
+    """기다렸다 다시 보낼 429면 그 대기 초, 아니면 None.
+
+    하루 한도는 공급자가 몇십 초를 말해도 그 뒤에 풀리지 않는다(D111)."""
+    from . import gemini_messages
+
+    if not isinstance(error, gemini_messages.GeminiAPIStatusError) or error.status_code != 429:
+        return None
+    delay = error.retry_delay_seconds
+    if delay is None or not 0 <= delay <= settings.max_wait_seconds:
+        return None
+    if QUOTA_PER_DAY in error.quota_id:
+        return None
+    return delay
+
+
+def _wait_cancellable(
+    seconds: float, cancellation: Callable[[], None] | None, poll_seconds: float
+) -> None:
+    """조각마다 취소를 보며 잔다 — 문이 받은 확인이 없으면 작업 범위의 취소를 본다."""
+    left = seconds
+    while left > 0:
+        step = min(poll_seconds, left)
+        _rate_sleep(step)
+        left -= step
+        if cancellation is not None:
+            cancellation()
+        check_cancel()
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1305,7 +1372,7 @@ def request_gemini_transcription(
     경로 조각이 아닌 모델·빈 언어·한도를 넘는 길이와 크기)은 승인(유료 예약)보다 **먼저** 닫는다.
     오디오는 인라인 base64로 싣는다(조각이 180초 이하라 20 MB 안 — 업로드·서버 보관이 없다).
     `store: false` — 공급자 쪽에 오디오를 남기지 않는다. 관찰 기록에는 오디오 대신 지문과
-    크기만 남는다. 재시도는 없다.
+    크기만 남는다. 공급자가 대기 시간을 말한 분당 한도 429만 기다렸다 다시 보낸다(D141).
     """
     _require_gemini_transcription(client, request, online=online)
     audio = request.chunk.path.read_bytes()
@@ -1315,17 +1382,21 @@ def request_gemini_transcription(
     def send(_prepared: Any) -> Any:
         return _interaction(client, body)
 
-    if observer is None:
+    def bare() -> dict[str, Any]:
         if cancellation is not None:
             cancellation()
         return _interaction(client, body)
-    watch = _AttemptWatch(observer=observer, stem=stem, source=source)
-    reply: dict[str, Any] = _observed_call(
-        watch,
-        partial(_transcription_attempt_meta, watch, request, body, audio),
-        send,
-        gate=cancellation,
-    )()
+
+    attempt = bare
+    if observer is not None:
+        watch = _AttemptWatch(observer=observer, stem=stem, source=source)
+        attempt = _observed_call(
+            watch,
+            partial(_transcription_attempt_meta, watch, request, body, audio),
+            send,
+            gate=cancellation,
+        )
+    reply: dict[str, Any] = _gemini_rate_retry(attempt, "Gemini 전사", cancellation)
     return reply
 
 

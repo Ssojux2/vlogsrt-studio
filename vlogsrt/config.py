@@ -286,3 +286,27 @@ def format_config(cfg: Config) -> str:
         rendered = ", ".join(str(v) for v in value) if isinstance(value, list) else value
         lines.append(f"{key} = {rendered}")
     return "\n".join(lines)
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderRateRetrySettings:
+    """공급자가 대기 시간을 말한 429만 기다렸다 다시 보내는 한도(D141).
+
+    **외부 근거 없는 조정 대상**이다. 대기 상한 60초는 분당 한도가 풀리는 가장 긴 시간이다 —
+    그보다 긴 대기는 분당 한도가 아니므로(하루 한도·모르는 한도) 기다리지 않고 예전처럼 한 번의
+    명시적 실패로 남긴다. 재시도 3번은 분당 한도의 한 창(60초) 안팎이다. 잠 조각 0.5초는
+    기다리는 동안 취소를 보는 간격이다. Config(`Config`) 밖이라 어느 지문·캐시 열쇠·승인·견적에도
+    없다 — 429는 처리 전 거절이라 과금되지 않으므로 다시 보내도 승인한 요청 수·비용은 그대로다.
+    """
+
+    max_retries: int = 3
+    max_wait_seconds: float = 60.0
+    poll_seconds: float = 0.5
+
+    def __post_init__(self) -> None:
+        if self.max_retries < 0 or self.max_wait_seconds < 0 or self.poll_seconds <= 0:
+            raise ValueError(f"재시도 한도가 음수이거나 잠 조각이 0 이하다: {self!r}")
+
+
+GEMINI_RATE_RETRY = ProviderRateRetrySettings()
+"""Gemini(의미 분석 generateContent · 시간 엔진 Interactions)의 429 재시도 한도(D141)."""
