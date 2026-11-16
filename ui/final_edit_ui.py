@@ -175,6 +175,7 @@ def final_edit_html(model: dict[str, Any]) -> str:
         '<div id="fe-list-body" class="fe-list-body"></div></section>'
         '<section class="fe-viewer"><div class="fe-video-wrap">'
         '<video id="fe-video" preload="auto" playsinline></video>'
+        '<video id="fe-video-b" class="fe-standby" preload="auto" playsinline></video>'
         '<div id="fe-overlay" class="fe-overlay"></div></div>'
         '<div class="fe-transport"><span id="fe-timecode" class="fe-timecode">00:00:00:00</span>'
         '<span id="fe-duration" class="fe-timecode fe-muted"></span></div></section>'
@@ -221,6 +222,7 @@ FINAL_EDIT_CSS = """
 .fe-video-wrap { position: relative; flex: 1 1 auto; min-height: 0; display: flex;
   align-items: center; justify-content: center; }
 .fe-video-wrap video { max-width: 100%; max-height: 100%; background: var(--vl-video-well); }
+.fe-video-wrap video.fe-standby { position: absolute; visibility: hidden; pointer-events: none; }
 .fe-overlay { position: absolute; left: 6%; right: 6%; bottom: 7%; text-align: center;
   pointer-events: none; white-space: pre-line; font-size: clamp(14px, 2.4vw, 30px);
   font-weight: 600; color: var(--vl-on-video-overlay);

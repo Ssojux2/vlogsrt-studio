@@ -104,6 +104,44 @@ CORE_JS = r"""
     }
     return doc.clips.length ? doc.clips.length - 1 : -1;
   };
+  // ─── 재생: 컷 건너기(W-71, D122) ─────────────────────────────────
+  // 활성 영상이 방금 보인 초안 프레임 하나로 다음 걸음을 정한다. 대기 영상(같은 초안)을 다음 컷
+  // 뒤 클립 시작에 미리 맞춰 두면, 컷에서 시크를 기다리지 않고 두 영상을 바꿔 튼다.
+  // standby = { target: 대기 영상이 맞춰 둔 초안 프레임(없으면 null),
+  //             ready: 그 프레임이 보이는가 }.
+  // → { action: "play" | "jump" | "stop", edited: 편집 프레임(지운 구간이면 null),
+  //     target: 건너갈 초안 프레임, swap: 대기 영상으로 바꿔 틀까,
+  //     prime: 대기 영상이 맞춰 둘 프레임 }
+  function runAfter(doc, index) {
+    var k = index;
+    while (k + 1 < doc.clips.length && doc.clips[k + 1][0] === doc.clips[k][1]) { k += 1; }
+    return { end: doc.clips[k][1], next: k + 1 < doc.clips.length ? doc.clips[k + 1][0] : null };
+  }
+  function nextClipStart(doc, draftFrame) {
+    for (var i = 0; i < doc.clips.length; i++) {
+      if (doc.clips[i][0] > draftFrame) { return doc.clips[i][0]; }
+    }
+    return null;
+  }
+  FE.playStep = function (doc, presented, standby) {
+    var edited = FE.editedFrameOf(doc, presented);
+    var target;
+    if (edited === null) {
+      target = nextClipStart(doc, presented);
+    } else {
+      var run = runAfter(doc, FE.clipIndexAt(doc, edited));
+      if (presented < run.end - 1) {
+        return { action: "play", edited: edited, target: null, swap: false, prime: run.next };
+      }
+      target = run.next;
+    }
+    if (target === null) {
+      return { action: "stop", edited: edited, target: null, swap: false, prime: null };
+    }
+    var swap = !!(standby && standby.ready && standby.target === target);
+    return { action: "jump", edited: edited, target: target, swap: swap, prime: null };
+  };
+
   FE.editedTicks = function (doc, draftMs) {
     var point = draftMs * FE.msTicks(doc);
     var list = spans(doc);

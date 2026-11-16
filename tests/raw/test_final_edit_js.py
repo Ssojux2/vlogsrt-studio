@@ -167,6 +167,58 @@ def test_waveform_mip_levels_and_column_peaks(tmp_path: Path) -> None:
     ]
 
 
+PLAY = r"""
+const FE = require(process.argv[2]);
+const draft = { num: 1, den: 30, totalFrames: 300 };
+const cut = { draft, clips: [[0, 30], [30, 60], [90, 120], [150, 180]], cues: [], nextCue: 0 };
+const whole = { draft, clips: [[0, 300]], cues: [], nextCue: 0 };
+const none = { target: null, ready: false };
+const at = (target, ready) => ({ target, ready });
+const step = (doc, frame, standby) => {
+  const s = FE.playStep(doc, frame, standby);
+  return [s.action, s.edited, s.target, s.swap, s.prime];
+};
+console.log(JSON.stringify([
+  step(cut, 10, none),
+  step(cut, 29, at(90, true)),
+  step(cut, 59, at(90, true)),
+  step(cut, 59, at(90, false)),
+  step(cut, 59, at(150, true)),
+  step(cut, 59, null),
+  step(cut, 70, at(90, true)),
+  step(cut, 100, none),
+  step(cut, 119, at(150, true)),
+  step(cut, 179, at(150, true)),
+  step(cut, 200, none),
+  step(whole, 10, none),
+  step(whole, 299, none),
+]));
+"""
+
+
+@needs_node
+def test_play_step_primes_the_standby_and_swaps_only_when_it_waits_at_the_target(
+    tmp_path: Path,
+) -> None:
+    # 맞닿은 클립은 한 줄기로 이어 틀고, 컷 앞 마지막 프레임 · 지운 구간 안에서만 건넌다(W-71).
+    result = _node(tmp_path, PLAY, str(_core(tmp_path)))
+    assert result == [
+        ["play", 10, None, False, 90],
+        ["play", 29, None, False, 90],
+        ["jump", 59, 90, True, None],
+        ["jump", 59, 90, False, None],  # 대기 영상이 아직 시크 중 — 지금처럼 시크로 건넌다
+        ["jump", 59, 90, False, None],  # 다른 자리에 맞춰 둠(편집·시크 뒤) — 바꾸지 않는다
+        ["jump", 59, 90, False, None],
+        ["jump", None, 90, True, None],  # 지운 구간이 이미 보였다 — 바로 건넌다
+        ["play", 70, None, False, 150],
+        ["jump", 89, 150, True, None],
+        ["stop", 119, None, False, None],
+        ["stop", None, None, False, None],
+        ["play", 10, None, False, None],
+        ["stop", 299, None, False, None],
+    ]
+
+
 @needs_node
 def test_core_parses_in_node(tmp_path: Path) -> None:
     subprocess.run(["node", "--check", str(_core(tmp_path))], check=True, timeout=60)
@@ -281,6 +333,95 @@ console.log(JSON.stringify(cases.map(([dy, mode]) => FE.wheelZoomFactor(dy, mode
 """
 
 
+DECKS = r"""
+const fs = require("fs");
+const source = fs.readFileSync(process.argv[2], "utf8");
+const model = JSON.parse(process.argv[3]);
+const log = [];
+function fakeVideo(id) {
+  const el = {
+    id, attrs: {}, listeners: {}, classes: new Set(), seeking: false, readyState: 4,
+    paused: true, playbackRate: 1, muted: false, volume: 1, frameFn: null, sets: [], _t: 0,
+    getAttribute(name) { return this.attrs[name] === undefined ? null : this.attrs[name]; },
+    setAttribute(name, value) { this.attrs[name] = value; },
+    addEventListener(name, fn) { (this.listeners[name] = this.listeners[name] || []).push(fn); },
+    classList: null,
+    get currentTime() { return this._t; },
+    set currentTime(value) {
+      this._t = value; this.seeking = true; this.sets.push(Math.round(value * 30 - 0.5));
+    },
+    play() { this.paused = false; log.push("play " + id); return Promise.resolve(); },
+    pause() {
+      this.paused = true; log.push("pause " + id);
+      for (const fn of this.listeners.pause || []) { fn({ target: this }); }
+    },
+    requestVideoFrameCallback(fn) { this.frameFn = fn; },
+    present(frame) {
+      const fn = this.frameFn; this.frameFn = null; fn(0, { mediaTime: frame / 30 });
+    },
+  };
+  el.classList = {
+    toggle(name, on) { if (on) { el.classes.add(name); } else { el.classes.delete(name); } },
+    add() {}, remove() {},
+  };
+  return el;
+}
+const a = fakeVideo("a");
+const b = fakeVideo("b");
+const stubEl = () => ({ addEventListener() {}, classList: { toggle() {}, add() {}, remove() {} } });
+const holder = { get textContent() { return JSON.stringify(model); } };
+const root = Object.assign(stubEl(), { querySelector: () => holder });
+global.window = global;
+global.navigator = { platform: "MacIntel" };
+global.document = {
+  getElementById: (id) => (id === "fe-video" ? a : id === "fe-video-b" ? b : null),
+  querySelector: () => null, activeElement: null, addEventListener() {},
+};
+global.requestAnimationFrame = (fn) => setTimeout(fn, 0);
+global.addEventListener = () => {};
+const server = {
+  fe_save: () => Promise.resolve({ ok: true }),
+  fe_waveform: () => Promise.resolve({ ok: false, error: "없음" }),
+  fe_load: () => Promise.resolve({ ok: false }),
+};
+const element = { querySelector: () => root };
+new Function("element", "props", "server", "watch", source)(element, {}, server, () => {});
+const S = global.__vlFinalEdit;
+const run = global.__vlFinalEditRun;
+const out = {};
+(async () => {
+  out.boot = [a.classes.has("fe-standby"), b.classes.has("fe-standby"), b.getAttribute("src")];
+  run("play-toggle");
+  a.seeking = false;
+  const fromA = a.frameFn;
+  a.present(10);                       // 컷 앞 — 대기 영상을 다음 클립 시작에 맞춘다
+  out.primed = [b.sets.slice(), b.paused];
+  b.seeking = false;
+  a.present(29);                       // 클립 끝 — 대기 영상으로 바꿔 튼다
+  await new Promise((r) => setTimeout(r, 0));
+  out.swapped = [S.deck, a.classes.has("fe-standby"), b.classes.has("fe-standby"), S.playing,
+    log.slice(), a.sets.length];
+  fromA(0, { mediaTime: 31 / 30 });    // 옛 영상의 늦은 프레임 콜백은 무시된다
+  b.present(61);
+  out.afterSwap = [S.playhead, a.sets.slice(), a.paused];
+  b.present(89);                       // 대기 영상(a)이 아직 시크 중 — 활성 영상을 시크한다
+  b.present(89);                       // 같은 자리로 가는 시크가 도는 동안 다시 걸지 않는다
+  out.fallback = [S.deck, b.sets.slice()];
+  b.seeking = false;
+  b.present(120);
+  out.cutDone = [S.playhead];
+  run("play-toggle");                  // 멈춤
+  S.range = [0, 20];
+  run("play-selection");               // 범위 재생은 범위 끝에서 멈춘다(정의된 프레임으로 견준다)
+  const active = S.deck ? b : a;
+  active.seeking = false;
+  active.present(21);
+  out.selection = [S.playing];
+  console.log(JSON.stringify(out));
+})();
+"""
+
+
 @needs_node
 def test_wheel_zoom_follows_the_wheel_amount(tmp_path: Path) -> None:
     """W-75, D134 — 마우스 한 칸(100 px)이 한 걸음(125%)이고, 트랙패드 핀치의 작은 델타는
@@ -289,3 +430,40 @@ def test_wheel_zoom_follows_the_wheel_amount(tmp_path: Path) -> None:
     assert isinstance(got, list)
     expected = [1.25, 0.8, 1.25**0.04, 1.25**-0.03, 1.25, 1.0, 1.25, 0.8]
     assert [round(value, 12) for value in got] == [round(value, 12) for value in expected]
+
+
+@needs_node
+def test_app_swaps_to_the_primed_standby_at_a_cut_and_seeks_only_when_it_is_not_ready(
+    tmp_path: Path,
+) -> None:
+    edit = {
+        "exportId": "20261113T000000Z",
+        "mediaFileId": "m1",
+        "frameDuration": {"num": 1, "den": 30},
+        "totalFrames": 300,
+        "revision": 1,
+        "seedSrt": "draft.srt",
+        "doc": {"clips": [[0, 30], [60, 90], [120, 150]], "cues": [], "nextCue": 0},
+        "exports": [{"id": "20261113T000000Z", "hasEdit": True, "mediaFileId": "m1"}],
+        "olderEdits": [],
+        "newerSeed": False,
+        "settings": {
+            **SETTINGS, "undoLimit": 10, "coalesceMs": 500, "autosaveMs": 60000,
+            "newCueMs": 2000, "reverseTickMs": 100, "zoomMinPxPerS": 2, "zoomMaxPxPerS": 400,
+            "zoomStepPercent": 125, "snapPx": 8, "bigStepFrames": 10, "shuttleRates": [1, 2],
+        },
+    }  # fmt: skip
+    model = {"epoch": "e1", "signature": "sig", "token": "tok", "edit": edit,
+             "keymap": final_edit_ui.keymap_payload(), "empty": None}  # fmt: skip
+    script = tmp_path / "app.js"
+    script.write_text(final_edit_ui.FINAL_EDIT_JS, encoding="utf-8")
+    result = _node(tmp_path, DECKS, str(script), json.dumps(model))
+    assert result == {
+        "boot": [False, True, "/media/m1"],
+        "primed": [[60], True],
+        "swapped": [1, True, False, True, ["play a", "play b", "pause a"], 0],
+        "afterSwap": [31, [120], True],  # 멈춘 옛 영상이 다음 컷 뒤를 맞춘다
+        "fallback": [1, [60, 120]],
+        "cutDone": [60],
+        "selection": [False],
+    }
