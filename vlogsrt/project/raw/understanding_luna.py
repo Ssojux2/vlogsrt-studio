@@ -27,9 +27,13 @@
 from __future__ import annotations
 
 import base64
+import contextvars
 import hashlib
 import json
-from collections.abc import Callable, Mapping, Sequence
+import threading
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -42,7 +46,9 @@ from typing import Any, Protocol
 from vlogsrt.preprocess import GRID_CONFORM_TAG
 from vlogsrt.project.raw import gemini_cost, request_log
 from vlogsrt.project.raw.analysis_config import (
+    PROVIDER_CONCURRENCY,
     UNDERSTANDING_SCHEMA_VERSION,
+    RawProviderConcurrency,
     RawUnderstandingSettings,
     validate_understanding_settings,
 )
@@ -1125,46 +1131,184 @@ def annotate_windows(
     model: str,
     origin: str,
     on_annotations: Callable[[Sequence[SemanticAnnotation]], None] | None = None,
+    on_settled: Callable[[SemanticAnnotation], None] | None = None,
     cached: Mapping[str, SemanticAnnotation] | None = None,
+    concurrency: RawProviderConcurrency = PROVIDER_CONCURRENCY,
 ) -> tuple[SemanticAnnotation, ...]:
     """창마다 판정을 얻는다 — 호출 실패는 그 창의 failed 판정이다.
 
     한 창의 실패(타임아웃·API 오류 포함)가 나머지 창을 멈추지 않는다 — 실패는
     기록이고 보수적 유지의 재료다(§7.6). 조립 오류는 여기서 닫는다: 깨진 증거로
     유료 호출이 나가는 일이 없어야 한다.
+
+    공급자의 동시 전송 수(D142)만큼 창을 함께 보낸다. 조립·재사용 판단·취소 확인은 이 스레드에서
+    창 차례대로 하고, 묻기만 일꾼에서 한다(일꾼마다 문맥을 복사해 취소·영수증이 따라간다). 결과는
+    창 차례로 모은다. `on_settled`는 창 하나가 끝날 때마다(차례와 무관하게, 이 스레드에서)
+    부르고 — 값을 치른 판정을 바로 남길 자리다 — `on_annotations`는 앞에서부터 이어진 접두가
+    자랄 때만 부른다. 1이면 예전 직렬과 같은 차례·같은 알림이다.
     """
     if origin not in LIVE_ORIGINS | REPLAY_ORIGINS:
         raise LunaEvidenceError(
             f"판정 근원을 알 수 없다: {origin!r} — 문서의 실행 모드가 거짓말을 하게 된다"
         )
-    annotations: list[SemanticAnnotation] = []
-    for evidence in evidence_windows:
+    provider = analysis_provider(model)
+    width = concurrency.limit(provider)
+    progress = _OrderedAnnotations(len(evidence_windows), on_annotations, on_settled)
+
+    def settle(evidence: WindowEvidence) -> SemanticAnnotation | Callable[[], SemanticAnnotation]:
+        ask = _settle_or_ask(
+            evidence, responder, settings=settings, model=model, origin=origin, cached=cached
+        )
+        if isinstance(ask, SemanticAnnotation):
+            return ask
+        return _in_provider_slot(provider, width, concurrency.slot_poll_seconds, ask)
+
+    with ThreadPoolExecutor(max_workers=width, thread_name_prefix="semantic-window") as pool:
+        _send_in_order(evidence_windows, settle, pool, width, progress)
+    return progress.rows()
+
+
+def _send_in_order(
+    evidence_windows: Sequence[WindowEvidence],
+    settle: Callable[[WindowEvidence], SemanticAnnotation | Callable[[], SemanticAnnotation]],
+    pool: ThreadPoolExecutor,
+    width: int,
+    progress: _OrderedAnnotations,
+) -> None:
+    """창 차례로 정하고, 물을 창은 일꾼이 `width`개를 넘지 않게 맡는다."""
+    pending: dict[Future[SemanticAnnotation], int] = {}
+    try:
+        for order, evidence in enumerate(evidence_windows):
+            while len(pending) >= width:
+                _collect(pending, progress)
+            check_cancel()
+            ask = settle(evidence)
+            if isinstance(ask, SemanticAnnotation):
+                progress.put(order, ask)
+                continue
+            pending[pool.submit(contextvars.copy_context().run, ask)] = order
+        while pending:
+            _collect(pending, progress)
+    except BaseException:
+        _keep_paid(pending, progress)
+        raise
+
+
+def _settle_or_ask(
+    evidence: WindowEvidence,
+    responder: SemanticResponder,
+    *,
+    settings: RawUnderstandingSettings,
+    model: str,
+    origin: str,
+    cached: Mapping[str, SemanticAnnotation] | None,
+) -> SemanticAnnotation | Callable[[], SemanticAnnotation]:
+    """이 스레드에서 정할 수 있는 판정(재사용·프레임 없음)이거나, 일꾼이 물을 일."""
+    payload = build_semantic_payload(evidence, settings, model)
+    request_sha256 = luna_request_sha256(model, payload)
+    prior = (cached or {}).get(evidence.window.window_id)
+    if prior is not None and _reusable(
+        prior, request_sha256, settings=settings, model=model, origin=origin
+    ):
+        return prior
+    if evidence.window.frame_plans and not evidence.frames:
+        return _frames_missing(
+            evidence, request_sha256, settings=settings, model=model, origin=origin
+        )
+    return lambda: _ask_luna(
+        evidence, payload, request_sha256, responder, settings=settings, model=model, origin=origin
+    )
+
+
+def _keep_paid(
+    pending: dict[Future[SemanticAnnotation], int], progress: _OrderedAnnotations
+) -> None:
+    """멈출 때(취소·결함) — 기다리던 일은 시작하지 않고, 이미 나간 창은 끝까지 기다려 판정을 남긴다.
+
+    나간 창은 값을 치렀다 — 남기지 않으면 다시 분석할 때 다시 청구된다. 그 창 안의 오류(취소 포함)는
+    올라가는 원래 오류에 가려지므로 버리고, 판정이 난 창만 `on_settled`로 남긴다(접두 알림은
+    하지 않는다).
+    """
+    for future in pending:
+        future.cancel()
+    for future in pending:
+        if not future.cancelled() and future.exception() is None:
+            progress.settle(future.result())
+
+
+class _OrderedAnnotations:
+    """창 차례 자리에 판정을 꽂는다 — 끝날 때마다 `settled`, 이어진 접두가 자랄 때만 `notify`."""
+
+    def __init__(
+        self,
+        count: int,
+        notify: Callable[[Sequence[SemanticAnnotation]], None] | None,
+        settled: Callable[[SemanticAnnotation], None] | None,
+    ) -> None:
+        self._slots: list[SemanticAnnotation | None] = [None] * count
+        self._ready = 0
+        self._notify = notify
+        self._settled = settled
+
+    def settle(self, annotation: SemanticAnnotation) -> None:
+        if self._settled is not None:
+            self._settled(annotation)
+
+    def put(self, order: int, annotation: SemanticAnnotation) -> None:
+        self._slots[order] = annotation
+        self.settle(annotation)
+        grown = self._ready
+        while grown < len(self._slots) and self._slots[grown] is not None:
+            grown += 1
+        if grown == self._ready:
+            return
+        self._ready = grown
+        if self._notify is not None:
+            self._notify(self.rows())
+
+    def rows(self) -> tuple[SemanticAnnotation, ...]:
+        return tuple(row for row in self._slots[: self._ready] if row is not None)
+
+
+def _collect(pending: dict[Future[SemanticAnnotation], int], progress: _OrderedAnnotations) -> None:
+    """끝난 일꾼 하나 이상을 거둔다 — 일꾼의 오류(취소 포함)는 여기서 그대로 올라온다."""
+    finished, _ = wait(pending, return_when=FIRST_COMPLETED)
+    for future in sorted(finished, key=pending.__getitem__):
+        order = pending.pop(future)
+        progress.put(order, future.result())
+
+
+_SLOT_GUARD = threading.Lock()
+_PROVIDER_SLOTS: dict[tuple[str, int], threading.BoundedSemaphore] = {}
+
+
+def _in_provider_slot(
+    provider: str, width: int, poll_seconds: float, ask: Callable[[], SemanticAnnotation]
+) -> Callable[[], SemanticAnnotation]:
+    """1을 넘는 동시 수는 프로세스 전체 상한이다 — 영상 여럿이 같은 공급자 자리를 나눠 쓴다.
+
+    1은 예전 그대로다(영상 안 직렬, 프로세스 상한 없음). 자리를 기다리는 동안에도 취소를 본다.
+    """
+    if width == 1:
+        return ask
+
+    def job() -> SemanticAnnotation:
+        with _provider_slot(provider, width, poll_seconds):
+            return ask()
+
+    return job
+
+
+@contextmanager
+def _provider_slot(provider: str, width: int, poll_seconds: float) -> Iterator[None]:
+    with _SLOT_GUARD:
+        slots = _PROVIDER_SLOTS.setdefault((provider, width), threading.BoundedSemaphore(width))
+    while not slots.acquire(timeout=poll_seconds):
         check_cancel()
-        payload = build_semantic_payload(evidence, settings, model)
-        request_sha256 = luna_request_sha256(model, payload)
-        prior = (cached or {}).get(evidence.window.window_id)
-        if prior is not None and _reusable(
-            prior, request_sha256, settings=settings, model=model, origin=origin
-        ):
-            annotation = prior
-        elif evidence.window.frame_plans and not evidence.frames:
-            annotation = _frames_missing(
-                evidence, request_sha256, settings=settings, model=model, origin=origin
-            )
-        else:
-            annotation = _ask_luna(
-                evidence,
-                payload,
-                request_sha256,
-                responder,
-                settings=settings,
-                model=model,
-                origin=origin,
-            )
-        annotations.append(annotation)
-        if on_annotations is not None:
-            on_annotations(tuple(annotations))
-    return tuple(annotations)
+    try:
+        yield
+    finally:
+        slots.release()
 
 
 def _reusable(
@@ -1418,7 +1562,7 @@ class ReservationGate(Protocol):
 
 @dataclass
 class CountingReservationGate:
-    """단순 예약 게이트 — 남은 요청 수를 세는 구현(단일 실행 가정).
+    """단순 예약 게이트 — 남은 요청 수를 세는 구현(실행 하나 — 그 일꾼들은 함께 예약해도 된다).
 
     같은 key의 재예약은 세지 않는다 — 창 단위 예약이고 재시도가 문을 두 번
     통과하게 하지 않는다. 한도를 넘으면 `BudgetExhausted`로 닫힌다.
@@ -1427,6 +1571,8 @@ class CountingReservationGate:
     budget: AnalysisBudget
     remaining: int = 0
     keys: set[str] = field(default_factory=set)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+    """창 병렬 전송(D142)의 일꾼들이 함께 예약한다 — 세고 빼는 사이에 끼어들지 못한다."""
 
     def __post_init__(self) -> None:
         self.remaining = self.budget.max_luna_requests
@@ -1434,14 +1580,15 @@ class CountingReservationGate:
     def reserve(self, *, count: int, key: str) -> None:
         if isinstance(count, bool) or not isinstance(count, int) or count < 1:
             raise ValueError(f"예약 수는 1 이상 정수다: {count!r}")
-        if key in self.keys:
-            return
-        if count > self.remaining:
-            raise BudgetExhausted(
-                f"요청 예약 한도를 넘었다 — 남음 {self.remaining}, 요청 {count} (key {key!r})"
-            )
-        self.remaining -= count
-        self.keys.add(key)
+        with self._lock:
+            if key in self.keys:
+                return
+            if count > self.remaining:
+                raise BudgetExhausted(
+                    f"요청 예약 한도를 넘었다 — 남음 {self.remaining}, 요청 {count} (key {key!r})"
+                )
+            self.remaining -= count
+            self.keys.add(key)
 
 
 # ─────────────────────────────────────────────────────────────

@@ -2039,14 +2039,15 @@ def _finish_source(
     clips = _window_clips(context, workspace, asset, workflow, grid=grid, audio=audio, plan=plan)
     evidence_windows = luna.window_evidence(plan, frames, spoken, clips)
 
+    def remember(annotation: Any) -> None:
+        # 창이 끝나는 순간 남긴다(D142) — 앞 창을 기다리다 취소돼도 치른 판정은 다시 사지 않는다.
+        if annotation.status == "accepted":
+            target = cache_dir / (annotation.request_sha256 + ".json")
+            if not target.is_file():
+                _write_json_atomic(target, luna.annotation_json(annotation))
+
     def publish_progress(rows: Sequence[Any]) -> None:
         context.check_cancel()
-        for annotation in rows:
-            if annotation.status == "accepted":
-                _write_json_atomic(
-                    cache_dir / (annotation.request_sha256 + ".json"),
-                    luna.annotation_json(annotation),
-                )
         _write_json_atomic(
             source_dir / "suitability_progress.json",
             {
@@ -2103,6 +2104,7 @@ def _finish_source(
         model=workflow.models.luna_model,
         origin=providers.origin,
         on_annotations=publish_progress,
+        on_settled=remember,
         cached=cached_annotations,
     )
     references = media_refs.load(workspace, asset.asset_id)
