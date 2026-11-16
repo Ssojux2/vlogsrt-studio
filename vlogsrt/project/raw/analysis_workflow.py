@@ -473,6 +473,8 @@ class CountingAsrGate:
     limit: int
     remaining: int = 0
     reserved: int = 0
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+    """청크를 함께 보내는 일꾼들(P-5, D159)이 함께 예약한다 — 세고 빼는 사이에 끼어들지 못한다."""
 
     def __post_init__(self) -> None:
         self.remaining = self.limit
@@ -481,12 +483,13 @@ class CountingAsrGate:
         _ = key  # 재시도를 구분하지 않는다 — 호출 수가 곧 예산이다
         if isinstance(count, bool) or not isinstance(count, int) or count < 1:
             raise ValueError(f"예약 수는 1 이상 정수다: {count!r}")
-        if count > self.remaining:
-            raise AsrBudgetExhausted(
-                f"내부 ASR 청크 예약 한도를 넘었다 — 남음 {self.remaining}, 요청 {count}"
-            )
-        self.remaining -= count
-        self.reserved += count
+        with self._lock:
+            if count > self.remaining:
+                raise AsrBudgetExhausted(
+                    f"내부 ASR 청크 예약 한도를 넘었다 — 남음 {self.remaining}, 요청 {count}"
+                )
+            self.remaining -= count
+            self.reserved += count
 
 
 @dataclass(frozen=True, slots=True)

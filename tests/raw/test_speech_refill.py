@@ -460,8 +460,9 @@ def test_the_run_never_trusts_the_approved_objects_fields_only_its_digest(
     forged = replace(quote, pieces=((0, RATE),), whisper_due=((0, RATE),))
     sender = RefillSender()
     service.refill_source(root, asset_id, forged, transport(sender), context())
-    sent = [round(request.chunk.offset * RATE) for request in sender.whisper]
-    assert sent == [start for start, _end in quote.pieces] and 0 not in sent
+    # 조각은 함께 보낸다(P-5, D159) — 보낸 차례가 아니라 보낸 조각을 본다.
+    sent = sorted(round(request.chunk.offset * RATE) for request in sender.whisper)
+    assert sent == sorted(start for start, _end in quote.pieces) and 0 not in sent
 
 
 def test_the_offline_gate_closes_every_send(gapped: tuple[Any, Path, str]) -> None:

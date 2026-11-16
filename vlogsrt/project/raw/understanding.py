@@ -19,15 +19,19 @@ ffmpeg·ffprobe는 `vlogsrt/preprocess.py`의 공개 함수만 쓴다(불변 규
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import inspect
 import io
 import json
 import math
 import sys
+import threading
 import wave
 from array import array
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import date
 from fractions import Fraction
@@ -41,6 +45,7 @@ from vlogsrt.preprocess import VideoStreamInfo, extract_frame_index, extract_pcm
 from vlogsrt.project.raw import ear_rescue, request_log
 from vlogsrt.project.raw.analysis_config import (
     ASR_CHUNK_CUT,
+    PROVIDER_CONCURRENCY,
     AsrChunkCutSettings,
     RawUnderstandingSettings,
     validate_understanding_settings,
@@ -406,29 +411,76 @@ def transcribe_selected_audio(
     않는다. 한 청크의 실패는 다음 청크를 멈추지 않는다(§7.3). 다시 듣기 차례는 `asr_chunk_key`.
     """
     _require_settings(understanding)
-    outcomes: list[AsrChunkOutcome] = []
-    for position, span in enumerate(spans):
+
+    def one(position: int, span: SampleSpan) -> AsrChunkOutcome:
         check_cancel()
-        outcomes.append(
-            _transcribe_span(
-                audio,
-                span,
-                position=position,
-                settings=settings,
-                provider=provider,
-                on=on,
-                request_id=request_id,
-                workdir=workdir,
-                cache_dir=cache_dir,
-                asr_epoch=asr_epoch,
-            )
+        return _transcribe_span(
+            audio,
+            span,
+            position=position,
+            settings=settings,
+            provider=provider,
+            on=on,
+            request_id=request_id,
+            workdir=workdir,
+            cache_dir=cache_dir,
+            asr_epoch=asr_epoch,
         )
+
+    outcomes = _each_chunk(list(enumerate(spans)), one, PROVIDER_CONCURRENCY.asr_chunks)
     return AsrEvidence(
         request_id=request_id,
         sample_rate=audio.sample_rate,
         chunks=tuple(outcomes),
         chunk_plan=chunk_plan,
     )
+
+
+_ASR_SLOT_GUARD = threading.Lock()
+_ASR_SLOTS: dict[int, threading.BoundedSemaphore] = {}
+
+
+@contextmanager
+def _asr_slot(width: int) -> Iterator[None]:
+    """프로세스 전체의 전사 청크 자리 — 영상 여럿이 같은 자리를 나눠 쓴다. 기다리며 취소를 본다."""
+    with _ASR_SLOT_GUARD:
+        slots = _ASR_SLOTS.setdefault(width, threading.BoundedSemaphore(width))
+    while not slots.acquire(timeout=PROVIDER_CONCURRENCY.slot_poll_seconds):
+        check_cancel()
+    try:
+        yield
+    finally:
+        slots.release()
+
+
+def _each_chunk(
+    jobs: list[tuple[int, SampleSpan]],
+    one: Callable[[int, SampleSpan], AsrChunkOutcome],
+    width: int,
+) -> list[AsrChunkOutcome]:
+    """청크마다 전사한다 — 1이면 예전 그대로 차례로, 넘으면 그만큼 함께(P-5, D159).
+
+    결과는 언제나 청크 차례다. 청크 하나의 실패는 그 청크의 기록이라(§7.3) 여기까지 오지 않고, 오는
+    것은 취소 같은 실행 전체의 멈춤뿐이다 — 그때는 아직 시작하지 않은 청크를 거두고 올린다(이미 보낸
+    청크는 끝나 캐시에 남는다)."""
+    if width <= 1 or len(jobs) <= 1:
+        return [one(position, span) for position, span in jobs]
+
+    def slotted(position: int, span: SampleSpan) -> AsrChunkOutcome:
+        with _asr_slot(width):
+            return one(position, span)
+
+    with ThreadPoolExecutor(max_workers=width, thread_name_prefix="vlogsrt-asr") as pool:
+        futures: list[Future[AsrChunkOutcome]] = [
+            pool.submit(contextvars.copy_context().run, slotted, position, span)
+            for position, span in jobs
+        ]
+        try:
+            return [future.result() for future in futures]
+        except BaseException:
+            for future in futures:
+                future.cancel()
+            raise
 
 
 def _transcribe_span(
