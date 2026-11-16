@@ -158,7 +158,7 @@ def test_workspace_switch_resets_ingest_panel(
 
     view_b = server.create_workspace_view("B", str(tmp_path / "ws-b"))
     signature_b, root_b = view_b[1], Path(view_b[0].split("`")[1])
-    assert "조사 결과" not in view_b[6]  # B의 첫 보기에는 A의 제안이 없다
+    assert "조사 결과" not in view_b[5]  # B의 첫 보기에는 A의 제안이 없다
     with pytest.raises(gr.Error, match="조사를 실행"):
         server.ingest_confirm_view(signature_b)
     assert server._ingest_proposal is None  # 서버 상태도 비었다

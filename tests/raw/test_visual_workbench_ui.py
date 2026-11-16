@@ -33,7 +33,6 @@ import re
 import shutil
 import subprocess
 import time
-from datetime import date
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -2929,7 +2928,7 @@ def test_visual_replan_and_epoch_distinct_across_switches(tmp_path: Path) -> Non
     b_workbench = server.visual_workbench_render(server.workspace_root())[1]
     assert "data-vl-empty" in b_workbench  # B에는 검토 리비전이 없다 — 빈 성공 아님
     reopened = server.open_workspace_view(str(root))
-    a_epoch = _model_of(reopened[-5])["epoch"]  # 영상 작업대 본문(-2는 출처 표시 칸)
+    a_epoch = _model_of(reopened[-3])["epoch"]  # 영상 작업대 본문(-1은 출처 표시 칸)
     again_epoch = _model_of(server.visual_workbench_render(root)[1])["epoch"]
     assert len({first_epoch, a_epoch, again_epoch}) == 3  # 매 그림마다 고유
     assert server.current_signature() == signature_before  # 같은 프로젝트 재오픈
@@ -3105,214 +3104,6 @@ def test_visual_pending_refresh_maps_old_plan_selection(tmp_path: Path) -> None:
 
 
 # ── 자막 작업대 — 실제 등록·실행·저장·게이트 ─────────────────────────────────
-
-
-class _FakeTiming:
-    def timed_transcript(self, *, binding: Any, chunk: Any, settings: Any, on: date, **kw: Any):
-        from vlogsrt.project.raw.caption_provider import parse_timing_response
-
-        return parse_timing_response(
-            {"segments": [{"text": " 망원동 커피에 왔어요", "start": 0.5, "end": 2.5}]},
-            binding=binding,
-            model=settings.models.timing_model,
-            provider=settings.caption.timing_provider,
-            chunk_duration=chunk.duration,
-            chunk_offset=chunk.offset,
-        )
-
-
-class _FakeText:
-    def text_transcript(self, *, binding: Any, chunk: Any, settings: Any, on: date, **kw: Any):
-        from vlogsrt.project.raw.caption_provider import parse_text_response
-
-        return parse_text_response(
-            {"text": "망원동 카페에 왔어요"}, binding=binding, model=settings.models.text_model
-        )
-
-
-@needs_ffmpeg
-def test_caption_workbench_save_and_gates(tmp_path: Path) -> None:
-    """자막 작업대 — 모델·저장(글자·시각)·늦은 머리·게이트·오버레이 재생기."""
-    video = tmp_path / "final.mp4"
-    _encode(
-        [
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=size=320x180:rate=25:duration=4",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=440:duration=4",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-ac",
-            "1",
-            str(video),
-        ]
-    )
-    server = workspace_service.RawWorkspaceUi(
-        port=7860,
-        state_path=tmp_path / "state.json",
-        caption_providers=lambda: (_FakeTiming(), _FakeText()),
-    )
-    view = server.create_workspace_view("자막작업대", str(tmp_path / "ws"))
-    signature = view[1]
-    root = server.workspace_root()
-    assert root is not None
-
-    markdown, player = server.caption_register_view(signature, str(video), "f1", "자동(첫 트랙)")
-    assert "ready" in markdown
-    assert 'id="caption-overlay"' in player and 'id="cap-overlay-toggle"' in player
-    assert 'id="caption-video"' in player  # 기존 아이디 계약 유지
-    # 등록 전에는 작업대가 안내다.
-    assert "data-vl-empty" in server.caption_workbench_value(root)
-
-    server.caption_prepare_view(signature, "run-1")
-    note = server.caption_run_view(signature, "run-1", True)
-    assert _wait_terminal(server, root, note.split("`")[1]).status == "succeeded"
-    server.caption_review_view(signature, "run-1")
-
-    value = server.caption_workbench_value(root)
-    assert 'id="cap-cues"' in value and "<details" in value
-    model = _model_of(value)
-    cue = model["cues"][0]
-    assert cue["id"] == "a0000" and cue["startMs"] == "500" and cue["endMs"] == "2500"
-    assert cue["seek"] and cue["seek"] != ""  # 측정 매핑이 심어졌다(오버레이·행 이동용)
-    assert model["head"] is not None and model["signature"] == signature
-
-    fns = {fn.__name__: fn for fn in server._caption_server_functions()}
-    assert list(fns) == ["cap_save", "cap_confirm"]
-    saved = fns["cap_save"](
-        {
-            "epoch": model["epoch"],
-            "token": model["token"],
-            "signature": signature,
-            "head": model["head"],
-            "op": "text",
-            "cueId": "a0000",
-            "text": "손으로 고친 글자",
-            "startMs": "",
-            "endMs": "",
-        }
-    )
-    assert saved["ok"] and saved["echoEpoch"] == model["epoch"], saved
-    after = _model_of(saved["html"])
-    assert after["cues"][0]["text"] == "손으로 고친 글자"
-    assert after["cues"][0]["basis"] == "manual"
-    assert after["epoch"] != model["epoch"]
-    assert 'id="visual-video"' not in saved["html"] and "<script" not in saved["html"]
-
-    # 늦은 머리 저장 — 화면이 본 머리가 서버 머리와 다르면 거부.
-    late = fns["cap_save"](
-        {
-            "epoch": after["epoch"],
-            "token": after["token"],
-            "signature": signature,
-            "head": model["head"],
-            "op": "text",
-            "cueId": "a0000",
-            "text": "덮어쓰기",
-            "startMs": "",
-            "endMs": "",
-        }
-    )
-    assert late["ok"] is False and "늦었다" in late["error"]
-
-    # 시각 저장(ms 정수만).
-    timed = fns["cap_save"](
-        {
-            "epoch": after["epoch"],
-            "token": after["token"],
-            "signature": signature,
-            "head": after["head"],
-            "op": "time",
-            "cueId": "a0000",
-            "text": "",
-            "startMs": "600",
-            "endMs": "2600",
-        }
-    )
-    assert timed["ok"], timed
-    timed_model = _model_of(timed["html"])
-    assert timed_model["cues"][0]["startMs"] == "600" and timed_model["cues"][0]["endMs"] == "2600"
-    bad_ms = fns["cap_save"](
-        {
-            "epoch": timed_model["epoch"],
-            "token": timed_model["token"],
-            "signature": signature,
-            "head": timed_model["head"],
-            "op": "time",
-            "cueId": "a0000",
-            "text": "",
-            "startMs": "x",
-            "endMs": "2000",
-        }
-    )
-    assert bad_ms["ok"] is False
-
-    # 잘못된 서명 — 거부(500 아님).
-    bad_sig = fns["cap_save"](
-        {
-            "epoch": "x",
-            "signature": "없는작업공간",
-            "head": 1,
-            "op": "text",
-            "cueId": "a0000",
-            "text": "x",
-            "startMs": "",
-            "endMs": "",
-        }
-    )
-    assert bad_sig["ok"] is False and "바뀌었습니다" in bad_sig["error"]
-
-    # ms 환산은 정확히 — 이진 부동 잔여가 1200을 1199로 자르지 않는다(A5 실측).
-    assert ui_facade.fraction_ms(Fraction(1.2)) == 1200  # 이진 부동에서 온 값
-    assert ui_facade.fraction_ms(Fraction(6, 5)) == 1200  # 정확한 유리수
-    assert ui_facade.fraction_ms(1.2) == 1200
-    assert ui_facade.fraction_ms(Fraction(1199, 1000)) == 1199
-    assert ui_facade.fraction_ms(Fraction(1199500, 10**6)) == 1200  # 동률은 올린다
-
-    # 확정은 화면이 보낸 머리에 묶인다 — 옛 머리 번호로 최신 머리를 게시하지
-    # 못한다(A5 실측: head 0 요청이 head 1을 확정 게시하던 결함).
-    stale_confirm = fns["cap_confirm"](
-        {
-            "epoch": timed_model["epoch"],
-            "token": timed_model["token"],
-            "signature": signature,
-            "head": model["head"],
-        }
-    )
-    assert stale_confirm["ok"] is False and "확정이 늦었다" in stale_confirm["error"]
-    fresh_confirm = fns["cap_confirm"](
-        {
-            "epoch": timed_model["epoch"],
-            "token": timed_model["token"],
-            "signature": signature,
-            "head": timed_model["head"],
-        }
-    )
-    assert fresh_confirm["ok"], fresh_confirm
-    # 작업대 확정 흐름 — 사람 문장 + 등록 미디어 ID 내려받기만(원문 마크다운·해시는
-    # 고급 패널 상세가 싣는다). 링크는 실제 등록 파일로 제공된다.
-    assert "확정 게시 완료" in fresh_confirm["message"]
-    downloads = fresh_confirm["downloads"]
-    assert [(d["label"], d["href"].startswith("/media/")) for d in downloads] == [
-        ("SRT", True),
-        ("VTT", True),
-    ]
-    for entry in downloads:
-        media_id = entry["href"].rsplit("/", 1)[-1]
-        registered = next(
-            m for m in server.raw.list_media(root, kind="artifact") if m.file_id == media_id
-        )
-        assert (root / registered.relative_path).is_file()
 
 
 def test_caption_confirm_gate_reports_open_items(tmp_path: Path) -> None:
@@ -4162,125 +3953,6 @@ def test_advanced_context_rejects_old_and_stale_native_events(
 
 
 @needs_ffmpeg
-def test_advanced_caption_context_rejects_old_head_and_aba(
-    tmp_path: Path, local_socket: None
-) -> None:
-    """자막 고급(수동 편집·확정)의 실제 배선 — 옛 머리·옛 토큰 사건 거부(F2-2).
-
-    A6 실측 재현: 옛 머리(0)의 수동 편집이 머리 1→2로 적용되고, 이어 옛 머리
-    확정이 최신 머리를 게시하던 결함. 문맥 검증이 먼저면 큐·머리·확정 어느 것도
-    바뀌지 않는다.
-    """
-    video = tmp_path / "final.mp4"
-    _encode(
-        [
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=size=320x180:rate=25:duration=4",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=440:duration=4",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-ac",
-            "1",
-            str(video),
-        ]
-    )
-    server = workspace_service.RawWorkspaceUi(
-        port=7860,
-        state_path=tmp_path / "state.json",
-        caption_providers=lambda: (_FakeTiming(), _FakeText()),
-    )
-    view = server.create_workspace_view("자막문맥", str(tmp_path / "ws"))
-    signature = view[1]
-    root = server.workspace_root()
-    assert root is not None
-    server.caption_register_view(signature, str(video), "f1", "자동(첫 트랙)")
-    server.caption_prepare_view(signature, "run-1")
-    note = server.caption_run_view(signature, "run-1", True)
-    assert _wait_terminal(server, root, note.split("`")[1]).status == "succeeded"
-    server.caption_review_view(signature, "run-1")
-    server.build_blocks()
-    handlers = server._advanced_handlers
-
-    # 화면 문맥 — 검토 새로고침 배선이 내리는 값 그대로.
-    _md, _table, _player, _dd, _wb, nonce, shown_head = handlers["caption-refresh"](
-        signature, "run-1"
-    )
-    assert nonce == server._caption_lifetime_token
-    assert shown_head == server._caption_head_sequence
-
-    # 클라이언트 B의 수동 편집 — 머리가 한 칸 옮는다.
-    result = handlers["caption-edit"](
-        nonce,
-        shown_head,
-        signature,
-        "글자 교정",
-        "a0000",
-        "B 클라이언트 글자",
-        "",
-        "",
-        "",
-        "",
-        "",
-    )
-    head_after_b = result[-1]
-    assert head_after_b == shown_head + 1
-
-    # 늦은 클라이언트 A 사건 — 옛 머리 편집은 거부다(지속본 무오염).
-    with pytest.raises(gr.Error, match="늦었다"):
-        handlers["caption-edit"](
-            nonce,
-            shown_head,
-            signature,
-            "글자 교정",
-            "a0000",
-            "OLD NATIVE CAPTION EVENT",
-            "",
-            "",
-            "",
-            "",
-            "",
-        )
-    ws = server._caption_ws(root)
-    bundle = ws.review_bundle(server._caption_run_identity(server._require_caption_identity(root)))
-    assert bundle.state.head_revision == head_after_b
-    row = next(r for r in bundle.state.rows if r.cue.cue_id == "a0000")
-    assert row.cue.text == "B 클라이언트 글자"
-
-    # 옛 머리 확정도 거부 — 최신 머리를 몰래 게시하지 않는다(A6 결함의 축).
-    with pytest.raises(gr.Error, match="늦었다"):
-        handlers["caption-confirm"](nonce, shown_head, signature, "run-1", True)
-    published_dir = root / "final" / "captions" / "published"
-    assert not published_dir.exists() or not any(published_dir.iterdir())
-
-    # 지금 문맥 확정 — 게시된다.
-    published = handlers["caption-confirm"](nonce, head_after_b, signature, "run-1", True)
-    assert "확정 완료" in published[0]
-
-    # A→B→A — 옛 토큰 편집은 머리가 옮겨도 거부다.
-    server.create_workspace_view("B", str(tmp_path / "ws-b"))
-    server.open_workspace_view(str(root))
-    signature = server.current_signature()
-    server.caption_register_view(signature, str(video), "f1", "자동(첫 트랙)")
-    server.caption_prepare_view(signature, "run-1")
-    server.caption_review_view(signature, "run-1")
-    with pytest.raises(gr.Error, match="토큰"):
-        handlers["caption-edit"](
-            nonce, head_after_b, signature, "글자 교정", "a0000", "OLD ABA", "", "", "", "", ""
-        )
-
-
-@needs_ffmpeg
 def test_visual_token_lifetime_rejects_old_aba(tmp_path: Path) -> None:
     """A→B→A 수명 토큰 — 같은 서명·같은 머리여도 옛 사건은 거부된다(F1c)."""
     server = _new_server(tmp_path)
@@ -4318,7 +3990,7 @@ def test_visual_token_lifetime_rejects_old_aba(tmp_path: Path) -> None:
     # A→B→A — 서명은 같아도 토큰은 다시 파진다.
     server.create_workspace_view("B", str(tmp_path / "ws-b"))
     reopened = server.open_workspace_view(str(root))
-    model_a2 = _model_of(reopened[-5])  # 영상 작업대 본문(뒤에 경로 표시 칸 세 개가 붙는다)
+    model_a2 = _model_of(reopened[-3])  # 영상 작업대 본문(뒤에 경로 표시 칸 두 개가 붙는다)
     assert model_a2["signature"] == model["signature"]  # 결정적 서명 — 같다
     assert model_a2["token"] != token_a1  # 수명 토큰 — 다르다
 
@@ -4386,102 +4058,8 @@ def test_visual_token_lifetime_rejects_old_aba(tmp_path: Path) -> None:
     assert fresh_note["ok"] and "A2 메모" in fresh_note["html"]
 
 
-@needs_ffmpeg
-def test_caption_token_rejects_old_aba(tmp_path: Path) -> None:
-    """자막 작업대 수명 토큰 — A→B→A 뒤 옛 저장·확정은 거부된다(F1c)."""
-    video = tmp_path / "final.mp4"
-    _encode(
-        [
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=size=320x180:rate=25:duration=4",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=440:duration=4",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-ac",
-            "1",
-            str(video),
-        ]
-    )
-    server = workspace_service.RawWorkspaceUi(
-        port=7860,
-        state_path=tmp_path / "state.json",
-        caption_providers=lambda: (_FakeTiming(), _FakeText()),
-    )
-    view = server.create_workspace_view("자막ABA", str(tmp_path / "ws"))
-    signature = view[1]
-    root = server.workspace_root()
-    assert root is not None
-    server.caption_register_view(signature, str(video), "f1", "자동(첫 트랙)")
-    server.caption_prepare_view(signature, "run-1")
-    note = server.caption_run_view(signature, "run-1", True)
-    assert _wait_terminal(server, root, note.split("`")[1]).status == "succeeded"
-    server.caption_review_view(signature, "run-1")
-    model = _model_of(server.caption_workbench_value(root))
-    token_cap1 = model["token"]
-    fns = {fn.__name__: fn for fn in server._caption_server_functions()}
-
-    # A→B→A — 자막 토큰도 작업공간 전환마다 다시 파진다. 전환은 자막 화면 상태도
-    # 지우므로 같은 최종 영상을 다시 등록·검토해 A2 화면을 만든다(실행은 이미
-    # 끝났고 새 제공자 호출은 없다).
-    server.create_workspace_view("B", str(tmp_path / "ws-b"))
-    reopened = server.open_workspace_view(str(root))
-    signature = server.current_signature()
-    server.caption_register_view(signature, str(video), "f1", "자동(첫 트랙)")
-    server.caption_prepare_view(signature, "run-1")  # 실행 신원을 다시 세운다(로컬)
-    server.caption_review_view(signature, "run-1")
-    model2 = _model_of(server.caption_workbench_value(root))
-    assert model2["token"] != token_cap1
-    del reopened
-
-    # 옛 토큰 저장 — 머리가 맞아도 거부다.
-    old_save = fns["cap_save"](
-        {
-            "epoch": model["epoch"],
-            "token": token_cap1,
-            "signature": signature,
-            "head": model2["head"],
-            "op": "text",
-            "cueId": "a0000",
-            "text": "OLD CAPTION EVENT",
-            "startMs": "",
-            "endMs": "",
-        }
-    )
-    assert old_save["ok"] is False and "토큰" in old_save["error"]
-    old_confirm = fns["cap_confirm"](
-        {"epoch": model["epoch"], "token": token_cap1, "signature": signature, "head": 1}
-    )
-    assert old_confirm["ok"] is False and "토큰" in old_confirm["error"]
-    # 지금 토큰으로는 저장된다.
-    fresh = fns["cap_save"](
-        {
-            "epoch": model2["epoch"],
-            "token": model2["token"],
-            "signature": signature,
-            "head": model2["head"],
-            "op": "text",
-            "cueId": "a0000",
-            "text": "A2 자막",
-            "startMs": "",
-            "endMs": "",
-        }
-    )
-    assert fresh["ok"] and "A2 자막" in fresh["html"]
-
-
 def test_blocks_wire_workbench_outputs(tmp_path: Path, local_socket: None) -> None:
-    """조립 뒤 전환·페이지 로드 출력에 작업대 세 구성요소가 포함된다."""
+    """조립 뒤 전환·페이지 로드 출력에 작업대 두 구성요소가 포함된다."""
     server = _new_server(tmp_path)
     # 그라디오 .fillable 폭 상한은 CSS가 아니라 fill_width로 푼다(D50).
     blocks = server.build_blocks()
@@ -4495,14 +4073,14 @@ def test_blocks_wire_workbench_outputs(tmp_path: Path, local_socket: None) -> No
     outputs = server._selection_outputs()
     assert server._visual_player_block in outputs
     assert server._visual_workbench_block in outputs
-    assert server._caption_workbench_block in outputs
     assert server._signature_state in server._load_outputs()
     values = server.workspace_view_values()
     assert len(values) == len(outputs)
-    # 보기 꼬리: …·영상 작업대 본문(-5)·자막 작업대 본문(-4)·경로 표시 세 칸(-3~-1).
-    assert 'id="visual-workbench"' in values[-5]
-    assert 'id="caption-workbench"' in values[-4]
-    assert values[-2] == "" and values[-1] == ""  # 일반 작업공간 — 출처·최종 영상 표시는 비다
+    # 보기 꼬리: …·영상 작업대 본문(-3)·경로 표시 두 칸(-2~-1).
+    assert 'id="visual-workbench"' in values[-3]
+    assert values[-1] == ""  # 일반 작업공간 — 출처 표시는 비다
+    # 숨은 「자막」 탭은 걷었다(D162) — 그 구성요소가 조립에 남지 않는다.
+    assert "caption-workbench-block" not in by_id and "caption-stage" not in by_id
     # 3단 무대 — 껍데기·본문 두 구성요소가 같은 `#visual-stage` Row 안에 있고
     # 각자 vl-stage-cell 껍데기 계약을 단다(F1a: display:contents 대상).
     player_block = server._visual_player_block
@@ -4512,22 +4090,6 @@ def test_blocks_wire_workbench_outputs(tmp_path: Path, local_socket: None) -> No
     assert getattr(stage, "elem_id", None) == "visual-stage"
     assert "vl-stage-cell" in getattr(player_block, "elem_classes", ())
     assert "vl-stage-cell" in getattr(workbench_block, "elem_classes", ())
-    # 자막 무대 — 재생기·자막 작업대가 같은 `#caption-stage` Row 안에 나란히 있고
-    # 세팅(설정 안내·등록·실행)은 접힌 아코디언 안으로 물러난다(ROOT 실측 재배치).
-    cap_player = server._caption_player_html
-    cap_workbench = server._caption_workbench_block
-    cap_stage = cap_player.parent
-    assert cap_stage is not None and cap_stage is cap_workbench.parent
-    assert getattr(cap_stage, "elem_id", None) == "caption-stage"
-    assert "vl-stage-cell" in getattr(cap_player, "elem_classes", ())
-    assert "vl-stage-cell" in getattr(cap_workbench, "elem_classes", ())
-    assert server._settings_md is not None and server._settings_md.parent is not None
-    assert isinstance(server._settings_md.parent, gr.Accordion)
-    assert server._settings_md.parent is not cap_stage
-    # 자막 등록 기록(64자리 지문 등)도 접힌 상세로 — 같은 객체·출력 배선 그대로.
-    assert server._caption_md is not None
-    assert isinstance(server._caption_md.parent, gr.Accordion)
-    assert server._caption_md.parent is not cap_stage
     # 서버 함수가 구성요소에 실제로 붙어 있다(공개 server_functions 경계).
     assert server._visual_workbench_block.server_fns
     names = [fn.__name__ for fn in server._visual_workbench_block.server_fns]
@@ -4550,16 +4112,9 @@ def test_blocks_wire_workbench_outputs(tmp_path: Path, local_socket: None) -> No
         "vl_snap_all_apply",  # 「확인한 영상 모두 적용(무료)」(W-25e) — 확인 때의 토큰을 대조한다
         "vl_source_detail",  # 고르지 않은 영상의 패널 칸 읽기(W-71, D122) — 쓰지 않는다
     ]
-    cap_names = [fn.__name__ for fn in server._caption_workbench_block.server_fns]
-    assert cap_names == ["cap_save", "cap_confirm"]
-    # 고급(기존) 패널 문맥 상태 — 네 gr.State가 만들어지고 실제 배선이 문맥
+    # 고급(기존) 패널 문맥 상태 — 두 gr.State가 만들어지고 실제 배선이 문맥
     # (수명 토큰·화면이 본 리비전/머리)을 입력·출력에 단다(F2-2, A6 실측).
-    for context_state in (
-        server._edit_context_state,
-        server._review_head_state,
-        server._caption_context_state,
-        server._caption_head_state,
-    ):
+    for context_state in (server._edit_context_state, server._review_head_state):
         assert isinstance(context_state, gr.State)
     wirings = server._advanced_wirings
     gated_review = {
@@ -4586,16 +4141,7 @@ def test_blocks_wire_workbench_outputs(tmp_path: Path, local_socket: None) -> No
         inputs, outputs = wirings[name]
         assert server._edit_context_state in inputs and server._review_head_state in inputs, name
         assert server._review_head_state in outputs and server._edit_context_state in outputs, name
-    for name in ("caption-edit", "caption-confirm"):
-        inputs, outputs = wirings[name]
-        assert server._caption_context_state in inputs, name
-        assert server._caption_head_state in inputs, name
-        assert server._caption_context_state in outputs, name
-        assert server._caption_head_state in outputs, name
-    for name in ("caption-register", "caption-refresh"):
-        inputs, outputs = wirings[name]
-        assert server._caption_context_state in outputs, name
-        assert server._caption_head_state in outputs, name
+    assert not any(name.startswith("caption-") for name in wirings)
     # 문맥 검증은 배선 핸들러 안에 있다 — 뷰 함수 서명(직접 호출 호환)은 그대로.
     import inspect
 
@@ -4603,22 +4149,6 @@ def test_blocks_wire_workbench_outputs(tmp_path: Path, local_socket: None) -> No
         "signature",
         "segment_id",
         "note",
-    ]
-    assert list(inspect.signature(server.caption_edit_view).parameters) == [
-        "signature",
-        "operation",
-        "cue_id",
-        "text",
-        "start_ms",
-        "end_ms",
-        "second_id",
-        "index_text",
-        "warning_key",
-    ]
-    assert list(inspect.signature(server.caption_confirm_view).parameters) == [
-        "signature",
-        "run_id",
-        "confirm",
     ]
     with pytest.raises(AttributeError):
         _ = server._visual_workbench_block.vl_missing  # 없는 함수는 그대로 없다

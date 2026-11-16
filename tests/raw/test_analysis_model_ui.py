@@ -107,24 +107,20 @@ def test_a_new_workspace_shows_flash_as_the_default_without_a_price(tmp_path: Pa
 
 
 PRICE_WORDS = ("$", "100만 토큰", "effort", "출력 한도", "입력 $", "출력 $")
-"""화면(설정 요약·분석 설정 줄·모델 상태 줄)에 나오면 안 되는 단가·토큰 용어(D57 결정 7)."""
+"""화면(분석 설정 줄·모델 상태 줄)에 나오면 안 되는 단가·토큰 용어(D57 결정 7)."""
 
 
 @pytest.mark.parametrize("model", list(raw_service.ANALYSIS_MODEL_CHOICES))
 def test_no_screen_text_outside_quotes_shows_a_unit_price(tmp_path: Path, model: str) -> None:
-    """모든 모델에서 상태 줄·설정 요약·분석 설정 줄에 달러·토큰 용어가 없다(D110)."""
+    """모든 모델에서 상태 줄·분석 설정 줄에 달러·토큰 용어가 없다(D110)."""
     server = bare_server(tmp_path, model=model)
     root = server.workspace_root()
-    texts = (
-        server.analysis_model_status(),
-        server.settings_markdown(root),
-        server._analysis_settings_markdown(root),
-    )
+    texts = (server.analysis_model_status(), server._analysis_settings_markdown(root))
     for text in texts:
         assert not any(word in text for word in PRICE_WORDS), text
     official = raw_service.official_price_model(model)
     expected = "공식 단가 확인됨" if official else "단가 **미확인**"
-    assert all(expected in text for text in (texts[0], texts[2]))
+    assert all(expected in text for text in texts)
 
 
 def test_switching_workspaces_refreshes_the_model_chooser(tmp_path: Path) -> None:
@@ -299,16 +295,14 @@ def test_the_model_panel_carries_the_model_dropdown_and_never_the_key(
 def test_settings_summaries_show_official_claude_prices_only_for_claude(tmp_path: Path) -> None:
     server = bare_server(tmp_path)
     root = server.workspace_root()
-    luna_settings = server.settings_markdown(root)
     luna_analysis = server._analysis_settings_markdown(root)
-    assert "$4" not in luna_settings and "Luna 단가 **미확인**" in luna_analysis
+    assert "$4" not in luna_analysis and "Luna 단가 **미확인**" in luna_analysis
     choose_model(server, CLAUDE)
-    for text in (server.settings_markdown(root), server._analysis_settings_markdown(root)):
-        # D58: 단가(달러)는 견적에서만 — 설정 화면은 단가 상태만 말한다(D57 결정 7)
-        assert "Claude Opus 5.5" in text and "공식 단가 확인됨" in text
-        assert "$" not in text
+    text = server._analysis_settings_markdown(root)
+    # D58: 단가(달러)는 견적에서만 — 설정 화면은 단가 상태만 말한다(D57 결정 7)
+    assert "Claude Opus 5.5" in text and "공식 단가 확인됨" in text
+    assert "$" not in text
     choose_model(server, LUNA)
-    assert server.settings_markdown(root) == luna_settings
     assert server._analysis_settings_markdown(root) == luna_analysis
 
 

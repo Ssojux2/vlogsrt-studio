@@ -17,7 +17,6 @@ import html
 import inspect
 import json
 import os
-import shutil
 import sys
 import threading
 import time
@@ -811,24 +810,6 @@ class _ApprovalNotice:
     watch: frozenset[str] = frozenset()
 
 
-_CUE_SEEK_JS = (
-    "(cue) => { if (!cue) return;"
-    " const player = document.getElementById('caption-video');"
-    " if (!player) return;"
-    " if (player._vlLoop) { player._vlLoop(); }"
-    " const row = document.querySelector('[data-cue-id=\"' + cue + '\"]');"
-    " if (row) { player.currentTime = Number(row.dataset.seekStart);"
-    " player.play(); } }"
-)
-"""큐 선택 → 재생기 이동(클라이언트 전용) — 서버 잰 시각을 큐 표의 data-*에서 읽는다.
-
-서버 왕복이 없으므로 미디어 재생성·제공자 호출이 일어나지 않는다. 시각 계산은
-서버가 미리보기 원점까지 포함해 구웠다 — 클라이언트는 읽기만 한다. 큐를 새로
-고르는 것은 평범한 이동이므로 살아 있던 반복(`_vlLoop`)을 먼저 뗀다 — 묵은 반복
-손잡이가 새로 고른 큐에서 어김없이 발동하면 안 된다. 빈 선택(표시 갱신이 드롭다운을
-되돌릴 때)은 아무것도 만지지 않고 돌아간다."""
-
-
 def _parse_intervals(text: str) -> dict[str, list[raw_service.PlannedInterval]] | None:
     """구간 계획 입력 해석 — 각 줄 `자산ID 시작 끝`(초, 유리수). 빈 입력은 None.
 
@@ -1018,7 +999,6 @@ WorkspaceView = tuple[
     gr.Dropdown,  # 등록 미디어
     gr.Dropdown,  # 진행 중 작업
     str,  # 작업 로그
-    str,  # 설정 요약
     str,  # 가져오기 패널
     gr.Dropdown,  # 재시도할 가져오기 작업
     str,  # 분할 패널
@@ -1030,10 +1010,8 @@ WorkspaceView = tuple[
     gr.CheckboxGroup,  # 분석 원본 선택
     str,  # 영상 작업대 껍데기
     str,  # 영상 작업대 본문
-    str,  # 자막 작업대 본문
     str,  # 작업공간 경로 표시(읽기전용 — 선택기로만 정해진다)
     str,  # 원본 폴더 표시(읽기전용 — 전환마다 비운다: 낡은 출처가 남지 않는다)
-    str,  # 최종 영상 경로 표시(읽기전용 — 전환마다 비운다)
 ]
 """작업공간 만들기·열기 이벤트가 한 번에 내리는 전체 보기 — `_selection_outputs`와 짝이다."""
 
@@ -1602,13 +1580,6 @@ def _analysis_model_choice_label(model: str) -> str:
     return f"{label}{DEFAULT_MODEL_MARK}" if model == raw_service.DEFAULT_ANALYSIS_MODEL else label
 
 
-def _claude_price_suffix(model: str) -> str:
-    """설정 요약의 의미 분석 줄 꼬리 — Claude·Gemini만 단가 상태를 붙인다(Luna 줄은 그대로)."""
-    if not raw_service.official_price_model(model):
-        return ""
-    return f" — {_analysis_price_status(model)}"
-
-
 def _price_status_note(model: str) -> str:
     """화면의 단가 상태 — 달러·토큰 용어 없이 말한다(D57 결정 7, D58). 금액은 말하지 않는다(D110).
 
@@ -1852,7 +1823,6 @@ class RawWorkspaceUi:
         live: raw_service.LiveAnalysisTransport | None = None,
         finder_opener: Callable[[Path], None] | None = None,
         finalcut_opener: Callable[[Path], None] | None = None,
-        caption_providers: Callable[[], tuple[object, object]] | None = None,
         path_chooser: ui_chooser.PathChooser | None = None,
         parallel_analysis_limit: int | None = None,
         folder_opener: Callable[[Path], None] | None = None,
@@ -1886,20 +1856,6 @@ class RawWorkspaceUi:
         self._review_signature: str | None = None
         self._review_clocks: dict[str, Any] = {}
         self._review_spans: dict[str, tuple[str, int, int]] = {}
-        # 자막 화면 상태 — 마지막 실행 신원과 검토 머리 번호(편집·확정은 이 머리에 묶인다).
-        self._caption_identity: dict[str, str | int | None] | None = None
-        self._caption_signature: str | None = None
-        self._caption_head_sequence: int | None = None
-        self._caption_cue_ids: tuple[str, ...] = ()
-        self._caption_unplaced: dict[int, str] = {}
-        self._caption_chunk_count: int | None = None
-        # 선택 오디오 미리보기 상태 — 미디어·트랙이 바뀐 경우에만 다시 만든다.
-        # 표시 갱신(검토 새로고침·편집)은 재생기 구성요소를 그대로 둬서 재생 머리가
-        # 살아 있고, ffmpeg도 다시 돌지 않는다.
-        self._caption_preview: raw_service.CaptionPreviewMedia | None = None
-        self._caption_preview_signature: str | None = None
-        self._caption_cue_rows: tuple[ui_facade.CueRowView, ...] = ()
-        self._caption_cue_clock: dict[str, tuple[Fraction, Fraction]] = {}
         # 마지막 확정 내보내기 자리 — Finder 열기·경로 복사·정리 뒤 재검증의 대상.
         self._last_export_path: str | None = None
         self._last_export_dir: str | None = None
@@ -1916,15 +1872,10 @@ class RawWorkspaceUi:
         self._tick_selection_digest: dict[Path, int] = {}
         # 1초 상태 틱의 기억 — (이름, 작업공간) → (열쇠, 지은 때, 값)(W-46b, D100 §7b).
         self._status_memos: dict[tuple[str, Path], tuple[tuple, float, Any]] = {}
-        # 자막 작업대의 확정 조건 표시 — 검토 상태를 다시 읽을 때마다 갱신한다.
-        self._caption_warnings_open: int = 0
-        self._caption_unplaced_open: int = 0
         # Finder 여는 경계 — 시험은 가짜를 넣는다(실제는 macOS `open -R`, 인자 검증 후).
         self._finder_opener = finder_opener
         # Final Cut 여는 경계 — 시험은 가짜를 넣는다(실제는 macOS `open -a "Final Cut Pro"`).
         self._finalcut_opener = finalcut_opener
-        # 최종 자막 실제 실행 제공자 주입 경계(시험·루트 가짜). 없으면 생산 transport.
-        self._caption_providers = caption_providers
         self._root: Path | None = None
         self._selection_lock = threading.Lock()
         self._quick: dict[str, Any] = {}
@@ -1976,7 +1927,6 @@ class RawWorkspaceUi:
         self._fcp_role: str = raw_service.FCP_ROLE_ORIGINAL
         # 화면 구성요소 참조 — 만들어지기 전에는 None(조립은 build_blocks에서 끝난다).
         self._workspace_md: gr.Markdown | None = None
-        self._settings_md: gr.Markdown | None = None
         self._listing_md: gr.Markdown | None = None
         self._jobs_md: gr.Markdown | None = None
         self._ingest_md: gr.Markdown | None = None
@@ -1998,7 +1948,6 @@ class RawWorkspaceUi:
         # 읽기전용 경로 표시 칸들 — 사람이 직접 적는 경로 입력은 없다(선택기만).
         self._ws_path_box: gr.Textbox | None = None
         self._source_box: gr.Textbox | None = None
-        self._caption_path_box: gr.Textbox | None = None
         self._project_name_box: gr.Textbox | None = None
         # 폴더 불러오기 칸(W-46a) — 경로 입력(어느 운영체제에서나) · 찾아보기 · 불러오기.
         self._folder_path_box: gr.Textbox | None = None
@@ -2047,33 +1996,24 @@ class RawWorkspaceUi:
         self._create_button: gr.Button | None = None
         self._browse_button: gr.Button | None = None
         self._scan_button: gr.Button | None = None
-        self._caption_pick_button: gr.Button | None = None
-        self._caption_md: gr.Markdown | None = None
-        self._caption_player_html: gr.HTML | None = None
-        self._caption_table_html: gr.HTML | None = None
-        self._caption_cue_dd: gr.Dropdown | None = None
         self._clip_player_html: gr.HTML | None = None
-        # V2 작업대 구성요소 — 영상(껍데기·본문)과 자막(본문). 껍데기는 작업공간
-        # 전환 때만 다시 그려 영상이 언로드되고, 본문은 서버 함수 응답마다 값이
-        # 갈아지며 `watch`로 다시 묶인다(재생 머리는 본문 밖에 살아 있다).
+        # V2 작업대 구성요소 — 영상(껍데기·본문). 껍데기는 작업공간 전환 때만 다시 그려
+        # 영상이 언로드되고, 본문은 서버 함수 응답마다 값이 갈아지며 `watch`로 다시
+        # 묶인다(재생 머리는 본문 밖에 살아 있다).
         self._visual_player_block: gr.HTML | None = None
         self._visual_workbench_block: gr.HTML | None = None
-        self._caption_workbench_block: gr.HTML | None = None
         # 작업대 수명 토큰 — 작업공간 전환마다 `_clear_screen_state`에서 다시
         # 파진다(서버 인스턴스 수명과도 묶인다: 재시작하면 새 값). 편집·제안·
-        # 준비·자막 저장/확정은 화면이 보낸 토큰이 지금 것과 같아야 한다.
+        # 준비는 화면이 보낸 토큰이 지금 것과 같아야 한다.
         self._visual_lifetime_token = uuid.uuid4().hex
-        self._caption_lifetime_token = uuid.uuid4().hex
         self._signature_state: gr.State | None = None
         # 고급(기존) 패널의 클라이언트 문맥 상태 — 화면이 마지막으로 본 수명 토큰과
-        # 검토 리비전/자막 머리. 편집·계획·재추출·내보내기·자막 수동 편집·확정의
+        # 검토 리비전. 편집·계획·재추출·내보내기의
         # 실제 배선은 이 값을 실어 오고, 서버는 지금 값과 같을 때만 적용한다
         # (다른 클라이언트가 머리를 옮긴 옛 사건·A→B→A 옛 사건 거부, A6 실측).
         # 전역 토큰은 새로 만들지 않는다 — 작업대 수명 토큰을 그대로 재사용한다.
         self._edit_context_state: gr.State | None = None
         self._review_head_state: gr.State | None = None
-        self._caption_context_state: gr.State | None = None
-        self._caption_head_state: gr.State | None = None
         # 실제 배선 증명 — 시험이 잡는 대상(이름 → (inputs, outputs)).
         self._advanced_wirings: dict[str, tuple[list[object], list[object]]] = {}
         # 배선에 실제로 묶인 핸들러 — 시험이 옛 문맥 사건을 실제 배선 경로로 잰다.
@@ -2200,22 +2140,9 @@ class RawWorkspaceUi:
         self._review_signature = None
         self._review_clocks = {}
         self._review_spans = {}
-        self._caption_identity = None
-        self._caption_signature = None
-        self._caption_head_sequence = None
-        self._caption_cue_ids = ()
-        self._caption_unplaced = {}
-        self._caption_chunk_count = None
-        self._caption_preview = None
-        self._caption_preview_signature = None
-        self._caption_cue_rows = ()
-        self._caption_cue_clock = {}
-        self._caption_warnings_open = 0
-        self._caption_unplaced_open = 0
         self._last_export_path = None
         self._last_export_dir = None
         self._visual_lifetime_token = uuid.uuid4().hex
-        self._caption_lifetime_token = uuid.uuid4().hex
 
     def _snapshot_root(self) -> Path | None:
         """선택을 **한 번에** 찍는다 — 이후 읽기는 전부 이 스냅숏을 따른다."""
@@ -2277,20 +2204,6 @@ class RawWorkspaceUi:
         if shown_revision != self._review_revision_id:
             raise gr.Error(
                 "편집이 늦었다 — 화면이 본 검토 리비전과 서버 머리가 다르다."
-                " **검토 새로고침** 뒤 다시 시도하세요."
-            )
-
-    def _require_caption_context(self, nonce: str | None, shown_head: object) -> None:
-        """자막 수동 편집·확정의 클라이언트 문맥 검증 — 수명 토큰 + 화면이 본 머리."""
-        if not nonce or nonce != self._caption_lifetime_token:
-            raise gr.Error("자막 화면 수명 토큰이 늦었다 — 화면을 새로고침한 뒤 다시 시도하세요.")
-        try:
-            head = None if shown_head is None else int(str(shown_head))
-        except (TypeError, ValueError):
-            head = -1
-        if head != self._caption_head_sequence:
-            raise gr.Error(
-                "편집이 늦었다 — 화면이 본 머리와 서버 머리가 다르다."
                 " **검토 새로고침** 뒤 다시 시도하세요."
             )
 
@@ -2414,32 +2327,6 @@ class RawWorkspaceUi:
 
     def device_choices(self) -> list[tuple[str, str]]:
         return [(str(path), str(path)) for path in raw_service.mounted_device_candidates()]
-
-    def settings_markdown(self, root: Path | None = None) -> str:
-        """4번 탭의 읽기전용 설정 요약 — 값은 설정에서 온다(화면이 못 박지 않는다)."""
-        root = root if root is not None else self._snapshot_root()
-        if root is None:
-            return "작업공간을 열면 자막 프리셋·모델·수명주기 요약이 여기 나타난다."
-        config = self.raw.settings(root)
-        registry = config.registry
-        lines = [
-            f"**자막 프리셋** {config.caption.profile} · schema `{config.caption.schema_version}`",
-            f"- 문구 모델 `{config.models.text_model}` "
-            f"(응답 `{config.caption.text_response_format}`)",
-            f"- 시간 제공자 `{config.models.timing_model}` via `{config.caption.timing_provider}`"
-            " (과도기)",
-            f"- 의미 분석 `{config.models.luna_model}`"
-            + _claude_price_suffix(config.models.luna_model),
-            f"- 공식 확인일 {registry.docs_checked_at} · 계정 접근 "
-            f"`{registry.account_access_status}` · 실기 시험 `{registry.integration_test_status}`",
-            f"- 시간 제공자 종료 예정 **{registry.timing_shutdown_date}** — 이후 신규 온라인"
-            " 전사는 차단된다",
-            f"- 요금(분) 문구 {config.pricing.text_per_minute} · 시간 "
-            f"{config.pricing.timing_per_minute} {config.pricing.currency}",
-            f"- 네트워크 **{config.network_mode}** · 명시적 승인 필요 — 승인 없이 유료 호출은"
-            " 일어나지 않는다",
-        ]
-        return "\n".join(lines)
 
     @staticmethod
     def _player_html(file_id: str | None) -> str:
@@ -4620,7 +4507,8 @@ class RawWorkspaceUi:
     def _review_tab(self) -> None:
         """정리 탭 — 명령 줄(단추 + 활동 칸) · 무대. 서랍에 든 도구는 `_settings_drawer`가 짓는다.
 
-        한 줄짜리 탭 막대는 CSS가 감춘다(보이는 탭이 하나뿐일 때만). 숨은 「자막」 탭은 그대로다.
+        한 줄짜리 탭 막대는 CSS가 감춘다(보이는 탭이 하나뿐일 때만).
+        숨은 「자막」 탭은 걷었다(D162).
         """
         with gr.Tab(
             REVIEW_TAB_LABEL, id=REVIEW_TAB_KEY, elem_id=REVIEW_TAB_ID
@@ -6023,13 +5911,6 @@ class RawWorkspaceUi:
         self._last_listing = listing
         return self._listing_markdown(listing), listing.path
 
-    def final_video_chooser_view(self) -> str:
-        """최종 영상 선택 — 선택기로만 고른다. 취소면 지금 표시를 그대로 둔다."""
-        chosen = self._pick_path(ui_chooser.VIDEO_KIND)
-        if chosen is None:
-            raise gr.Error("취소 — 최종 영상 표시를 그대로 둔다.")
-        return chosen
-
     def open_workspace_view(self, path_text: str) -> WorkspaceView:
         """기존 작업공간 열기 이벤트 — 서명·미디어·작업·설정까지 한 번에 갱신한다.
 
@@ -6163,11 +6044,10 @@ class RawWorkspaceUi:
         """작업공간 전환 뒤 화면이 받아야 하는 전체 보기(서명 포함).
 
         루트를 **한 번** 찍어 모든 조각에 통과시킨다 — 전환이 끼어들어도 이 보기가
-        두 작업공간에 걸치지 않는다(코디네이터 재결). 마지막 세 값은 읽기전용 경로
+        두 작업공간에 걸치지 않는다(코디네이터 재결). 마지막 두 값은 읽기전용 경로
         표시 칸이다(선택기로만 경로가 정해진다). 출처 표시는 이 작업공간이 FCP
         라이브러리에서 왔으면 그 경로를 보이고, 일반 전환이면 비운다 — 출처 선택은
         작업공간마다 새로 시작한다(낡은 출처가 다음 프로젝트에 남지 않는다).
-        최종 영상 표시는 전환마다 비운다.
         """
         root = self._snapshot_root()
         return (
@@ -6176,7 +6056,6 @@ class RawWorkspaceUi:
             gr.Dropdown(choices=self.media_choices(root)),
             gr.Dropdown(choices=self.active_job_choices(root)),
             self.jobs_markdown(root),
-            self.settings_markdown(root),
             self._ingest_state_markdown(root),
             gr.Dropdown(choices=self.resumable_ingest_choices(root)),
             self._segment_state_markdown(root),
@@ -6189,7 +6068,6 @@ class RawWorkspaceUi:
             *self._workbench_view_values(root),
             str(root) if root is not None else "",
             self._fcp_source_display(root),
-            "",
         )
 
     def _fcp_source_display(self, root: Path | None) -> str:
@@ -6204,33 +6082,23 @@ class RawWorkspaceUi:
         library = self._current_fcp_library(self._signature_for(root))
         return str(library) if library is not None else ""
 
-    def _workbench_view_values(self, root: Path | None) -> tuple[str, str, str]:
-        """작업대 세 값(영상 껍데기·영상 본문·자막 본문) — 전환·새로고침 출력용.
+    def _workbench_view_values(self, root: Path | None) -> tuple[str, str]:
+        """작업대 두 값(영상 껍데기·영상 본문) — 전환·새로고침 출력용.
 
         작업공간 전환마다 껍데기가 다시 그려져 영상이 능동적으로 언로드되고,
         본문 값의 epoch가 새로 파져 묵은 클라이언트 응답이 전부 버려진다.
         """
-        shell, workbench = self.visual_workbench_render(root)
-        return shell, workbench, self.caption_workbench_value(root)
+        return self.visual_workbench_render(root)
 
     def _workbench_outputs(self) -> list[object]:
-        """작업대 세 구성요소 — 만들어진 뒤에만 부른다(조립 순서 주의)."""
-        assert (
-            self._visual_player_block is not None
-            and self._visual_workbench_block is not None
-            and self._caption_workbench_block is not None
-        )
-        return [
-            self._visual_player_block,
-            self._visual_workbench_block,
-            self._caption_workbench_block,
-        ]
+        """작업대 두 구성요소 — 만들어진 뒤에만 부른다(조립 순서 주의)."""
+        assert self._visual_player_block is not None and self._visual_workbench_block is not None
+        return [self._visual_player_block, self._visual_workbench_block]
 
     def _selection_outputs(self) -> list[object]:
         """만들기·열기 이벤트의 출력 대상 — `workspace_view_values`와 짝이다."""
         assert (
             self._workspace_md is not None
-            and self._settings_md is not None
             and self._jobs_md is not None
             and self._ingest_md is not None
             and self._media_dd is not None
@@ -6246,7 +6114,6 @@ class RawWorkspaceUi:
             and self._signature_state is not None
             and self._ws_path_box is not None
             and self._source_box is not None
-            and self._caption_path_box is not None
         )
         return [
             self._workspace_md,
@@ -6254,7 +6121,6 @@ class RawWorkspaceUi:
             self._media_dd,
             self._jobs_dd,
             self._jobs_md,
-            self._settings_md,
             self._ingest_md,
             self._ingest_jobs_dd,
             self._segment_md,
@@ -6267,7 +6133,6 @@ class RawWorkspaceUi:
             *self._workbench_outputs(),
             self._ws_path_box,
             self._source_box,
-            self._caption_path_box,
         ]
 
     def cancel_view(self, signature: str | None, job_id: str | None) -> tuple[gr.Dropdown, str]:
@@ -10092,1270 +9957,6 @@ class RawWorkspaceUi:
         lines.append("- 확정 내보내기(`clips/confirmed_*`)는 정리 대상이 아니다 — 불변이다.")
         return "\n".join(lines)
 
-    # ── 화면 4 — 최종 영상 등록·자막 실행·검토·확정(W2 백엔드) ──
-
-    def _caption_ws(self, root: Path) -> Any:
-        """자막 작업공간 — 백엔드가 없는 빌드에서는 정직한 오류로 닫는다."""
-        try:
-            return self.raw.caption_workspace(root)
-        except raw_service.WorkspaceModuleUnavailableError as error:
-            raise gr.Error(str(error)) from error
-
-    def _require_caption_identity(self, root: Path) -> dict[str, str | int | None]:
-        """마지막으로 그린 실행 신원 — 등록·승인·편집·확정이 전부 이 신원에 묶인다."""
-        if self._caption_identity is None or self._caption_signature != self._signature_for(root):
-            raise gr.Error("실행 신원이 없다 — 먼저 최종 영상을 등록하고 실행을 준비하세요.")
-        return self._caption_identity
-
-    def _caption_run_identity(self, identity: dict[str, str | int | None]) -> Any:
-        """신원 사전 → W2 `RunIdentity` — 공개 서비스 경로로만 만든다."""
-        return raw_service.caption_run_identity(
-            str(identity["revision"]), str(identity["run_id"]), str(identity["fingerprint"])
-        )
-
-    def _caption_registration(self, ws: Any, root: Path) -> Any:
-        """신원의 등록 행 — (렌더 해시, 오디오 서수)로 저장소에서 다시 찾는다.
-
-        재시작 뒤에도 같은 행이 돌아온다(등록표가 정본). 못 찾으면 조용히 새로
-        만들지 않고 정직하게 닫는다.
-        """
-        identity = self._require_caption_identity(root)
-        registration = ws.registration(str(identity["revision"]), identity["audio_ordinal"])
-        if registration is None:
-            raise gr.Error(
-                f"등록 행을 찾지 못했다 — 렌더 {str(identity['revision'])[:12]}… · 오디오"
-                f" 서수 {identity['audio_ordinal']}. 다시 등록·준비하세요."
-            )
-        return registration
-
-    def _caption_player_for(
-        self, root: Path, ws: Any, registration: Any
-    ) -> tuple[raw_service.CaptionPreviewMedia, bool]:
-        """선택 오디오 미리보기 확보 — (미리보기, 이번 호출에서 만들었는가).
-
-        같은 작업공간에서 잡아 둔 미리보기가 아직 등록 행으로 살아 있으면 그대로
-        돌려준다(ffmpeg·PCM 읽기 없음 — 표시 갱신이 미리보기를 다시 만들지 않는다).
-        정리(purge) 뒤엔 서비스가 같은 키로 다시 만들고 지문을 다시 박는다.
-        """
-        signature = self._signature_for(root)
-        cached = self._caption_preview
-        if (
-            cached is not None
-            and self._caption_preview_signature == signature
-            and registration.final_video_revision == cached.source_revision
-            and registration.audio_ordinal == cached.audio_ordinal
-        ):
-            try:
-                self.raw.resolve_media(root, cached.registration.file_id)
-                return cached, False
-            except raw_service.RawWorkspaceError:
-                pass  # 정리 등으로 자리가 사라졌다 — 아래에서 다시 만든다
-        try:
-            preview = self.raw.caption_preview(root, registration)
-        except (
-            raw_service.RawWorkspaceError,
-            raw_service.CaptionWorkspaceError,
-            raw_service.FinalVideoError,
-            RuntimeError,
-        ) as error:
-            raise gr.Error(
-                f"선택 오디오 미리보기를 만들지 못했다 — {error}. 등록은 그대로다:"
-                " 자막 생성·검토는 쓸 수 있고, 재생 듣기만 이번엔 없다."
-            ) from error
-        with self._selection_lock:
-            self._caption_preview = preview
-            self._caption_preview_signature = signature
-        # 이 길(재시작 뒤 처음·미디어·트랙 변경·정리 뒤 재생성)에서는 재생기
-        # 구성요소가 아직 이 미리보기를 그린 적이 없으므로 다시 그려야 한다.
-        # ffmpeg은 서비스가 파일·기록으로 재사용 판정하므로 다시 돌지 않는다.
-        return preview, True
-
-    @staticmethod
-    def _caption_provenance_line(
-        registration: Any, preview: raw_service.CaptionPreviewMedia
-    ) -> str:
-        """재생기 출처 — 원본·선택 트랙·잰 원점·미리보기의 대응 관계를 숨기지 않는다."""
-        origin = registration.origin
-        return (
-            f"출처 — 원본 `{registration.external_source}`(렌더 sha "
-            f"{preview.source_revision[:12]}…) · 오디오 트랙 {preview.audio_ordinal}"
-            "(선택 트랙만 담는다 — 브라우저는 트랙을 못 고른다) · 자막 시계 원점 "
-            f"{ui_facade.format_seconds(origin)}초 · 미리보기 "
-            f"{'코덱 복사' if preview.remuxed else '변환'}({preview.video_codec}/"
-            f"{preview.audio_codec}, 잰 원점 {ui_facade.format_seconds(preview.audio_origin)}초"
-            f" · 잰 길이 {ui_facade.format_seconds(preview.duration)}초 · 등록 ID "
-            f"`{preview.registration.file_id}`) — 원본·확정 자막은 그대로다"
-        )
-
-    def _render_caption_player(
-        self, registration: Any, preview: raw_service.CaptionPreviewMedia, wave: Any
-    ) -> str:
-        """재생기 HTML — 미리보기 영상·파형·재생 오버레이·출처를 안전하게 조립한다.
-
-        V2부터 오버레이(`#caption-overlay`)와 토글 단추가 붙는다 — 오버레이 문구는
-        작업대 실행본이 `timeupdate`에서 textContent로만 바꾼다(재생기 재렌더링 없음).
-        """
-        return ui_facade.caption_overlay_player_html(
-            f"/media/{preview.registration.file_id}",
-            waveform=ui_facade.waveform_svg([peak / wave.peak_scale for peak in wave.peaks]),
-            provenance=self._caption_provenance_line(registration, preview),
-        )
-
-    @staticmethod
-    def _caption_player_placeholder(note: str) -> str:
-        safe = html.escape(note)
-        return (
-            '<div id="caption-player" class="vlogsrt-caption-player">\n'
-            f'  <p style="color:var(--vl-ink-muted);margin:4px 0;">{safe}</p>\n'
-            "</div>"
-        )
-
-    def caption_register_view(
-        self, signature: str | None, path_text: str, source_id: str, ordinal_text: str
-    ) -> tuple[str, str]:
-        """최종 영상 등록 — 검증 사본·오디오 선택과 함께 선택 트랙 미리보기를 만든다."""
-        root = self._require_current_selection(signature)
-        cleaned = (path_text or "").strip().strip("\"'")
-        if not cleaned:
-            raise gr.Error("최종 영상 경로를 적으세요 — 작업공간 밖 파일도 검증 사본으로 들어온다.")
-        path = Path(cleaned).expanduser()
-        if not path.is_absolute():
-            raise gr.Error("절대 경로로 적으세요.")
-        sid = (source_id or "").strip() or "final_1"
-        ordinal: int | None = None
-        if ordinal_text and ordinal_text != "자동(첫 트랙)":
-            try:
-                ordinal = int(ordinal_text)
-            except ValueError as error:
-                raise gr.Error(f"오디오 서수가 숫자가 아니다: {ordinal_text!r}") from error
-        ws = self._caption_ws(root)
-        try:
-            registration = ws.register_final_video(path, source_id=sid, audio_ordinal=ordinal)
-        except (
-            raw_service.RawWorkspaceError,
-            raw_service.CaptionWorkspaceError,
-            raw_service.FinalVideoError,
-        ) as error:
-            raise gr.Error(str(error)) from error
-        ws.select_registration(registration)
-        identity = self._caption_identity
-        if identity is None or (identity.get("revision"), identity.get("audio_ordinal")) != (
-            registration.final_video_revision,
-            registration.audio_ordinal,
-        ):
-            self._caption_identity = None
-            self._caption_signature = None
-            self._caption_head_sequence = None
-            self._caption_cue_ids = ()
-            self._caption_cue_rows = ()
-            self._caption_cue_clock = {}
-            self._caption_unplaced = {}
-            self._caption_lifetime_token = uuid.uuid4().hex
-        note = {
-            "ready": "등록 완료 — 이 최종 영상을 기준으로 자막을 생성합니다.",
-            "no_audio": "**오디오가 없다** — 무발화가 아니라 별개 상태다. 실행·준비는 닫혀 있다.",
-            "audio_selection_required": (
-                f"**오디오 트랙이 {registration.audio_stream_count}개다** — 오디오 트랙"
-                " 칸에 번호(0, 1, …)를 골라 다시 등록하세요."
-            ),
-        }.get(registration.status, f"상태 `{registration.status}`")
-        markdown = (
-            f"**최종 영상 등록** — 리비전 `{registration.final_video_revision}` · 상태"
-            f" `{registration.status}`\n\n{note}"
-        )
-        if not registration.ready:
-            # 오디오가 없거나 선택이 확정되지 않았다 — 미리보기도 정직하게 없다.
-            with self._selection_lock:
-                self._caption_preview = None
-                self._caption_preview_signature = None
-            return markdown, self._caption_player_placeholder(
-                "오디오 선택이 확정되지 않아 재생할 트랙이 없다 — 트랙을 골라 다시 등록하세요."
-            )
-        preview, _built_now = self._caption_player_for(root, ws, registration)
-        wave = ws.waveform(registration, bin_seconds=0.05)
-        return markdown, self._render_caption_player(registration, preview, wave)
-
-    def caption_prepare_view(self, signature: str | None, run_id: str) -> str:
-        """실행 준비 — 모델·수명주기·실측 청크·경계를 백엔드가 잰 값 그대로(비용은 말하지 않는다,
-        D110)."""
-        root = self._require_current_selection(signature)
-        run = (run_id or "").strip() or "run-1"
-        ws = self._caption_ws(root)
-        registration = ws.active_registration()
-        if registration is None or not registration.ready:
-            raise gr.Error("준비된 등록이 없다 — 먼저 최종 영상 등록(오디오 선택 확정)을 끝내세요.")
-        try:
-            estimate = ws.prepare(registration, run_id=run)
-        except (raw_service.RawWorkspaceError, raw_service.CaptionWorkspaceError) as error:
-            raise gr.Error(str(error)) from error
-        self._caption_identity = {
-            "revision": registration.final_video_revision,
-            "run_id": run,
-            "fingerprint": estimate.identity.fingerprint,
-            "audio_ordinal": registration.audio_ordinal,
-        }
-        self._caption_signature = self._signature_for(root)
-        self._caption_chunk_count = estimate.chunk_count
-        # 새 실행 신원 — 검토 머리·큐 목록은 이 실행의 것으로 다시 만든다.
-        self._caption_head_sequence = None
-        self._caption_cue_ids = ()
-        self._caption_unplaced = {}
-        self._caption_cue_rows = ()
-        self._caption_cue_clock = {}
-        self._caption_warnings_open = 0
-        self._caption_unplaced_open = 0
-        chunk_preview = ", ".join(
-            f"[{ui_facade.format_seconds(start)}~{ui_facade.format_seconds(end)}]"
-            for start, end in estimate.chunk_seconds[:4]
-        )
-        lifecycle_lines = [
-            f"  - `{item.model_id}`({item.role}) — 종료 예정 {item.shutdown_date or '없음'}"
-            for item in estimate.lifecycle
-        ]
-        lines = [
-            f"**자막 실행 준비** — 실행 `{run}` · 실행 지문"
-            f" `{estimate.identity.fingerprint[:12]}…`",
-            "",
-            f"- 문구 모델 `{estimate.text_model}` · 시간 모델 `{estimate.timing_model}`"
-            " — 힌트·keywords는 문구 모델에만 간다(규칙 6)",
-            f"- 실측 청크 {estimate.chunk_count}개 · 샘플 {estimate.sample_count:,}"
-            f" ({estimate.sample_rate:,}Hz {estimate.channels}채널 · 원점"
-            f" {ui_facade.format_seconds(estimate.origin)}초)",
-            f"- 청크 경계(정규화 축): {chunk_preview or '(없음)'}"
-            + (" …" if len(estimate.chunk_seconds) > 4 else ""),
-            "- 수명주기(등록표 확인 값):",
-            *lifecycle_lines,
-            "",
-            "아래 확인란을 체크하고 **자막 생성 실행**을 누르면 이 지문에 묶인 승인이"
-            " 서버에 남는다.",
-        ]
-        return "\n".join(lines)
-
-    def caption_run_view(self, signature: str | None, run_id: str, confirm: bool) -> str:
-        """자막 생성 실행 — 화면이 본 지문에 묶인 승인 뒤에만 제공자를 만든다."""
-        root = self._require_current_selection(signature)
-        run = (run_id or "").strip() or "run-1"
-        if not confirm:
-            raise gr.Error("실행 승인 확인이 필요하다 — 위 실행 지문을 보고 확인란을 체크하세요.")
-        ws = self._caption_ws(root)  # 백엔드 없는 빌드 — 정직한 오류가 먼저다
-        identity = self._require_caption_identity(root)
-        if identity["run_id"] != run:
-            raise gr.Error(
-                f"승인된 실행(`{identity['run_id']}`)과 요청 실행(`{run}`)이 다르다 —"
-                " 실행을 다시 준비하고 승인하세요."
-            )
-        registration = self._caption_registration(ws, root)
-        if not registration.ready:
-            raise gr.Error("등록이 준비되지 않았다 — 오디오 선택을 확정하고 다시 준비하세요.")
-        try:
-            plan = ws.plan(registration, run_id=run)
-            ws.approve(plan, note="브라우저 화면 확인란 승인")
-            timing, text = self._caption_providers_for_action()
-            body = self.raw.with_request_receipts(
-                root,
-                ws.run_body(registration, run, timing_provider=timing, text_provider=text),
-                timing,
-                text,
-            )
-        except (raw_service.RawWorkspaceError, raw_service.CaptionWorkspaceError) as error:
-            raise gr.Error(str(error)) from error
-        total = self._caption_chunk_count or 1
-        handle = self.raw.submit_job(
-            root,
-            "caption_run",
-            str(identity["fingerprint"]),
-            body,
-            total=max(1, total),
-        )
-        return (
-            f"자막 실행 작업 `{handle.job_id}` 제출"
-            + (" (기존 활성 작업에 다시 붙음)" if handle.reattached else "")
-            + " — 진행은 아래 새로고침으로 확인한다. 재개는 같은 실행·같은 지문에서만"
-            " 이어 붙는다(중복 호출 0)."
-        )
-
-    def _caption_providers_for_action(self) -> tuple[object, object]:
-        """이 실행이 쓸 제공자 — 주입 경계가 우선, 없으면 생산 transport(키는 시작 환경)."""
-        if self._caption_providers is not None:
-            return self._caption_providers()
-        if self._startup_credentials is None:
-            raise gr.Error(
-                "실제 호출에는 서버를 띄운 환경의 OPENAI_API_KEY가 필요하다 — 키를"
-                " 내보내고 브라우저 서버를 다시 띄우세요(이 화면은 .env 파일을 읽지"
-                " 않는다)."
-            )
-        return raw_service.caption_transport_providers(self._startup_credentials)
-
-    def caption_review_view(
-        self, signature: str | None, run_id: str
-    ) -> tuple[str, str, object, gr.Dropdown]:
-        """검토 묶음 — 큐 편집표(HTML)·요약·재생기·선택 목록(로컬만, 원응답 없음).
-
-        큐 표와 파형은 `gr.Markdown`이 지워버리므로 안전한 HTML 구성요소로 나간다.
-        재생기 구성요소는 미리보기가 그대로면 **갱신하지 않는다**(`gr.update()` 무동작)
-        — 재생 머리가 살아 있고 ffmpeg도 다시 돌지 않는다. 큐 단추의 시각은 서버가
-        잰 원점 매핑(미리보기 원점 + 큐 시각) 그대로다.
-        """
-        root = self._require_current_selection(signature)
-        run = (run_id or "").strip() or "run-1"
-        ws = self._caption_ws(root)  # 백엔드 없는 빌드 — 정직한 오류가 먼저다
-        identity = self._require_caption_identity(root)
-        if identity["run_id"] != run:
-            raise gr.Error(
-                f"화면이 본 실행은 `{identity['run_id']}`다 — 그 실행의 검토부터 여세요."
-            )
-        run_identity = self._caption_run_identity(identity)
-        registration = self._caption_registration(ws, root)
-        try:
-            bundle = ws.review_bundle(run_identity)
-        except (raw_service.RawWorkspaceError, raw_service.CaptionWorkspaceError) as error:
-            raise gr.Error(str(error)) from error
-        # 미리보기 확보 — 같은 서버에서 잡아 둔 것이 살아 있으면 재생기는 무동작이다.
-        preview, render_player = self._caption_player_for(root, ws, registration)
-        player_update: object = gr.update()
-        if render_player:
-            wave = ws.waveform(registration, bin_seconds=0.05)
-            player_update = self._render_caption_player(registration, preview, wave)
-        state = bundle.state
-        # 화면이 본 머리 번호·큐 목록 — 편집·확정은 이 값에 묶인다(W2 머리 충돌 게이트).
-        self._caption_head_sequence = state.head_revision if state.head_revision is not None else 0
-        rows = [
-            ui_facade.CueRowView(
-                cue_id=row.cue.cue_id,
-                start_seconds=ui_facade.format_seconds(row.cue.start),
-                end_seconds=ui_facade.format_seconds(row.cue.end),
-                whisper_text=row.cue.whisper_text,
-                auto_text=row.cue.auto_text,
-                text=row.cue.text,
-                basis=row.cue.text_basis,
-                chars_per_second=row.chars_per_second,
-            )
-            for row in state.rows
-        ]
-        self._caption_cue_ids = tuple(row.cue_id for row in rows)
-        self._caption_cue_rows = tuple(rows)
-        self._caption_cue_clock = {
-            row.cue.cue_id: (row.cue.start, row.cue.end) for row in state.rows
-        }
-        self._caption_unplaced = {view.item.index: view.item.text for view in state.unplaced}
-        self._caption_warnings_open = len(state.warnings)
-        self._caption_unplaced_open = sum(1 for view in state.unplaced if view.resolution is None)
-        # 큐 단추 시각 — 서버가 잰 값 그대로(클라이언트가 계산하지 않는다). 큐 시각은
-        # 최종 영상 시계(등록 원점 포함)이므로, 미리보기 원점과 등록 원점의 **차이만**
-        # 보정해 미리보기 시계로 옮긴다(코덱 복사면 차이가 0이어야 한다).
-        seek_by_cue: dict[str, tuple[str, str]] | None = None
-        if preview is not None and registration.origin is not None:
-            shift = preview.audio_origin - registration.origin
-            seek_by_cue = {
-                row.cue.cue_id: (
-                    f"{float(shift + row.cue.start):.6f}",
-                    f"{float(shift + row.cue.end):.6f}",
-                )
-                for row in state.rows
-            }
-        table_html = ui_facade.cue_table_html(rows, seek_by_cue)
-        lines = [
-            f"**자막 검토** — 실행 `{run}` · 큐 {len(rows)}개 · 검토 머리"
-            f" {self._caption_head_sequence}",
-            "",
-        ]
-        if not state.text_model_complete or not state.timing_model_complete:
-            lines.append(
-                "- **실패한 청크가 있는 초안이다** — 문구/시간 일부 청크가 비었다"
-                "(증거·초안은 보존되었다). 편집으로 메우거나 다시 실행하세요."
-            )
-        if state.warnings:
-            shown = ", ".join(f"`{item.key}`" for item in state.warnings[:5])
-            lines.append(
-                f"열린 경고 {len(state.warnings)}개 — 편집 칸 `경고 허용`로 남긴다: {shown}"
-            )
-        else:
-            lines.append("열린 경고가 없다.")
-        unresolved = [view for view in state.unplaced if view.resolution is None]
-        if unresolved:
-            first = unresolved[0]
-            lines.append(
-                f"미대응 말 {len(unresolved)}개(전체 {len(state.unplaced)}개 중) — 편집 칸"
-                f" `미대응 해결`로 남긴다: {first.item.index}번 `{first.item.text[:24]}…`"
-            )
-        elif state.unplaced:
-            lines.append(
-                f"미대응 {len(state.unplaced)}개 전부 처리되었다 — 확정 게이트가 열려 있다."
-            )
-        return (
-            "\n".join(lines),
-            table_html,
-            player_update,
-            gr.Dropdown(choices=ui_facade.caption_cue_choices(rows), value=None),
-        )
-
-    def caption_cue_pick_view(
-        self, signature: str | None, cue_id: str | None
-    ) -> tuple[object, object, object, object]:
-        """큐 선택 → 편집 칸 채우기 — 화면이 본 큐 행의 값을 그대로 옮긴다(호출·미디어 0회).
-
-        시각은 사람이 준 편집 단위(ms 정수)로 보인다 — 백엔드의 정확한 유리수를
-        1000배해 자른 값이고, 저장은 여전히 `시각 조정`의 ms 검증을 지난다.
-        **빈 선택은 무동작이다**: 검토 새로고침이 드롭다운을 None으로 되돌릴 때마다
-        `.change`가 빈 값으로 오는데, 그때 편집 칸과 재생기를 그대로 두고 조용히
-        돌아간다(사용자가 고른 선택이 아니므로 오류도 아니다). 빈이 아닌 알 수
-        없는 아이디는 여전히 정직하게 거부한다.
-        """
-        self._require_current_selection(signature)
-        target = (cue_id or "").strip().strip("`")
-        if not target:
-            return gr.update(), gr.update(), gr.update(), gr.update()
-        if not self._caption_cue_rows:
-            raise gr.Error("큐 목록이 없다 — 먼저 **검토 새로고침**으로 큐를 보세요.")
-        row = next((item for item in self._caption_cue_rows if item.cue_id == target), None)
-        clock = self._caption_cue_clock.get(target)
-        if row is None or clock is None:
-            raise gr.Error(
-                f"검토 표에 큐 `{target}`이(가) 없다 — 새로고침 뒤 목록에서 다시 고르세요."
-            )
-        start_ms = str(int(clock[0] * 1000))
-        end_ms = str(int(clock[1] * 1000))
-        return target, row.text, start_ms, end_ms
-
-    # ── V2 자막 작업대 — 큐 목록·클라이언트 편집기(명시적 저장·확정만 서버) ──
-
-    def _caption_reload_bundle(self, root: Path) -> None:
-        """검토 머리를 다시 읽어 화면 상태를 갱신한다 — 작업대 저장 뒤 같은 눈으로.
-
-        `caption_review_view`가 그리는 것과 같은 상태(머리 번호·큐 행·시계·미대응·
-        경고)를 서버에 다시 묻는다 — 재생기 구성요소는 건드리지 않는다.
-        """
-        identity = self._require_caption_identity(root)
-        ws = self._caption_ws(root)
-        run_identity = self._caption_run_identity(identity)
-        bundle = ws.review_bundle(run_identity)
-        state = bundle.state
-        self._caption_head_sequence = state.head_revision if state.head_revision is not None else 0
-        rows = [
-            ui_facade.CueRowView(
-                cue_id=row.cue.cue_id,
-                start_seconds=ui_facade.format_seconds(row.cue.start),
-                end_seconds=ui_facade.format_seconds(row.cue.end),
-                whisper_text=row.cue.whisper_text,
-                auto_text=row.cue.auto_text,
-                text=row.cue.text,
-                basis=row.cue.text_basis,
-                chars_per_second=row.chars_per_second,
-            )
-            for row in state.rows
-        ]
-        self._caption_cue_ids = tuple(row.cue_id for row in rows)
-        self._caption_cue_rows = tuple(rows)
-        self._caption_cue_clock = {
-            row.cue.cue_id: (row.cue.start, row.cue.end) for row in state.rows
-        }
-        self._caption_unplaced = {view.item.index: view.item.text for view in state.unplaced}
-        self._caption_warnings_open = len(state.warnings)
-        self._caption_unplaced_open = sum(1 for view in state.unplaced if view.resolution is None)
-
-    def caption_workbench_value(self, root: Path | None) -> str:
-        """자막 작업대 값(본문+상세) — 서버가 가진 검토 상태에서 조립(생성 0).
-
-        큐 행의 이동·오버레이 시각은 `caption_review_view`와 같은 잰 매핑(미리보기
-        원점 − 등록 원점 보정) 그대로다 — 클라이언트는 이 값만 읽는다.
-        """
-        note = "최종 영상을 등록하고 실행·검토를 거치면 큐 목록이 여기 나타난다."
-        if root is None or self._caption_identity is None:
-            return ui_facade.caption_workbench_html(
-                {"empty": note}
-            ) + ui_facade.caption_workbench_details_html({"empty": ""})
-        signature = self._signature_for(root)
-        if self._caption_signature != signature:
-            return ui_facade.caption_workbench_html(
-                {"empty": note}
-            ) + ui_facade.caption_workbench_details_html({"empty": ""})
-        seek_by_cue = self._caption_seek_mapping(root)
-        cues = []
-        details = []
-        for row in self._caption_cue_rows:
-            clock = self._caption_cue_clock.get(row.cue_id)
-            seek_pair = seek_by_cue.get(row.cue_id) if seek_by_cue else None
-            # ms 환산은 정확히 — 이진 부동 잔여를 int()로 잘라 1200→1199로
-            # 흐르는 왕복 드리프트를 막는다(A5 실측).
-            start_ms = str(ui_facade.fraction_ms(clock[0])) if clock else ""
-            end_ms = str(ui_facade.fraction_ms(clock[1])) if clock else ""
-            cues.append(
-                {
-                    "id": row.cue_id,
-                    "startMs": start_ms,
-                    "endMs": end_ms,
-                    "text": row.text,
-                    "basis": row.basis,
-                    "seek": seek_pair[0] if seek_pair else "",
-                    "endSeek": seek_pair[1] if seek_pair else "",
-                }
-            )
-            details.append(
-                {
-                    "id": row.cue_id,
-                    "startMs": start_ms,
-                    "endMs": end_ms,
-                    "whisper": row.whisper_text,
-                    "auto": row.auto_text,
-                    "now": row.text,
-                    "basis": row.basis,
-                }
-            )
-        open_items: list[str] = []
-        if self._caption_warnings_open:
-            open_items.append(f"열린 경고 {self._caption_warnings_open}개")
-        if self._caption_unplaced_open:
-            open_items.append(f"미처리 미대응 {self._caption_unplaced_open}개")
-        identity = self._caption_identity or {}
-        preview_line = ""
-        preview = self._caption_preview
-        if preview is not None:
-            preview_line = (
-                f"실행 {identity.get('run_id')} · 검토 머리 {self._caption_head_sequence}"
-                f" · 미리보기 `{preview.registration.file_id}`"
-                f"(선택 트랙 {preview.audio_ordinal}, 잰 원점"
-                f" {ui_facade.format_seconds(preview.audio_origin)}초)"
-            )
-        model: dict[str, object] = {
-            "epoch": uuid.uuid4().hex,
-            "token": self._caption_lifetime_token,
-            "signature": signature,
-            "runId": str(identity.get("run_id") or "run-1"),
-            "head": self._caption_head_sequence,
-            "cues": cues,
-            "canConfirm": bool(cues) and not open_items,
-            "blockReason": " · ".join(open_items),
-            "provenance": preview_line,
-            "details": details,
-        }
-        return ui_facade.caption_workbench_html(model) + ui_facade.caption_workbench_details_html(
-            model
-        )
-
-    def _caption_seek_mapping(self, root: Path) -> dict[str, tuple[str, str]] | None:
-        """큐→미리보기 이동 매핑 — 등록 원점과 미리보기 원점의 차이만 보정한다."""
-        preview = self._caption_preview
-        if preview is None:
-            return None
-        try:
-            ws = self._caption_ws(root)
-            registration = self._caption_registration(ws, root)
-        except (gr.Error, raw_service.RawWorkspaceError, raw_service.CaptionWorkspaceError):
-            return None
-        if registration.origin is None:
-            return None
-        shift = preview.audio_origin - registration.origin
-        return {
-            cue_id: (
-                f"{float(shift + clock[0]):.6f}",
-                f"{float(shift + clock[1]):.6f}",
-            )
-            for cue_id, clock in self._caption_cue_clock.items()
-        }
-
-    def caption_workbench_action(self, payload: Mapping[str, object], kind: str) -> dict:
-        """자막 작업대 서버 함수 본문 — 저장·확정만 서버에 가고 나머지는 클라이언트다.
-
-        저장은 화면이 보낸 수명 토큰과 검토 머리 번호에 묶인다(W2 갱신 손실 방지,
-        A→B→A 옛 사건 거부). 응답의 `html`은 작업대 본문+상세 값 — `props.value`로
-        갈아끼워도 재생기는 다시 그려지지 않으므로 재생이 이어진다.
-        """
-        epoch_value = payload.get("epoch")
-        echo = epoch_value if isinstance(epoch_value, str) else ""
-
-        def fail(error: object) -> dict[str, object]:
-            return {"ok": False, "error": self._serve_error(error)}
-
-        try:
-            root = self._require_current_selection(self._serve_str(payload, "signature") or None)
-        except gr.Error as error:
-            return fail(error)
-        try:
-            if kind in ("save", "confirm"):
-                self._require_workbench_token(payload, self._caption_lifetime_token, "자막 작업대")
-            if kind == "save":
-                return self._caption_wb_save(root, payload, echo)
-            if kind == "confirm":
-                return self._caption_wb_confirm(root, payload, echo)
-            return fail(f"모르는 작업대 요청이다: {kind!r}")
-        except (gr.Error, RuntimeError, ValueError) as error:
-            # 수동 편집 오류(ManualEditError 등)까지 값으로 닫는다 — 500 금지.
-            return fail(error)
-
-    def _caption_wb_save(self, root: Path, payload: Mapping[str, object], echo: str) -> dict:
-        identity = self._require_caption_identity(root)
-        ws = self._caption_ws(root)
-        run_identity = self._caption_run_identity(identity)
-        expected = self._serve_int(payload, "head", -1)
-        shown = self._require_caption_head()
-        if expected != shown:
-            raise gr.Error(
-                f"편집이 늦었다 — 화면이 본 머리({expected})가 서버 머리({shown})와 다르다."
-                " 검토 새로고침 뒤 다시 저장하세요."
-            )
-        cue_id = self._serve_str(payload, "cueId").strip("`")
-        if not cue_id:
-            raise gr.Error("큐를 먼저 목록에서 고르세요.")
-        op = self._serve_str(payload, "op")
-        text = self._serve_str(payload, "text").strip()
-        if op == "text":
-            if not text:
-                raise gr.Error("글자를 적으세요 — 지울 수 없다(수동 확정은 확정 단계다).")
-            ws.edit_cue_text(run_identity, cue_id, text, expected_head=shown)
-        elif op == "time":
-            start_ms = self._serve_int(payload, "startMs", -1)
-            end_ms = self._serve_int(payload, "endMs", -1)
-            ws.edit_cue_time(
-                run_identity,
-                cue_id,
-                start=raw_service.caption_ms(start_ms),
-                end=raw_service.caption_ms(end_ms),
-                expected_head=shown,
-            )
-        else:
-            raise gr.Error(f"모르는 저장 종류다: {op!r}")
-        self._caption_reload_bundle(root)
-        return {
-            "ok": True,
-            "echoEpoch": echo,
-            "html": self.caption_workbench_value(root),
-            "videoSrc": None,
-            "message": f"저장했다 — 큐 `{cue_id}`. 오버레이·목록이 갱신되고 재생은 이어진다.",
-        }
-
-    def _caption_wb_confirm(self, root: Path, payload: Mapping[str, object], echo: str) -> dict:
-        """확정 게시 — 화면이 보낸 머리 번호에 묶인다(늦은 확정 거부, A5 실측).
-
-        확정은 게시다 — 저장보다 더 엄격해야 한다: 화면이 본 머리가 서버 머리와
-        다르면(그 사이 저장이 하나라도 앞서갔으면) **거부**하고 검토 새로고침을
-        요청한다. 묵은 머리 번호로 최신 머리를 확정 게시하는 길은 없다.
-        """
-        identity = self._require_caption_identity(root)
-        expected = self._serve_int(payload, "head", -1)
-        shown = self._require_caption_head()
-        if expected != shown:
-            raise gr.Error(
-                f"확정이 늦었다 — 화면이 본 머리({expected})가 서버 머리({shown})와"
-                " 다르다. 검토 새로고침 뒤 다시 확정하세요."
-            )
-        # 확정 게시 — 작업대 흐름은 사람 문장 + 구조화된 내려받기(등록 미디어 ID
-        # 로만)를 받는다. 원문 마크다운(지문·해시 포함)은 기존 고급 패널 흐름이
-        # 그대로 쓴다(_caption_publish 공유, 이중 게시 없음).
-        _legacy_note, links = self._caption_publish(
-            self._serve_str(payload, "signature") or None,
-            str(identity.get("run_id") or "run-1"),
-            True,
-        )
-        self._caption_reload_bundle(root)
-        return {
-            "ok": True,
-            "echoEpoch": echo,
-            "html": self.caption_workbench_value(root),
-            "videoSrc": None,
-            "message": f"확정 게시 완료 — 검토 머리 {expected}. 내려받기는 아래 링크로.",
-            "downloads": [{"label": label, "href": href} for label, href in links],
-        }
-
-    def _caption_server_functions(self) -> list[Callable[[dict[str, object]], dict[str, object]]]:
-        """자막 작업대의 서버 함수 — 클라이언트 `server.cap_*`로 직접 불린다."""
-
-        def cap_save(payload: dict[str, object]) -> dict[str, object]:
-            return self.caption_workbench_action(payload, "save")
-
-        def cap_confirm(payload: dict[str, object]) -> dict[str, object]:
-            return self.caption_workbench_action(payload, "confirm")
-
-        return [cap_save, cap_confirm]
-
-    def _require_caption_head(self) -> int:
-        """화면이 본 검토 머리 번호 — 편집·확정의 기대 머리(W2 갱신 손실 방지)."""
-        if self._caption_head_sequence is None:
-            raise gr.Error(
-                "검토 머리를 모른다 — 먼저 **검토 새로고침**으로 화면이 본 머리를 만드세요."
-            )
-        return self._caption_head_sequence
-
-    def caption_edit_view(
-        self,
-        signature: str | None,
-        operation: str,
-        cue_id: str,
-        text: str,
-        start_ms: str,
-        end_ms: str,
-        second_id: str,
-        index_text: str,
-        warning_key: str,
-    ) -> tuple[str, str, object, gr.Dropdown]:
-        """수동 편집 — 시각은 사람이 준 값만(추측 배분 없음), 저장은 백엔드가 검증한다."""
-        root = self._require_current_selection(signature)
-        identity = self._require_caption_identity(root)
-        ws = self._caption_ws(root)
-        run_identity = self._caption_run_identity(identity)
-        expected = self._require_caption_head()
-
-        def _int_field(value: str, what: str) -> int:
-            cleaned = (value or "").strip()
-            if not cleaned:
-                raise gr.Error(f"{what}이 비었다 — ms 정수로 적으세요.")
-            try:
-                return int(cleaned)
-            except ValueError as error:
-                raise gr.Error(f"{what}이 정수가 아니다: {cleaned!r}") from error
-
-        target = (cue_id or "").strip().strip("`")
-        try:
-            if operation == "글자 교정":
-                if not target or not text.strip():
-                    raise gr.Error("큐 ID와 새 글자를 모두 적으세요.")
-                edited = ws.edit_cue_text(
-                    run_identity, target, text.strip(), expected_head=expected
-                )
-            elif operation == "시각 조정":
-                if not target:
-                    raise gr.Error("큐 ID를 적으세요.")
-                edited = ws.edit_cue_time(
-                    run_identity,
-                    target,
-                    start=raw_service.caption_ms(_int_field(start_ms, "시작 ms")),
-                    end=raw_service.caption_ms(_int_field(end_ms, "끝 ms")),
-                    expected_head=expected,
-                )
-            elif operation == "큐 나누기":
-                if not target or "|" not in (text or ""):
-                    raise gr.Error("큐 ID와 나눌 글자(`앞|뒤`)를 적으세요.")
-                at = raw_service.caption_ms(_int_field(start_ms, "나눌 시각 ms"))
-                left, right = (text or "").split("|", 1)
-                edited = ws.split_cue(
-                    run_identity, target, at, left.strip(), right.strip(), expected_head=expected
-                )
-            elif operation == "큐 합치기":
-                other = (second_id or "").strip().strip("`")
-                if not target or not other:
-                    raise gr.Error("맞닿은 두 큐 ID를 적으세요.")
-                edited = ws.merge_cues(run_identity, target, other, expected_head=expected)
-            elif operation == "새 큐 추가":
-                if not text.strip():
-                    raise gr.Error("새 큐 글자를 적으세요.")
-                edited = ws.add_manual_cue(
-                    run_identity,
-                    raw_service.caption_ms(_int_field(start_ms, "시작 ms")),
-                    raw_service.caption_ms(_int_field(end_ms, "끝 ms")),
-                    text.strip(),
-                    note="미대응 말을 수동 시각으로 살렸다",
-                    expected_head=expected,
-                )
-            elif operation == "경고 허용":
-                key = (warning_key or "").strip()
-                if not key:
-                    raise gr.Error("허용할 경고 key를 적으세요.")
-                edited = ws.allow_warning(
-                    run_identity, key, "브라우저에서 봤다", expected_head=expected
-                )
-            elif operation == "미대응 해결":
-                index = _int_field(index_text, "미대응 번호")
-                item_text = text.strip() or self._caption_unplaced.get(index)
-                if item_text is None:
-                    raise gr.Error(
-                        f"미대응 {index}번의 글자를 모른다 — 검토 새로고침 뒤 글자칸에"
-                        " 그대로 적어주세요."
-                    )
-                edited = ws.resolve_unplaced_item(
-                    run_identity,
-                    index,
-                    item_text,
-                    placed_cue_id=target or None,
-                    expected_head=expected,
-                )
-            elif operation == "무발화 기록":
-                edited = ws.record_no_speech(
-                    run_identity, note=text.strip(), expected_head=expected
-                )
-            else:
-                raise gr.Error(f"모르는 편집 종류다: {operation!r}")
-        except raw_service.ManualHeadConflict as error:
-            raise gr.Error(
-                f"편집이 늦었다 — 앞선 편집 위에 덮지 못한다({error}). **검토 새로고침**"
-                " 뒤 다시 편집하세요."
-            ) from error
-        except (raw_service.RawWorkspaceError, raw_service.CaptionWorkspaceError) as error:
-            raise gr.Error(str(error)) from error
-        self._caption_head_sequence = edited.sequence
-        return self.caption_review_view(signature, str(identity["run_id"]))
-
-    def caption_confirm_view(self, signature: str | None, run_id: str, confirm: bool) -> str:
-        """확정 — 화면이 짚은 큐 전부·기대 머리와 함께 final 게시를 연다(게이트는 백엔드)."""
-        note, _links = self._caption_publish(signature, run_id, confirm)
-        return note
-
-    def _caption_publish(
-        self, signature: str | None, run_id: str, confirm: bool
-    ) -> tuple[str, list[tuple[str, str]]]:
-        """확정 게시 공용 본문 — (원문 마크다운, 등록 미디어 링크)를 돌려준다.
-
-        게시는 한 번만 일어난다: 고급 패널(caption_confirm_view)과 작업대
-        서버 함수(_caption_wb_confirm)가 이 본문을 공유한다. 링크는 등록된
-        미디어 ID(`/media/<id>`)로만 — 임의 경로·사용자 글자는 안 간다.
-        """
-        root = self._require_current_selection(signature)
-        run = (run_id or "").strip() or "run-1"
-        if not confirm:
-            raise gr.Error("확정 확인이 필요하다 — 전 큐를 검토했는지 보고 확인란을 체크하세요.")
-        ws = self._caption_ws(root)  # 백엔드 없는 빌드 — 정직한 오류가 먼저다
-        identity = self._require_caption_identity(root)
-        if identity["run_id"] != run:
-            raise gr.Error(
-                f"승인된 실행(`{identity['run_id']}`)과 요청 실행(`{run}`)이 다르다 —"
-                " 검토를 다시 여세요."
-            )
-        expected = self._require_caption_head()
-        cue_ids = self._caption_cue_ids
-        if not cue_ids:
-            raise gr.Error("확인할 큐 목록이 없다 — 먼저 **검토 새로고침**으로 큐를 보세요.")
-        try:
-            exported = ws.confirm(
-                self._caption_run_identity(identity),
-                expected_head=expected,
-                cue_ids=cue_ids,
-                note="브라우저 화면 전 큐 검토 확인",
-            )
-        except raw_service.ManualHeadConflict as error:
-            raise gr.Error(
-                f"확정이 늦었다 — 검토 머리가 바뀌었다({error}). **검토 새로고침** 뒤"
-                " 다시 확인하세요."
-            ) from error
-        except (raw_service.RawWorkspaceError, raw_service.CaptionWorkspaceError) as error:
-            raise gr.Error(str(error)) from error
-        links = self._register_final_subtitles(root, exported)
-        lines = [
-            f"**자막 확정 완료** — 실행 `{run}` · 검토 머리 {expected} · 큐"
-            f" {len(cue_ids)}개 명시 확인",
-            "",
-            "- 확정 게이트(미해결 미대응·미허용 경고·시각 무효)를 전부 지났다.",
-            f"- 내보내기 지문 `{exported.export.export_sha256[:12]}…` · SRT sha"
-            f" `{exported.export.srt_sha256[:12]}…` · VTT sha"
-            f" `{exported.export.vtt_sha256[:12]}…`",
-        ]
-        if links:
-            lines += [
-                "- 내려받기(등록 미디어 ID로만 제공된다):",
-                *(f"  - [{label}]({path}) — `{path}`" for label, path in links),
-            ]
-        lines.append("- 낡은 확정 바이트는 다시 쓰지 않는다 — 다시 내려면 재구문 분석부터.")
-        return "\n".join(lines), links
-
-    def _register_final_subtitles(self, root: Path, exported: Any) -> list[tuple[str, str]]:
-        """확정 SRT·VTT를 내용 해시 봉인 이름으로 등록해 내려받기 링크를 만든다.
-
-        검토 저장소의 final 자리(`review/captions/final/…`)는 브라우저 제공 대상이
-        아니다(§4.4). 여기는 그 바이트를 `final/captions/published/<내용sha24>.srt|.vtt`
-        검증 사본으로 옮겨 등록한다 — 같은 내용은 같은 자리(멱등), 제공은 등록
-        ID로만 한다.
-        """
-        final = exported.export
-        links: list[tuple[str, str]] = []
-        for label, source_path in (("SRT", final.srt), ("VTT", final.vtt)):
-            if not source_path or not Path(source_path).is_file():
-                continue
-            source = Path(source_path)
-            digest = hashlib.sha256(source.read_bytes()).hexdigest()
-            target = root / "final" / "captions" / "published" / f"{digest[:24]}{source.suffix}"
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if not target.is_file():
-                shutil.copyfile(source, target)
-            registered = None
-            relative = target.relative_to(root).as_posix()
-            for item in self.raw.list_media(root, kind="artifact"):
-                if item.relative_path == relative:
-                    registered = item
-                    break
-            if registered is None:
-                registered = self.raw.register_media(root, target, "artifact")
-            links.append((label, f"/media/{registered.file_id}"))
-        return links
-
-    def caption_trace_view(self, signature: str | None, run_id: str) -> str:
-        """실행 개요 — 조각·판정 요약만(원응답은 검토 저장소 자리에 있고 나가지 않는다)."""
-        root = self._require_current_selection(signature)
-        run = (run_id or "").strip() or "run-1"
-        ws = self._caption_ws(root)  # 백엔드 없는 빌드 — 정직한 오류가 먼저다
-        identity = self._require_caption_identity(root)
-        try:
-            bundle = ws.review_bundle(self._caption_run_identity(identity))
-        except (raw_service.RawWorkspaceError, raw_service.CaptionWorkspaceError) as error:
-            raise gr.Error(str(error)) from error
-        state = bundle.state
-        resolved = sum(1 for row in state.rows if row.cue.text_basis == "manual")
-        lines = [
-            f"**실행 개요** — 실행 `{run}` · 큐 {len(state.rows)}개(수동 {resolved}개 포함)",
-            "",
-            f"- 열린 경고 {len(state.warnings)}개 · 미대응 {len(state.unplaced)}개",
-            f"- 청크 게이트 — 시간 완료 {state.timing_model_complete} · 문구 완료"
-            f" {state.text_model_complete} (실패 상태를 숨기지 않는다)",
-            "- 원시 모델 응답은 브라우저에 제공되지 않는다 — 검토 저장소의 비제공 자리에"
-            " 불변으로 남을 뿐이다.",
-            "- 재구문 분석(재파싱)은 새 리비전에서만 — 낡은 확정 바이트는 다시 쓰지 않는다.",
-        ]
-        return "\n".join(lines)
-
-    def _caption_context_tail(self) -> tuple[str, int | None]:
-        """자막 문맥 꼬리 — 지금 수명 토큰과 화면이 볼 머리(배선 출력용)."""
-        return self._caption_lifetime_token, self._caption_head_sequence
-
-    def _on_caption_register(
-        self, signature: str | None, path_text: str, source_id: str, ordinal: str
-    ) -> tuple[str, str, str, str, int | None]:
-        """최종 영상 등록의 실제 배선 — 등록 뒤 화면 문맥(토큰·머리)을 내린다."""
-        markdown, player = self.caption_register_view(signature, path_text, source_id, ordinal)
-        return (
-            markdown,
-            player,
-            self.caption_workbench_value(self._snapshot_root()),
-            *self._caption_context_tail(),
-        )
-
-    def _on_caption_refresh(
-        self, signature: str | None, run_id: str
-    ) -> tuple[str, str, object, gr.Dropdown, str, str, int | None]:
-        """검토 새로고침의 실제 배선 — 새 머리·토큰을 클라이언트 문맥으로 내린다."""
-        markdown, table, player, cue_dd = self.caption_review_view(signature, run_id)
-        return (
-            markdown,
-            table,
-            player,
-            cue_dd,
-            self.caption_workbench_value(self._snapshot_root()),
-            *self._caption_context_tail(),
-        )
-
-    def _on_caption_edit(
-        self,
-        nonce: str | None,
-        shown_head: object,
-        signature: str | None,
-        operation: str,
-        cue_id: str,
-        text: str,
-        start_ms: str,
-        end_ms: str,
-        second_id: str,
-        index_text: str,
-        warning_key: str,
-    ) -> tuple[str, str, object, gr.Dropdown, str, str, int | None]:
-        """수동 편집의 실제 배선 — 문맥 검증이 먼저다(뷰 함수 서명은 그대로).
-
-        옛 토큰(작업공간 전환·재시작)·옛 머리(다른 클라이언트 편집) 사건은
-        `caption_edit_view`에 닿기 전에 거부된다 — 어떤 큐·머리도 바뀌지 않는다.
-        """
-        self._require_caption_context(nonce, shown_head)
-        markdown, table, player, cue_dd = self.caption_edit_view(
-            signature, operation, cue_id, text, start_ms, end_ms, second_id, index_text, warning_key
-        )
-        return (
-            markdown,
-            table,
-            player,
-            cue_dd,
-            self.caption_workbench_value(self._snapshot_root()),
-            *self._caption_context_tail(),
-        )
-
-    def _on_caption_confirm(
-        self,
-        nonce: str | None,
-        shown_head: object,
-        signature: str | None,
-        run_id: str,
-        confirm: bool,
-    ) -> tuple[str, str, str, int | None]:
-        """확정 게시의 실제 배선 — 문맥 검증이 먼저다(옛 머리 확정 길 차단)."""
-        self._require_caption_context(nonce, shown_head)
-        markdown = self.caption_confirm_view(signature, run_id, confirm)
-        return (
-            markdown,
-            self.caption_workbench_value(self._snapshot_root()),
-            *self._caption_context_tail(),
-        )
-
-    @staticmethod
-    def caption_public_status(markdown: str) -> str:
-        """Keep cost, progress, errors and download links at the execution controls."""
-        import re
-
-        lines = [line for line in markdown.splitlines() if line.strip()]
-        shown = [
-            line
-            for index, line in enumerate(lines)
-            if index == 0
-            or any(
-                word in line
-                for word in ("비용", "청크", "실패", "경고", "완료", "SRT", "VTT", "승인")
-            )
-        ]
-        return re.sub(r"`[^`]*`", "", "\n\n".join(shown))
-
-    def _caption_tab(self) -> None:
-        with gr.Tab("자막", visible=False):
-            # ── 접힌 세팅 — 설정 안내·등록·실행(기존 흐름)은 무대 위 한 줄로 접는다.
-            # 1440x900에서 재생기·편집기·주 저장/확정 단추가 문서 스크롤 없이
-            # 먼저 들어온다(ROOT 실측: 재생기 top 536 · 저장 1287 → 무대 재배치).
-            with gr.Accordion("최종 영상 선택 · 자막 생성", open=True):
-                with gr.Accordion("비용 · 모델 설정", open=False):
-                    self._settings_md = gr.Markdown(self.settings_markdown())
-                gr.Markdown(
-                    "> **최종 영상 자막** — 등록(검증 사본·오디오 트랙 선택) → 실행 준비"
-                    "(모델·수명주기·실측 청크) → 확인란 승인 → 실행 작업 → 검토(큐 행·"
-                    "파형·미대응) → 수동 편집 → 확정 게시. 실제 호출은 승인된 실행에서만"
-                    " 열리고, 키는 서버를 띄운 환경에서만 온다(§14.3)."
-                )
-                with gr.Row():
-                    self._caption_path_box = gr.Textbox(
-                        label="최종 영상 절대 경로 — 선택기 표시",
-                        placeholder="최종 영상 고르기(선택기)로 고르세요",
-                        scale=4,
-                        interactive=False,
-                    )
-                    caption_pick_button = gr.Button("최종 영상 고르기(선택기)", scale=2)
-                with gr.Row():
-                    caption_source_box = gr.Textbox(
-                        label="출처 ID(선택)", placeholder="final_1", scale=2, visible=False
-                    )
-                    caption_ordinal_dd = gr.Dropdown(
-                        choices=["자동(첫 트랙)", "0", "1", "2"],
-                        value="자동(첫 트랙)",
-                        label="오디오 트랙(여럿일 때 번호로)",
-                        interactive=True,
-                        scale=2,
-                    )
-                    caption_register_button = gr.Button(
-                        "최종 영상 등록", variant="primary", scale=2
-                    )
-                caption_public_status = gr.Markdown(
-                    "최종 영상을 등록하면 비용과 진행 상태가 표시됩니다."
-                )
-                with gr.Row():
-                    caption_run_box = gr.Textbox(
-                        label="실행 ID", value="run-1", interactive=False, scale=2, visible=False
-                    )
-                    caption_estimate_button = gr.Button("실행 준비(로컬)", scale=2)
-                    caption_confirm_box = gr.Checkbox(
-                        label="위 실행 지문 그대로 자막 생성을 승인한다",
-                        interactive=True,
-                        scale=3,
-                    )
-                    caption_run_button = gr.Button("자막 생성 실행", variant="primary", scale=2)
-            # ── 자막 무대 — 왼쪽 재생기(영상·파형·이동) · 오른쪽 큐 목록+편집기.
-            # 두 구성요소가 같은 `#caption-stage` 격자에 들어가고, 주 저장·확정
-            # 단추는 오른쪽 칸 편집기 안에 있어 900px 안에 도달한다.
-            with gr.Row(elem_id="caption-stage"):
-                self._caption_player_html = gr.HTML(
-                    self._caption_player_placeholder(
-                        "최종 영상을 등록하면 선택한 오디오 트랙의 미리보기가 여기서 재생된다"
-                        " — 큐 단추가 이 시계를 짚는다."
-                    ),
-                    elem_id="caption-player-block",
-                    elem_classes=["vl-stage-cell"],
-                )
-                self._caption_workbench_block = gr.HTML(
-                    self.caption_workbench_value(self._snapshot_root()),
-                    elem_id="caption-workbench-block",
-                    elem_classes=["vl-stage-cell"],
-                    js_on_load=ui_facade.CAPTION_BOOTSTRAP_JS,
-                    server_functions=self._caption_server_functions(),
-                )
-            with gr.Row():
-                caption_refresh_button = gr.Button("검토 새로고침", scale=2)
-                caption_trace_button = gr.Button("실행 개요(원응답 없음)", scale=2)
-                caption_final_confirm_box = gr.Checkbox(
-                    label="전 큐를 검토했다 — 확정 게시를 승인한다",
-                    interactive=True,
-                    scale=3,
-                )
-                caption_confirm_button = gr.Button(
-                    "확정 · SRT/VTT 게시", variant="primary", scale=2
-                )
-            with gr.Accordion("고급 — 수동 편집 칸·전체 큐 표(기존)", open=False):
-                gr.Markdown(
-                    "> 수동 편집 — 시각은 사람이 준 값만 들어간다(추측 배분 없음)."
-                    " 큐 표에서 큐를 고르면 편집 칸이 그 행의 값으로 채워진다."
-                )
-                with gr.Row():
-                    caption_op_dd = gr.Dropdown(
-                        choices=[
-                            "글자 교정",
-                            "시각 조정",
-                            "큐 나누기",
-                            "큐 합치기",
-                            "새 큐 추가",
-                            "경고 허용",
-                            "미대응 해결",
-                            "무발화 기록",
-                        ],
-                        value="글자 교정",
-                        label="편집 종류",
-                        interactive=True,
-                        scale=2,
-                    )
-                    caption_cue_box = gr.Textbox(label="큐 ID", scale=2)
-                    caption_text_box = gr.Textbox(
-                        label="글자(나누기는 `앞|뒤`)",
-                        scale=3,
-                    )
-                    caption_start_box = gr.Textbox(label="시작 ms", scale=1)
-                    caption_end_box = gr.Textbox(label="끝 ms", scale=1)
-                with gr.Row():
-                    caption_second_box = gr.Textbox(label="짝 큐 ID(합치기)", scale=2)
-                    caption_index_box = gr.Textbox(label="미대응 번호", scale=2)
-                    caption_warning_box = gr.Textbox(label="경고 key", scale=2)
-                    caption_edit_button = gr.Button("편집 적용", scale=2)
-                with gr.Row():
-                    self._caption_cue_dd = gr.Dropdown(
-                        choices=[],
-                        label="큐 선택 — 편집 칸 채우기·이동",
-                        info="고르면 그 큐의 지금 글자·시각으로 편집 칸을 채우고 재생기를"
-                        " 큐 시작으로 옮긴다(서버 미디어 재생성 없음).",
-                        interactive=True,
-                        scale=6,
-                    )
-                self._caption_table_html = gr.HTML(
-                    '<p style="color:var(--vl-ink-muted)">'
-                    "큐 편집표는 검토 새로고침 뒤 여기 나타난다 —"
-                    " 지금 글자 칸과 큐 이동·반복 단추까지.</p>",
-                    elem_id="caption-cue-table",
-                )
-            # 등록 기록(64자리 지문 등)은 접힌 상세로 — 기본 흐름에는 재생기·작업대만.
-            with gr.Accordion("자막 상세 — 등록·실행 기록", open=False):
-                self._caption_md = gr.Markdown(
-                    "_자막 상태가 여기 나타난다._", elem_id="caption-state"
-                )
-
-            self._caption_md.change(
-                self.caption_public_status, self._caption_md, caption_public_status
-            )
-
-            # 문맥(수명 토큰·화면이 본 머리)을 주고받는다 — 등록·새로고침은 새
-            # 문맥을 내리고, 수동 편집·확정은 옛 문맥 사건을 거부한다.
-            assert self._caption_path_box is not None
-            self._caption_pick_button = caption_pick_button
-            caption_pick_button.click(
-                self.final_video_chooser_view,
-                None,
-                [self._caption_path_box],
-                api_name=False,
-                concurrency_limit=1,
-                concurrency_id=ui_chooser.CHOOSER_CONCURRENCY_ID,
-            )
-            caption_register_inputs = [
-                self._signature_state,
-                self._caption_path_box,
-                caption_source_box,
-                caption_ordinal_dd,
-            ]
-            caption_register_outputs = [
-                self._caption_md,
-                self._caption_player_html,
-                self._caption_workbench_block,
-                self._caption_context_state,
-                self._caption_head_state,
-            ]
-            caption_register_button.click(
-                self._on_caption_register, caption_register_inputs, caption_register_outputs
-            )
-            self._advanced_wirings["caption-register"] = (
-                caption_register_inputs,
-                caption_register_outputs,
-            )
-            self._advanced_handlers["caption-register"] = self._on_caption_register
-            caption_estimate_button.click(
-                self.caption_prepare_view,
-                [self._signature_state, caption_run_box],
-                self._caption_md,
-            )
-            caption_run_button.click(
-                self.caption_run_view,
-                [self._signature_state, caption_run_box, caption_confirm_box],
-                self._caption_md,
-            )
-
-            caption_refresh_inputs = [self._signature_state, caption_run_box]
-            caption_refresh_outputs = [
-                self._caption_md,
-                self._caption_table_html,
-                self._caption_player_html,
-                self._caption_cue_dd,
-                self._caption_workbench_block,
-                self._caption_context_state,
-                self._caption_head_state,
-            ]
-            caption_refresh_button.click(
-                self._on_caption_refresh, caption_refresh_inputs, caption_refresh_outputs
-            )
-            self._advanced_wirings["caption-refresh"] = (
-                caption_refresh_inputs,
-                caption_refresh_outputs,
-            )
-            self._advanced_handlers["caption-refresh"] = self._on_caption_refresh
-            caption_trace_button.click(
-                self.caption_trace_view,
-                [self._signature_state, caption_run_box],
-                self._caption_md,
-            )
-
-            caption_edit_inputs = [
-                self._caption_context_state,
-                self._caption_head_state,
-                self._signature_state,
-                caption_op_dd,
-                caption_cue_box,
-                caption_text_box,
-                caption_start_box,
-                caption_end_box,
-                caption_second_box,
-                caption_index_box,
-                caption_warning_box,
-            ]
-            caption_edit_button.click(
-                self._on_caption_edit,
-                caption_edit_inputs,
-                caption_refresh_outputs,
-            )
-            self._advanced_wirings["caption-edit"] = (caption_edit_inputs, caption_refresh_outputs)
-            self._advanced_handlers["caption-edit"] = self._on_caption_edit
-
-            caption_confirm_inputs = [
-                self._caption_context_state,
-                self._caption_head_state,
-                self._signature_state,
-                caption_run_box,
-                caption_final_confirm_box,
-            ]
-            caption_confirm_outputs = [
-                self._caption_md,
-                self._caption_workbench_block,
-                self._caption_context_state,
-                self._caption_head_state,
-            ]
-            caption_confirm_button.click(
-                self._on_caption_confirm, caption_confirm_inputs, caption_confirm_outputs
-            )
-            self._advanced_wirings["caption-confirm"] = (
-                caption_confirm_inputs,
-                caption_confirm_outputs,
-            )
-            self._advanced_handlers["caption-confirm"] = self._on_caption_confirm
-            assert self._caption_cue_dd is not None
-            self._caption_cue_dd.change(
-                self.caption_cue_pick_view,
-                [self._signature_state, self._caption_cue_dd],
-                [caption_cue_box, caption_text_box, caption_start_box, caption_end_box],
-            )
-            self._caption_cue_dd.change(
-                None,
-                [self._caption_cue_dd],
-                None,
-                js=_CUE_SEEK_JS,
-            )
-
     # ── 조립 ───────────────────────────────────────────────────
 
     def refresh_outputs(
@@ -11367,7 +9968,6 @@ class RawWorkspaceUi:
         gr.Dropdown,
         str,
         gr.Dropdown,
-        str,
         str | None,
         str,
         gr.Dropdown,
@@ -11378,8 +9978,6 @@ class RawWorkspaceUi:
         str,
         gr.Dropdown,
         gr.CheckboxGroup,
-        str,
-        str,
         str,
         str,
         str,
@@ -11398,7 +9996,6 @@ class RawWorkspaceUi:
             gr.Dropdown(choices=self.media_choices()),
             self.jobs_markdown(),
             gr.Dropdown(choices=self.active_job_choices()),
-            self.settings_markdown(),
             self.current_signature(),
             self._ingest_state_markdown(self._snapshot_root()),
             gr.Dropdown(choices=self.resumable_ingest_choices()),
@@ -11411,7 +10008,6 @@ class RawWorkspaceUi:
             gr.CheckboxGroup(choices=self.analysis_source_choices()),
             *self._workbench_view_values(self._snapshot_root()),
             self._ws_path_display(),
-            "",
             "",
         )
 
@@ -11429,14 +10025,11 @@ class RawWorkspaceUi:
             # 편집 계열 콜백은 사건 순간의 이 값과 서버의 지금 값을 비교한다.
             self._edit_context_state = gr.State(None)
             self._review_head_state = gr.State(None)
-            self._caption_context_state = gr.State(None)
-            self._caption_head_state = gr.State(None)
             open_button, create_button = self._project_tab()
             # 탭 묶음을 드러내 둔다 — 초안 렌더가 끝나면 「최종 편집」으로 넘긴다(D117).
             with gr.Tabs(elem_id="vl-tabs") as tabs:
                 self._review_tab()
-                self._caption_tab()
-            # 오른쪽 서랍은 탭 뒤에 짓는다 — 두 탭 사이에 끼면 탭 묶음이 둘로 갈린다.
+            # 오른쪽 서랍은 탭 뒤에 짓는다 — 탭 묶음 안에 끼면 탭 묶음이 둘로 갈린다.
             extract_button, refresh_segment, profile_dd, analysis_plan = self._settings_drawer()
             # 추출 시작·새로고침은 3번 탭(package 패널)까지 만들어진 뒤에 묶는다.
             extract_button.click(
@@ -11667,7 +10260,6 @@ class RawWorkspaceUi:
     def _load_outputs(self) -> list[object]:
         assert (
             self._workspace_md is not None
-            and self._settings_md is not None
             and self._listing_md is not None
             and self._jobs_md is not None
             and self._ingest_md is not None
@@ -11685,7 +10277,6 @@ class RawWorkspaceUi:
             and self._signature_state is not None
             and self._ws_path_box is not None
             and self._source_box is not None
-            and self._caption_path_box is not None
         )
         return [
             self._workspace_md,
@@ -11694,7 +10285,6 @@ class RawWorkspaceUi:
             self._media_dd,
             self._jobs_md,
             self._jobs_dd,
-            self._settings_md,
             self._signature_state,
             self._ingest_md,
             self._ingest_jobs_dd,
@@ -11708,7 +10298,6 @@ class RawWorkspaceUi:
             *self._workbench_outputs(),
             self._ws_path_box,
             self._source_box,
-            self._caption_path_box,
         ]
 
     # ── HTTP 경계 — 모든 요청에 Host/Origin 가드, 미디어는 ID로만 ──

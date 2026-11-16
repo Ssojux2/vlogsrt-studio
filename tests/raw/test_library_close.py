@@ -122,12 +122,12 @@ def test_close_returns_the_empty_page_and_forgets_the_saved_workspace(tmp_path: 
         view[selection + 3 + CELLS :],
     )
     assert workspace_view[1] is None  # 서명 칸이 비었다 — 이 탭의 틱은 이제 건너뛴다
-    shell, workbench = workspace_view[15], workspace_view[16]
+    shell, workbench = workspace_view[14], workspace_view[15]
     assert workspace_service.FOLDER_FIRST_NOTE in shell  # 폴더 작업대의 빈 화면(W-46a)
     assert workspace_service.FOLDER_FIRST_NOTE in workbench
     assert "data-vl-closed" in workbench  # 머리줄의 닫기 단추를 숨기라는 표지
     assert f'data-vl-project="{ui_facade.PROJECT_EMPTY_LABEL}"' in workbench
-    assert workspace_view[-3:] == ("", "", "")  # 경로 표시 셋도 빈다
+    assert workspace_view[-2:] == ("", "")  # 경로 표시 둘도 빈다
     assert all(update.visible is False for update in fcp)  # FCP 연결 칸도 걷힌다
     button, _progress, usage = cells
     assert button.interactive is False  # 승인 단추는 누를 수 없다

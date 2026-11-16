@@ -156,7 +156,6 @@ def test_no_screen_text_outside_quotes_shows_a_gemini_unit_price(
     root = server.workspace_root()
     for text in (
         server.analysis_model_status(),
-        server.settings_markdown(root),
         server._analysis_settings_markdown(root),
     ):
         assert not any(word in text for word in PRICE_WORDS), text

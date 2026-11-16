@@ -468,23 +468,6 @@ def test_final_captions_record_that_whisper_times_were_kept(
     assert any("원 응답은 그대로" in line for line in warnings), warnings
 
 
-def test_cue_table_shows_no_infinite_reading_speed() -> None:
-    from ui import ui_facade
-
-    row = ui_facade.CueRowView(
-        cue_id="cue_0001",
-        start_seconds="14.000",
-        end_seconds="14.000",
-        whisper_text="길이 영",
-        auto_text="길이 영",
-        text="길이 영",
-        basis="whisper",
-        chars_per_second=float("inf"),
-    )
-    assert "inf" not in ui_facade.cue_table_markdown([row])
-    assert "inf" not in ui_facade.cue_table_html([row])
-
-
 def test_asr_cache_entry_without_overrun_keeps_the_pre_fix_bytes(tmp_path: Path) -> None:
     """넘침이 없는 캐시 항목은 W-15 이전 모양 그대로다 — 옛 빌드가 읽어도 놓침·재전송이 없다."""
     audio = deterministic_audio(tmp_path)

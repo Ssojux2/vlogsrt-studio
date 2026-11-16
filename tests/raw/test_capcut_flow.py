@@ -169,35 +169,3 @@ def test_synthetic_cleanup_restore_restart_and_final_cut(tmp_path: Path, d80_exp
         (s.start_pts, s.end_pts, s.selection) for s in changed.segments
     ]
     assert hashlib.sha256(source.read_bytes()).hexdigest() == original
-
-
-@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
-def test_final_video_replacement_clears_binding_and_persists_selection(tmp_path: Path):
-    from tests.raw.test_full_ui_screens import _final_video, _two_track_final_video
-    from ui.workspace_service import RawWorkspaceUi
-
-    first, second = tmp_path / "first.mp4", tmp_path / "second.mov"
-    _final_video(first)
-    _two_track_final_video(second)
-    server = RawWorkspaceUi(state_path=tmp_path / "ui-state.json")
-    signature = server.create_workspace_view("자막 교체", str(tmp_path / "workspace"))[1]
-    server.caption_register_view(signature, str(first), "final_1", "자동(첫 트랙)")
-    server.caption_prepare_view(signature, "run-1")
-    old_identity = dict(server._caption_identity)
-    token = server._caption_lifetime_token
-    server.caption_register_view(signature, str(second), "final_1", "1")
-    assert server._caption_identity is None
-    assert server._caption_cue_rows == ()
-    assert server._caption_lifetime_token != token
-    server.caption_prepare_view(signature, "run-1")
-    assert server._caption_identity["revision"] != old_identity["revision"]
-    assert server._caption_identity["audio_ordinal"] == 1
-    root = server.workspace_root()
-    restarted = RawWorkspaceUi(state_path=tmp_path / "ui-state2.json")
-    signature = restarted.open_workspace_view(str(root))[1]
-    restarted.caption_prepare_view(signature, "run-1")
-    assert restarted._caption_identity == server._caption_identity
-    # Selecting the older render again is explicit and survives another reopen.
-    restarted.caption_register_view(signature, str(first), "final_1", "자동(첫 트랙)")
-    restarted.caption_prepare_view(signature, "run-1")
-    assert restarted._caption_identity["revision"] == old_identity["revision"]

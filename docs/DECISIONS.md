@@ -11563,3 +11563,20 @@ D152가 나눠 둔 영어 열이다. **읽기만 한다** — 번역을 사지 �
   표(D154) 시트로 옮겼다.
 - **남은 W-91**: 숨은 「자막」 탭(옛 최종 영상 자막 화면)과 W-32(whisper 종료 앞 옛 CLI 거부), 🧑 실제 라이브러리 인수.
 
+## D162 — 숨은 「자막」 탭 은퇴 (2026-11-16, W-91b, 사용자 지시)
+
+사용자 지시(2026-11-16 「Yes, W-91b next」). D161에 이어 옛 「최종 영상 자막」 화면(숨은 탭 `gr.Tab("자막", visible=False)`)을 지웠다. 길은 「타임라인으로
+보내기 → 편집 → 공유」 하나이고, 자막 편집은 재생기(D146–D154)가 한다.
+
+- **지운 것**(`ui/workspace_service.py` 약 1,400줄): `_caption_tab`과 그 처리기(`caption_*_view` · `_on_caption_*` · `caption_workbench_value` · `_caption_publish` ·
+  `final_video_chooser_view` · `settings_markdown` 등), `_caption_*` 상태와 그 초기화, 그 탭의 구성요소 · 서버 함수 · 고급 처리기 줄, 생성자의 `caption_providers`
+  인자(부르는 곳이 지운 시험뿐). `ui/ui_facade.py`에서 그 탭만 쓰던 도움말(`CueRowView` · 큐 표 · 파형 SVG · 자막 재생기 · `fraction_ms` 등).
+- **모양**: 작업공간 보기(`WorkspaceView` · `workspace_view_values` · `_selection_outputs`) 21 → 18, 새로고침 출력(`refresh_outputs` · `_load_outputs`) 23 → 20, 작업대 값
+  (`_workbench_view_values` · `_workbench_outputs`) 3 → 2 — 빠진 셋은 설정 요약 · 자막 작업대 본문 · 최종 영상 경로 칸이고 값과 출력은 1:1 그대로다.
+- **남긴 것**: Final Cut 보내기 보고서의 자막 사실(`_send_caption_facts` · `_caption_honesty_lines`), 저장된 작업이 들 수 있는 `caption_run` 작업 이름,
+  `vlogsrt/`의 서비스(`caption_workspace` · `caption_preview` 등 — 이제 화면에서는 부르지 않는다). 자막 작업대 JS(`CAPTION_BOOTSTRAP_JS`)와 그 HTML 도움말 셋 ·
+  `#caption-stage` CSS는 노드 하네스(`test_visual_workbench_ui`의 `_NODE_HARNESS`)를 쓰는 시험 16개가 함께 돌려 이번에는 남겼다 — 따로 정리한다.
+- **시험**: 그 탭만 시험하던 것(`test_full_ui_screens`의 자막 흐름 넷 · `test_visual_workbench_ui`의 자막 작업대 셋 · 고르기 · 큐 표 등)을 지웠고, 섞인 시험은 자막 부분만
+  덜었다. 출력 자리 번호를 쓰던 시험은 새 모양으로 옮겼다. 선택 소리 미리보기(`caption_preview`)의 끝까지 시험은 함께 사라졌다 — 서비스는 남는다.
+- **남은 W-91**: W-32(whisper 종료 앞 옛 CLI 거부), 🧑 실제 라이브러리 인수.
+
