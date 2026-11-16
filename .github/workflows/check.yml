@@ -49,9 +49,11 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install ffmpeg-full -y --no-progress
 
-      - name: ffmpeg (Linux)
+      # xmllint(libxml2-utils)는 FCPXML 검증 문이다 — 없으면 Final Cut 보내기가 거부한다(W-84a).
+      # macOS는 시스템에 있고, Windows는 따로 다룬다.
+      - name: ffmpeg · xmllint (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg python3-tk
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg python3-tk libxml2-utils
 
       - name: 꾸러미
         run: |
