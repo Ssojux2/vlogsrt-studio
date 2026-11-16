@@ -105,6 +105,19 @@ SCALAR_TOKENS: dict[str, str] = {
     "commandbar-h": "48px",
     "statusline-h": "24px",
     "control-h": "32px",
+    # Final Cut식 창(W-85, D145) — Final Cut Pro 12.4 `Factory 1 - Default.moduleLayout`의 위 덱
+    # 브라우저 539 · 뷰어 539 · 인스펙터 403과 위·아래 덱 0.5/0.5를 비율로 옮겼다(정적 분석,
+    # docs/plans/2026-11-16-fcp-window.md). 최소 폭은 예전 목록·패널 열의 바닥 그대로다.
+    "browser-fr": "539fr",
+    "viewer-fr": "539fr",
+    "inspector-fr": "403fr",
+    "browser-min": "240px",
+    "inspector-min": "280px",
+    "browser-card-min": "240px",
+    # 아래 덱이 차 있으면 무대는 내용 높이다 — 위 덱 뷰어의 영상 높이(W-85, 좁은 화면 규칙과 같은
+    # 값). 위·아래 0.5/0.5는 덱이 둘째 영상을 내려놓는 W-86에서 맞춘다(지금 덱의 재생기는 제 영상을
+    # 싣고 있어 크다).
+    "deck-viewer-h": "clamp(300px, 46vh, 540px)",
     "font-sans": ", ".join(FONT_SANS_STACK),
     "font-mono": ", ".join(FONT_MONO_STACK),
 }

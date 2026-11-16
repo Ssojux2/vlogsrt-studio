@@ -1865,18 +1865,20 @@ WORKBENCH_CSS = (
   /* 바닥값 = 타임라인 렠 칸(≈200) + 각주·간격(≈30) + 자막 줄·안내(≈60) + 최소 영상(≈110).
      560이면 800px 높이 창(무대 위쪽 279–335px 실측)에서 렠이 6–62px 잘렸다(D50). */
   --vl-stage-min-h: 400px;
-  --vl-list-col: minmax(240px, 280px);
-  --vl-panel-col: minmax(280px, 320px);
+  /* 열 비율은 Final Cut 위 덱 그대로(토큰, W-85 · D145) — 브라우저 · 뷰어 · 인스펙터. */
+  --vl-list-col: minmax(var(--vl-browser-min), var(--vl-browser-fr));
+  --vl-panel-col: minmax(var(--vl-inspector-min), var(--vl-inspector-fr));
   --vl-stage-gap: 8px;
   --vl-thumb-art-w: 64px; --vl-thumb-art-h: 36px;
   --vl-name-lines: 2;
   --vl-scrollbar: var(--vl-line-strong) var(--vl-surface);
   display: grid;
-  grid-template-columns: var(--vl-list-col) minmax(0, 1fr) var(--vl-panel-col);
-  grid-template-rows: auto minmax(0, 1fr) auto auto var(--vl-statusline-h);
+  grid-template-columns: var(--vl-list-col) minmax(0, var(--vl-viewer-fr)) var(--vl-panel-col);
+  /* 아래 덱(deck)은 원본 범위 타임라인이다 — 비어 있으면 높이가 없다(예전 화면 그대로). */
+  grid-template-rows: auto minmax(0, 1fr) auto auto auto var(--vl-statusline-h);
   grid-template-areas:
     "thumbs player quote" "thumbs player ranges" "thumbs player panel" "thumbs timeline timeline"
-    "foot foot foot";
+    "deck deck deck" "foot foot foot";
   height: max(var(--vl-stage-min-h), calc(100vh - var(--vl-stage-top)));
   gap: var(--vl-stage-gap); align-items: stretch; margin-top: 0; min-width: 0;
 }
@@ -1890,6 +1892,17 @@ WORKBENCH_CSS = (
 #visual-workbench:not([data-vl-empty]) { display: contents; }
 #visual-workbench[data-vl-empty] { grid-column: 1 / -1; }
 #vl-thumbs { grid-area: thumbs; }
+/* 아래 덱(W-85, D145) — 원본 범위 타임라인 요약 · 재생기. 타임라인이 있으면(재생기 뿌리가
+   `tl-empty`가 아니면) 무대는 화면 높이에 묶이지 않고 내용 높이다 — 위 덱 뷰어의 영상은 토큰
+   높이를 갖고, 덱은 그 아래 제 높이로 선다(문서가 스크롤한다). 없으면 예전 화면 그대로다. */
+#vl-timeline-deck { grid-area: deck; min-width: 0; flex-wrap: nowrap; }
+#visual-stage:has(#vl-timeline-deck .tl-root:not(.tl-empty)) {
+  height: auto; grid-template-rows: auto auto auto auto auto var(--vl-statusline-h); }
+#visual-stage:has(#vl-timeline-deck .tl-root:not(.tl-empty)) #visual-preview video {
+  flex: none; height: var(--vl-deck-viewer-h); }
+/* 넓은 브라우저 열은 Final Cut 필름스트립처럼 카드를 여러 열로 늘어놓는다. */
+#visual-stage .vl-cards {
+  grid-template-columns: repeat(auto-fill, minmax(var(--vl-browser-card-min), 1fr)); }
 /* 카드 열은 minmax(0,1fr) — 그냥 1fr(=minmax(auto,1fr))이면 카드 최소 폭 아래로
    줄지 못해 목록 안에 가로 스크롤이 생긴다. 스크롤바 색을 주지 않으면 어두운
    테마에서 흰 띠로 남는다. */
@@ -2052,7 +2065,9 @@ WORKBENCH_CSS = (
 #visual-stage:not([data-vl-advanced="open"]) .vl-handle { display: none; }
 @media (min-width: 1051px) {
   #visual-stage[data-vl-advanced="open"] {
-    grid-template-rows: auto minmax(0, 1fr) minmax(0, 2fr) auto var(--vl-statusline-h); }
+    grid-template-rows: auto minmax(0, 1fr) minmax(0, 2fr) auto auto var(--vl-statusline-h); }
+  #visual-stage[data-vl-advanced="open"]:has(#vl-timeline-deck .tl-root:not(.tl-empty)) {
+    grid-template-rows: auto auto auto auto auto var(--vl-statusline-h); }
 }
 .vl-markbar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
 .vl-markbar .vl-btn { padding: 4px 10px; }
@@ -2418,7 +2433,7 @@ WORKBENCH_CSS = (
   #visual-stage { height: auto; grid-template-columns: minmax(180px, 220px) minmax(0, 1fr);
     grid-template-rows: none;
     grid-template-areas: "quote quote" "thumbs player" "thumbs timeline" "thumbs ranges"
-      "thumbs panel" "foot foot"; }
+      "thumbs panel" "deck deck" "foot foot"; }
   #visual-stage .vl-thumbs { max-height: none; contain: size; }
   #vl-panel { max-height: 64vh; }
   #visual-preview video { flex: none; height: clamp(300px, 48vh, 540px); }
@@ -2426,7 +2441,7 @@ WORKBENCH_CSS = (
 }
 @media (max-width: 860px) {
   #visual-stage { grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: "quote" "player" "timeline" "ranges" "thumbs" "panel" "foot"; }
+    grid-template-areas: "quote" "player" "timeline" "deck" "ranges" "thumbs" "panel" "foot"; }
   #caption-stage { grid-template-columns: minmax(0, 1fr); grid-template-areas: "player" "cues"; }
   #visual-stage .vl-thumbs { max-height: none; overflow: visible; contain: none; }
   #visual-stage .vl-thumbs > .vl-queue { position: static; box-shadow: none; }
@@ -2671,6 +2686,7 @@ VISUAL_BOOTSTRAP_JS = (
   // 열린 서랍 안에 초점이 있으면 재생 단축키를 쓰지 않는다 — 서랍을 열면 「닫기」에 초점이 가는데,
   // 거기서 누른 스페이스가 막 뒤의 영상을 틀면 안 된다(W-17 B).
   var VL_OPEN_DRAWER = ".sidebar.open";
+  var VL_OWN_KEYS = "[data-vl-own-keys]";
   // 보이는 첫 영상 하나만 조작한다 — 숨은 탭의 영상은 offsetParent가 null이다.
   var VL_SHORTCUT_VIDEOS = [["visual-video", "vl-footnote"], ["caption-video", "cap-msg"]];
   var VL_SHORTCUT_ACTIONS = { "Space": "toggle", "KeyK": "toggle", "KeyJ": "back",
@@ -5359,9 +5375,12 @@ VISUAL_BOOTSTRAP_JS = (
       if (typeof document.querySelector === "function" && document.querySelector(VL_OPEN_DRAWER)) {
         return true;
       }
+      // 제 키를 가진 칸(타임라인 재생기 · 초안 편집 — `data-vl-own-keys`) 안의 키는 그 칸 몫이다 —
+      // 같은 창 아래 덱의 J·L·I·O가 위 재생기를 움직이면 안 된다(W-85, D145).
       var t = ev.target;
       return !!(t && (t.isContentEditable || (typeof t.closest === "function" &&
-        (t.closest(VL_EDITABLE) || t.closest(VL_OPEN_DRAWER)))));
+        (t.closest(VL_EDITABLE) || t.closest(VL_OPEN_DRAWER) ||
+          t.closest(VL_OWN_KEYS)))));
     };
     W.__vlShortcutAction = function (ev) {
       if (W.__vlShortcutBlocked(ev)) { return null; }

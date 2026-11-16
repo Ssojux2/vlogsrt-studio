@@ -18,7 +18,7 @@ pytest.importorskip("gradio", reason="웹 UI extra(gradio)가 없다", exc_type=
 import gradio as gr  # noqa: E402
 
 from ui import timeline_cell, ui_facade  # noqa: E402
-from ui.final_edit_ui import FINAL_EDIT_TAB_KEY  # noqa: E402
+from ui.final_edit_ui import REVIEW_TAB_KEY  # noqa: E402
 from ui.timeline_cell import SEND_ID, timeline_summary_html  # noqa: E402
 from ui.workspace_service import RENDER_EXPORT_ID, RawWorkspaceUi  # noqa: E402
 
@@ -81,13 +81,14 @@ def test_the_summary_names_what_was_left_out_and_escapes_it() -> None:
     assert timeline_summary_html(None) == ""
 
 
-def test_a_successful_send_switches_to_the_final_edit_tab(
+def test_a_successful_send_stays_in_the_window_with_the_timeline_deck(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """W-85(D145) — 타임라인은 같은 창 아래 덱이다. 보내기가 끝나도 「영상 정리」에 머문다."""
     server, _root, signature = _server(tmp_path)
     _fake_jobs(monkeypatch, server, "succeeded")
     tabs, summary, text = server._timeline_cell.send_view(signature)
-    assert isinstance(tabs, gr.Tabs) and tabs.selected == FINAL_EDIT_TAB_KEY
+    assert isinstance(tabs, gr.Tabs) and tabs.selected == REVIEW_TAB_KEY
     assert "원본 범위 타임라인" in summary
     assert text == timeline_cell.STARTED_TEXT.format(clips=3, cues=4)
 

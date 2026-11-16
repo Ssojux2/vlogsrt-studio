@@ -300,24 +300,30 @@ def test_grid_areas_at_three_breakpoints() -> None:
     css = ui_facade.WORKBENCH_CSS
     wide = css[css.index("#visual-stage {") :]
     wide = wide[: wide.index("}")]
-    assert "grid-template-columns: var(--vl-list-col) minmax(0, 1fr) var(--vl-panel-col);" in wide
+    # 열은 Final Cut 위 덱 비율(브라우저 · 뷰어 · 인스펙터 — 토큰, W-85 · D145).
+    assert (
+        "grid-template-columns: var(--vl-list-col) minmax(0, var(--vl-viewer-fr))"
+        " var(--vl-panel-col);" in wide
+    )
     # 오른쪽 열: 견적 · 추천 구간 · 「고급 도구」로 펼치는 패널(W-46b, D100 §7b — 네 영역).
+    # 그 아래 덱(deck)이 원본 범위 타임라인이다(W-85, D145 — Final Cut의 아래 덱).
     assert (
         '"thumbs player quote" "thumbs player ranges" "thumbs player panel" "thumbs timeline'
-        ' timeline"\n    "foot foot foot"' in wide
+        ' timeline"\n    "deck deck deck" "foot foot foot"' in wide
     )
-    assert "--vl-list-col: minmax(240px, 280px);" in wide
-    assert "--vl-panel-col: minmax(280px, 320px);" in wide
+    assert "--vl-list-col: minmax(var(--vl-browser-min), var(--vl-browser-fr));" in wide
+    assert "--vl-panel-col: minmax(var(--vl-inspector-min), var(--vl-inspector-fr));" in wide
+    assert "grid-template-rows: auto minmax(0, 1fr) auto auto auto var(--vl-statusline-h);" in wide
     two = _media_block(css, "max-width: 1050px")
     # 승인 칸은 명령 줄 바로 아래(승인 단추 곁), 타임라인은 재생기 바로 아래(사용자 결정 6).
     assert (
         '"quote quote" "thumbs player" "thumbs timeline" "thumbs ranges"\n      "thumbs panel"'
-        ' "foot foot"' in two
+        ' "deck deck" "foot foot"' in two
     )
     assert "#visual-stage .vl-thumbs { max-height: none; contain: size; }" in two
     one = _media_block(css, "max-width: 860px")
     # 승인 칸 다음 영상·타임라인·추천 구간(W-46b)
-    assert '"quote" "player" "timeline" "ranges" "thumbs" "panel" "foot"' in one
+    assert '"quote" "player" "timeline" "deck" "ranges" "thumbs" "panel" "foot"' in one
     assert "#vl-quote { grid-area: quote;" in css and "#library-analysis-scope" not in css
     assert "#visual-stage .vl-cards {" in one and "display: flex; overflow: auto hidden;" in one
     assert css.index("@media (max-width: 1050px)") < css.index("@media (max-width: 860px)")

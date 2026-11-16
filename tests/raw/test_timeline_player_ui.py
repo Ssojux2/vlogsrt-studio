@@ -250,12 +250,15 @@ def test_prepare_starts_previews_only_for_missing_timeline_sources_and_needs_the
     assert asked == [("s2",)]
 
 
-def test_blocks_mount_the_player_in_the_final_edit_tab(tmp_path: Path, local_socket: None) -> None:
+def test_blocks_mount_the_player_in_the_window_deck(tmp_path: Path, local_socket: None) -> None:
+    """W-85(D145) — 재생기는 「영상 정리」 무대(`visual-stage`)의 아래 덱에 있다."""
     server, _root, _signature = _server(tmp_path)
     app = server.build_blocks()
     config = app.config
     by_elem = {c["props"].get("elem_id"): c for c in config["components"]}
     assert PLAYER_BLOCK_ID in by_elem
+    ancestors = _ancestor_elem_ids(config, by_elem[PLAYER_BLOCK_ID]["id"], by_elem)
+    assert "vl-timeline-deck" in ancestors and "visual-stage" in ancestors
     deps = config["dependencies"]
     fns = {dep["id"]: app.fns[dep["id"]].fn for dep in deps}
     views = [d for d in deps if fns[d["id"]] == server._timeline_player.view]
@@ -442,3 +445,20 @@ def test_the_cue_editor_is_not_rebuilt_by_picking_and_playback_scrolls_only_the_
     assert "keepInList(list, row)" in PLAYER_JS
     css = timeline_player.TIMELINE_PLAYER_CSS
     assert "position: relative" in css[css.index(".tl-cue-list {") :].split("}")[0]
+
+
+def _ancestor_elem_ids(config: dict[str, Any], target: int, by_elem: dict[Any, Any]) -> list[str]:
+    """그라디오 배치 나무에서 `target` 위의 elem_id들 — 가까운 것부터."""
+    names = {c["id"]: c["props"].get("elem_id") for c in config["components"]}
+
+    def walk(node: dict[str, Any], path: list[int]) -> list[int] | None:
+        if node.get("id") == target:
+            return path
+        for child in node.get("children", []):
+            found = walk(child, [*path, node["id"]] if "id" in node else path)
+            if found is not None:
+                return found
+        return None
+
+    path = walk(config["layout"], []) or []
+    return [names[i] for i in reversed(path) if names.get(i)]

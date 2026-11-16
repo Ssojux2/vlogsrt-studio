@@ -102,8 +102,11 @@ class TimelineCell:
     def build_button(self) -> None:
         self.button = gr.Button(SEND_LABEL, elem_id=SEND_ID)
 
-    def build_summary(self) -> None:
-        self.summary = gr.HTML(EMPTY_TEXT, elem_id=SUMMARY_ID, apply_default_css=False)
+    def build_summary(self, js_on_load: str | None = None) -> None:
+        """요약 칸 — `js_on_load`는 아래 덱의 실행본(화면 틱 임대, W-85)을 싣는 자리다."""
+        self.summary = gr.HTML(
+            EMPTY_TEXT, elem_id=SUMMARY_ID, apply_default_css=False, js_on_load=js_on_load
+        )
 
     def wire(self, tabs: Any, status: Any, refresh_events: tuple[Any, ...], wake_js: str) -> Any:
         """누름 → 만들기 → (탭, 요약, 활동 칸). 작업공간이 바뀌면 요약만 다시 그린다.
@@ -123,7 +126,9 @@ class TimelineCell:
         return sent
 
     def send_view(self, signature: str | None) -> tuple[Any, Any, str]:
-        """「타임라인으로 보내기」 — 작업이 끝날 때까지 기다려, 성공하면 「최종 편집」 탭으로."""
+        """「타임라인으로 보내기」 — 작업이 끝날 때까지 기다려, 성공하면 타임라인이 든 탭으로.
+
+        W-85부터 타임라인은 같은 창 아래 덱이라 「영상 정리」 그대로다."""
         closed = self.owner._library_first_reply()
         if closed is not None:
             return gr.skip(), gr.skip(), closed

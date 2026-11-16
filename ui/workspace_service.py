@@ -41,12 +41,11 @@ from fastapi.responses import (  # noqa: E402
     StreamingResponse,
 )
 
-from ui import activity_log, design_tokens, os_open, ui_facade  # noqa: E402
+from ui import activity_log, design_tokens, os_open, timer_lease_js, ui_facade  # noqa: E402
 from ui import chooser as ui_chooser  # noqa: E402
 from ui.burn_cell import BURN_JOB_LABEL, BurnCell  # noqa: E402
 from ui.final_edit_ui import (  # noqa: E402
     FINAL_EDIT_CSS,
-    FINAL_EDIT_TAB_KEY,
     REVIEW_TAB_KEY,
     FinalEditPanel,
 )
@@ -2032,6 +2031,8 @@ class RawWorkspaceUi:
         # 화면 틱 하나(W-83, D143)와 거기 실리는 처리기들 — 알림은 맨 앞이다
         # (던지면 그 틱의 다른 처리기가 돌지 않아 아무것도 쓰이지 않는다).
         self._review_timer: gr.Timer | None = None
+        self._timers_rest_button: gr.Button | None = None
+        self._timers_resume_button: gr.Button | None = None
         self._tick_parts: list[TickPart] = []
         self._toast_part: TickPart | None = None
         self._review_tab_item: gr.Tab | None = None
@@ -2040,12 +2041,13 @@ class RawWorkspaceUi:
             self, raw_service.RawWorkspaceError, raw_service.RENDER_EXPORT_JOB_KIND
         )
         self._render_export_started: Any = None
-        # 「타임라인으로 보내기」(W-71b, D126) — 렌더 없이 원본 범위 타임라인, 끝나면 「최종 편집」.
+        # 「타임라인으로 보내기」(W-71b, D126) — 렌더 없이 원본 범위 타임라인. 타임라인은 같은 창
+        # 아래 덱에 있다(W-85, D145) — 끝나도 「영상 정리」에 머문다.
         self._timeline_cell = TimelineCell(
             self,
             raw_service.RawWorkspaceError,
             raw_service.TIMELINE_EXPORT_JOB_KIND,
-            FINAL_EDIT_TAB_KEY,
+            REVIEW_TAB_KEY,
         )
         # 원본 범위 타임라인 재생기(W-71c) — 타임라인 요약 아래, 원본마다 미리보기를 튼다.
         self._timeline_player = TimelinePlayer(
@@ -4747,6 +4749,9 @@ class RawWorkspaceUi:
                 # 자막 입히기(W-65, D116)
                 self._burn_cell = BurnCell(self, raw_service.RawWorkspaceError)
                 self._burn_cell.build()
+            # 아래 덱 — 원본 범위 타임라인(W-85, D145). Final Cut의 아래 덱처럼 같은 창에 있다.
+            with gr.Column(elem_id=timer_lease_js.DECK_ID, min_width=0):
+                self._timeline_header()
 
     def _initial_workbench_values(self) -> tuple[str, str]:
         """조립 때의 (껍데기, 본문) — 미디어 주소 없는 자리표시. 페이지 로드가 곧 갈아 끼운다."""
@@ -11476,7 +11481,7 @@ class RawWorkspaceUi:
             # 탭 묶음을 드러내 둔다 — 초안 렌더가 끝나면 「최종 편집」으로 넘긴다(D117).
             with gr.Tabs(elem_id="vl-tabs") as tabs:
                 self._review_tab()
-                self._final_edit.build_tab(header=self._final_edit_header)
+                self._final_edit.build_tab()
                 self._caption_tab()
             # 오른쪽 서랍은 탭 뒤에 짓는다 — 두 탭 사이에 끼면 탭 묶음이 둘로 갈린다.
             extract_button, refresh_segment, profile_dd, analysis_plan = self._settings_drawer()
@@ -11584,10 +11589,17 @@ class RawWorkspaceUi:
             self._report_activity(sent, status)
         return app
 
-    def _final_edit_header(self) -> None:
-        """「최종 편집」 탭 머리 — 원본 범위 타임라인 요약(W-71b)과 그 재생기(W-71c)."""
-        self._timeline_cell.build_summary()
+    def _timeline_header(self) -> None:
+        """아래 덱 — 원본 범위 타임라인 요약(W-71b)과 그 재생기(W-71c), 그리고 화면 틱 임대의 숨은
+        단추 둘(W-85, D145). 임대 실행본은 요약 칸이 싣는다(새 구성요소를 늘리지 않는다)."""
+        self._timeline_cell.build_summary(js_on_load=timer_lease_js.lease_bind_js())
         self._timeline_player.build()
+        self._timers_rest_button = gr.Button(
+            visible="hidden", elem_id=timer_lease_js.REST_BUTTON_ID
+        )
+        self._timers_resume_button = gr.Button(
+            visible="hidden", elem_id=timer_lease_js.RESUME_BUTTON_ID
+        )
 
     def _wire_timer_rest(self) -> None:
         """최종 편집 탭이 앞이면 화면 틱을 멈추고 「영상 정리」로 오면 켠다(W-75, D134).
@@ -11603,6 +11615,14 @@ class RawWorkspaceUi:
         )
         for tab, gate in gates:
             tab.select(gate, None, self._review_timer, queue=False, show_progress="hidden")
+        # 같은 창 아래 덱의 임대(W-85, D145) — 덱을 만지는 동안 쉬고, 놓으면 켠다.
+        assert self._timers_rest_button is not None and self._timers_resume_button is not None
+        leases = (
+            (self._timers_rest_button, self.timers_rest),
+            (self._timers_resume_button, self.timers_resume),
+        )
+        for button, gate in leases:
+            button.click(gate, None, self._review_timer, queue=False, show_progress="hidden")
 
     @staticmethod
     def timers_rest() -> gr.Timer:

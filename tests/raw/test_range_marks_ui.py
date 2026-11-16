@@ -113,6 +113,12 @@ const typed = key('KeyO', { target: textarea });
 out.typed = { range: rangeOf(), prevented: typed.prevented };
 const modified = key('KeyI', { metaKey: true });
 out.modified = modified.prevented;
+// 제 키를 가진 칸(아래 덱의 타임라인 재생기) 안의 키는 위 재생기에 닿지 않는다(W-85, D145).
+const owned = { closest(sel) { return sel.includes('data-vl-own-keys') ? this : null; } };
+const ownedKey = key('KeyO', { target: owned });
+const ownedPlay = key('KeyL', { target: owned });
+out.owned = { prevented: ownedKey.prevented + ownedPlay.prevented, range: rangeOf(),
+  time: envR.vid.state.currentTime };
 const oKey = key('KeyO');
 out.oKey = { range: rangeOf(), prevented: oKey.prevented };
 replies.push({ ok: true, echoEpoch: 'epoch-1', message: '추천으로 표시했습니다',
@@ -232,6 +238,11 @@ def test_range_keys_respect_inputs_and_modifiers_and_send_exact_fractions(
         "prevented": 0,
     }
     assert report["modified"] == 0
+    assert report["owned"] == {
+        "prevented": 0,
+        "range": {"sourceId": "srcA", "inSec": "0", "outSec": "3"},
+        "time": 2.4,
+    }
     assert report["oKey"]["prevented"] == 1
     assert report["oKey"]["range"] == {"sourceId": "srcA", "inSec": "0", "outSec": "12/5"}
     payload = report["markKey"]["payload"]
