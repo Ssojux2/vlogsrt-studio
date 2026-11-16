@@ -3366,9 +3366,10 @@ def test_stage_layout_declared_dom_and_css() -> None:
     # 목록은 무대 높이 전체, 타임라인은 재생기와 오른쪽 열 아래를 함께 덮는다(D57 B). 오른쪽 열의
     # 맨 위(quote)는 승인 단추가 묶는 분석 견적, 그 아래가 추천 구간 목록(ranges), 그 아래가
     # 「고급 도구」로 펼치는 패널이다(W-46b, D100 §7b — 네 영역).
+    # 그 아래 덱(deck)이 원본 범위 타임라인이다(W-85, D145 — Final Cut의 아래 덱).
     assert (
         '"thumbs player quote" "thumbs player ranges" "thumbs player panel" "thumbs timeline'
-        ' timeline"\n    "foot foot foot"' in css
+        ' timeline"\n    "deck deck deck" "foot foot foot"' in css
     )
     assert "#vl-thumbs { grid-area: thumbs; }" in css
     assert "#visual-preview { grid-area: player;" in css
@@ -3382,7 +3383,8 @@ def test_stage_layout_declared_dom_and_css() -> None:
     # 먼저, 목록·패널·상태 줄(사용자 결정 6 · D57 B).
     mobile = css.index("@media (max-width: 860px)")
     assert (
-        css.index('"quote" "player" "timeline" "ranges" "thumbs" "panel" "foot"', mobile) > mobile
+        css.index('"quote" "player" "timeline" "deck" "ranges" "thumbs" "panel" "foot"', mobile)
+        > mobile
     )
     assert "grid-template-columns: minmax(0, 1fr)" in css[mobile:]
     # 색은 작업대 토큰(D57) — 밝은·어두운 두 벌이 같은 이름을 쓴다. 본점(강조)은 하나다.
@@ -3437,7 +3439,11 @@ def test_stage_layout_has_no_fixed_list_width_or_inner_overflow() -> None:
     마지막에 이기던 구조라 치수는 한 블록에만 둔다.
     """
     css = ui_facade.WORKBENCH_CSS
-    assert "grid-template-columns: var(--vl-list-col) minmax(0, 1fr) var(--vl-panel-col);" in css
+    # 가운데 열은 Final Cut 위 덱 비율 토큰(W-85, D145) — 여전히 minmax(0, …)라 줄어든다.
+    assert (
+        "grid-template-columns: var(--vl-list-col) minmax(0, var(--vl-viewer-fr))"
+        " var(--vl-panel-col);" in css
+    )
     assert "height: max(var(--vl-stage-min-h), calc(100vh - var(--vl-stage-top)));" in css
     assert "grid-template-columns: minmax(0, 1fr); align-content: start" in css
     for stale in (
