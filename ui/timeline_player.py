@@ -23,6 +23,7 @@ import gradio as gr
 
 from ui import platform_keys
 from ui.caption_grid_js import CAPTION_GRID_JS
+from ui.caption_lane_js import CAPTION_LANE_JS
 from ui.final_edit_ui import JOB_ENDED, RELOAD_ID
 from ui.timeline_edit_js import TIMELINE_CORE_JS
 from ui.timeline_player_js import PLAYER_APP_JS
@@ -32,7 +33,7 @@ PLAYER_ROOT_ID = "tl-root"
 TAB_LABEL = "원본 범위 타임라인"
 BURN_NONE = "none"
 """「번인 캡션: 없음」 — 예전 렌더 그대로(`timeline_share.BURN_NONE`과 같다, 시험이 대조한다)."""
-PLAYER_JS = TIMELINE_CORE_JS + CAPTION_GRID_JS + PLAYER_APP_JS
+PLAYER_JS = TIMELINE_CORE_JS + CAPTION_GRID_JS + CAPTION_LANE_JS + PLAYER_APP_JS
 READY = "ready"
 
 
@@ -164,6 +165,10 @@ def _cue_panel_html() -> str:
         '<span id="tl-cue-count" class="tl-cue-count"></span><span class="tl-gap"></span>'
         '<button type="button" data-tl="cue-insert"'
         ' title="플레이헤드에 빈 자막 넣기 (⌥C)">새 자막 ⌥C</button></div>'
+        '<canvas id="tl-lane" class="tl-lane" tabindex="-1"'
+        ' aria-label="파형 자막 레인 — 블록을 끌어 시각을 고치고,'
+        ' 빈 곳을 끌어 새 선택(Enter로 넣기)">'
+        "</canvas>"
         '<div class="tl-cues-body"><div id="tl-cue-list" class="tl-cue-list" role="listbox"'
         ' aria-label="보이는 자막 — 누르면 고르고 그 시작으로 간다"></div>'
         '<div id="tl-cue-edit" class="tl-cue-edit"></div></div></div>'
@@ -238,6 +243,8 @@ TIMELINE_PLAYER_CSS = """
   cursor: pointer; border: 1px solid var(--vl-line-strong); background: var(--vl-surface-raised);
   color: var(--vl-ink); }
 .tl-cues button:disabled { opacity: 0.5; cursor: default; }
+.tl-lane { display: block; width: 100%; height: 96px; border-radius: 6px;
+  touch-action: none; }
 .tl-cues-body { display: flex; gap: 8px; align-items: stretch; }
 .tl-cue-list { position: relative; flex: 1 1 60%; min-width: 0; max-height: 260px;
   overflow-y: auto;
@@ -342,7 +349,10 @@ class TimelinePlayer:
         def tl_job(payload: dict[str, object]) -> dict[str, object]:
             return self.action(payload, "job")
 
-        return [tl_media, tl_prepare, tl_save, tl_render, tl_tiers, tl_add_source, tl_job]
+        def tl_wave(payload: dict[str, object]) -> dict[str, object]:
+            return self.action(payload, "wave")
+
+        return [tl_media, tl_prepare, tl_save, tl_render, tl_tiers, tl_add_source, tl_job, tl_wave]
 
     def action(self, payload: dict[str, object], kind: str) -> dict[str, object]:
         """어떤 예외도 500이 아니라 값으로 돌아간다. 준비·저장·렌더는 서명·수명 토큰에 묶인다."""
@@ -367,6 +377,10 @@ class TimelinePlayer:
                 return self._add(root, timeline_id, payload)
             if kind == "job":
                 return self._job(root, payload)
+            if kind == "wave":
+                source_id = owner._serve_str(payload, "sourceId")
+                wave = owner.raw.timeline_waveform(root, source_id)
+                return {"ok": True, "sourceId": source_id, "wave": wave}
             if kind == "tiers":
                 source_id = owner._serve_str(payload, "sourceId")
                 tiers = owner.raw.timeline_tiers(root, [source_id])

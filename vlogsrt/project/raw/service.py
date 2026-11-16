@@ -4146,6 +4146,12 @@ class RawWorkspaceService:
             }
         return {"timelineId": timeline, "sources": sources}
 
+    def timeline_waveform(self, root: Path, source_id: str) -> dict[str, Any]:
+        """원본 하나의 파형(W-87b) — 자막 레인이 그린다. 처음 한 번 재고 캐시한다(무료 로컬)."""
+        from vlogsrt.project.raw import source_waveform
+
+        return source_waveform.waveform(self._workspace(root), source_id)
+
     def timeline_tiers(self, root: Path, source_ids: Sequence[str]) -> dict[str, list[list[str]]]:
         """원본마다 등급 구간 [시작 초, 끝 초, 등급](원본 시계, 원점 0) — 범위 조정의 띠(W-71d).
 

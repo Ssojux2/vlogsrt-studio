@@ -14,6 +14,7 @@ PLAYER_APP_JS = r"""
   var W = window;
   var TL = W.__vlTL;
   var CG = W.__vlCaptionGrid;
+  var LN = W.__vlCaptionLane;
   var S = W.__vlTimelinePlayer;
   if (!S) {
     S = W.__vlTimelinePlayer = { epoch: null, doc: null, spans: [], total: 0, playhead: 0, span: 0,
@@ -334,7 +335,9 @@ PLAYER_APP_JS = r"""
     return two(Math.floor(seconds / 3600)) + ":" + two(Math.floor(seconds / 60) % 60) + ":" +
       two(seconds % 60) + ":" + two(frame % fps);
   }
-  function paint() { paintTransport(); paintMissing(); paintPlayhead(); paintCues(); }
+  function paint() {
+    paintTransport(); paintMissing(); paintPlayhead(); paintCues(); requestLane();
+  }
   function relayout() {
     S.spans = TL.layout(S.doc);
     S.total = TL.editedFrames(S.doc);
@@ -396,6 +399,7 @@ PLAYER_APP_JS = r"""
     if (overlay) { overlay.textContent = cueText(); }
     paintStrip();
     paintCueFollow();
+    requestLane();
   }
   function cueText() {
     var t = S.playhead * TL.sequenceFrameTicks(S.doc.facts);
@@ -1015,6 +1019,256 @@ PLAYER_APP_JS = r"""
       esc(label) + "</button>";
   }
 
+
+  // ─── 파형 자막 레인(W-87b, D149) ───────────────────────────────────
+  // Subtitle Edit 파형 조작: 누름 = 그 자리로 · 블록 고름 / 가장자리 끌기 = 시작·끝 /
+  // 몸통 끌기 = 옮김 / 빈 곳 끌기 = 새 선택(Enter 넣기 · Esc 취소) / ⇧누름 = 시작 ·
+  // ⌘(Ctrl)누름 = 끝 · ⌥누름 = 길이째 옮김 / 휠 = 앞뒤로 · ⌥(⌘)휠 = 확대.
+  // 틱 고르기는 순수 `LN`, 문서 고침은 `TL` 연산 하나씩(규칙 3).
+  function laneCanvas() { return $("tl-lane"); }
+  function laneRate() { return TL.tickRate(S.doc.facts); }
+  function laneTotal() { return S.total * seqTicks(); }
+  function laneView() {
+    if (!S.lane) { S.lane = { start: 0, tpp: laneRate() / S.settings.lanePxPerS }; }
+    return S.lane;
+  }
+  function laneMinGap() { return S.settings.minGapMs * TL.msTicks(S.doc.facts); }
+  function laneSnaps() {
+    var cuts = S.spans.map(function (span) { return span.outStart * seqTicks(); });
+    return cuts.concat([laneTotal()]);
+  }
+  function rawCue(id) { return S.doc.cues.filter(function (row) { return row[0] === id; })[0]; }
+  function requestLane() {
+    if (S.lanePending) { return; }
+    S.lanePending = true;
+    W.requestAnimationFrame(function () { S.lanePending = false; paintLane(); });
+  }
+  function askWave(sourceId) {
+    S.waves = S.waves || {};
+    if (S.waves[sourceId]) { return; }
+    S.waves[sourceId] = "pending";
+    S.server.tl_wave({ signature: S.signature, sourceId: sourceId }).then(function (got) {
+      if (!got || !got.ok) { S.waves[sourceId] = "error"; return; }
+      var raw = W.atob(got.wave.peaks_b64);
+      var peaks = new Uint8Array(raw.length);
+      for (var i = 0; i < raw.length; i += 1) { peaks[i] = raw.charCodeAt(i); }
+      S.waves[sourceId] = { binMs: got.wave.bin_ms, peaks: peaks };
+      requestLane();
+    });
+  }
+  function paintLane() {
+    var c = laneCanvas();
+    if (!c || !S.doc || !S.spans.length) { return; }
+    var width = c.clientWidth;
+    var height = c.clientHeight;
+    var ratio = W.devicePixelRatio || 1;
+    if (c.width !== Math.round(width * ratio)) { c.width = Math.round(width * ratio); }
+    if (c.height !== Math.round(height * ratio)) { c.height = Math.round(height * ratio); }
+    var ctx = c.getContext("2d");
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    var head = S.playhead * seqTicks();
+    if (S.playing) { S.lane = LN.follow(laneView(), head, width); }
+    var view = laneView();
+    ctx.fillStyle = cssVar("--vl-surface-sunken");
+    ctx.fillRect(0, 0, width, height);
+    paintLaneWave(ctx, view, width, height);
+    paintLaneCues(ctx, view, height);
+    if (S.laneSel) {
+      ctx.fillStyle = cssVar("--vl-accent-soft");
+      var a = LN.x(view, S.laneSel[0]);
+      ctx.fillRect(a, 0, LN.x(view, S.laneSel[1]) - a, height);
+    }
+    var ph = LN.x(view, head);
+    ctx.fillStyle = cssVar("--vl-playhead");
+    ctx.fillRect(Math.round(ph), 0, 1, height);
+  }
+  function paintLaneWave(ctx, view, width, height) {
+    var unit = TL.msTicks(S.doc.facts);
+    var mid = height / 2;
+    ctx.fillStyle = cssVar("--vl-ink-faint");
+    TL.tickSpans(S.doc).forEach(function (row) {
+      var x0 = Math.max(0, Math.floor(LN.x(view, row[3])));
+      var x1 = Math.min(width, Math.ceil(LN.x(view, row[4])));
+      if (x1 <= 0 || x0 >= width) { return; }
+      ctx.fillRect(Math.round(LN.x(view, row[3])), 0, 1, height);  // 컷
+      var wave = (S.waves || {})[row[0]];
+      if (!wave) { askWave(row[0]); return; }
+      if (!wave.peaks) { return; }
+      for (var x = x0; x < x1; x += 1) {
+        var ms = (row[1] + LN.ticksAt(view, x) - row[3]) / unit;
+        var amp = (wave.peaks[Math.floor(ms / wave.binMs)] || 0) / 255;
+        var h = Math.max(1, amp * (height - 4));
+        ctx.fillRect(x, mid - h / 2, 1, h);
+      }
+    });
+  }
+  function paintLaneCues(ctx, view, height) {
+    var rows = captionRows();
+    var drag = S.laneDrag;
+    S.proj.cues.forEach(function (cue, index) {
+      var start = cue[2];
+      var end = cue[3];
+      if (drag && drag.moved && drag.index === index) {
+        if (drag.part === "start") { start = drag.value; }
+        else if (drag.part === "end") { end = drag.value; }
+        else if (drag.part === "body") { start += drag.value; end += drag.value; }
+      }
+      var xs = LN.x(view, start);
+      var xe = LN.x(view, end);
+      var row = rows[index];
+      ctx.globalAlpha = 0.55;
+      ctx.fillStyle = cssVar(cue[0] === S.cue ? "--vl-accent" : "--vl-caption-chip");
+      ctx.fillRect(xs, 2, Math.max(1, xe - xs), height - 4);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = cssVar("--vl-tier-green-ink");
+      ctx.fillRect(xs, 2, 2, height - 4);
+      ctx.fillStyle = cssVar("--vl-danger");
+      ctx.fillRect(xe - 2, 2, 2, height - 4);
+      if (xe - xs > 40) {
+        ctx.fillStyle = cssVar("--vl-ink");
+        ctx.font = "11px " + cssVar("--vl-font-sans");
+        ctx.fillText("#" + row.n + " " + row.seconds.toFixed(2) + "초" +
+          (row.cps === null ? "" : " · " + row.cps.toFixed(1)), xs + 5, 14, xe - xs - 8);
+        ctx.fillText(CG.oneLine(cue[4]), xs + 5, height - 8, xe - xs - 8);
+      }
+    });
+  }
+  function laneX(ev) { return ev.clientX - laneCanvas().getBoundingClientRect().left; }
+  function frameAtTicks(ticks) {
+    return clamp(Math.floor(ticks / seqTicks()), 0, Math.max(0, S.total - 1));
+  }
+  function onLaneDown(ev) {
+    if (!S.doc || !S.spans.length) { return; }
+    commitText();
+    var view = laneView();
+    var x = laneX(ev);
+    var ticks = clamp(LN.ticksAt(view, x), 0, laneTotal());
+    var mod = ev.metaKey || ev.ctrlKey;
+    var target = S.cue || targetCue();
+    if (S.rootEl) { S.rootEl.focus({ preventScroll: true }); }
+    if (ev.shiftKey && !mod && target) {
+      cueOp("start", target, undefined, frameAtTicks(ticks));
+      return;
+    }
+    if (mod && !ev.shiftKey && target) {
+      cueOp("end", target, undefined, frameAtTicks(ticks));
+      return;
+    }
+    if (ev.altKey && target) { laneShiftTo(target, ticks); return; }
+    var hit = LN.hit(S.proj.cues, view, x, S.settings.snapPx);
+    if (S.playing) { stopPlayback(); }
+    S.laneSel = null;
+    if (hit) { S.cue = hit.id; }
+    seek(frameAtTicks(ticks));
+    S.laneDrag = { index: hit ? hit.index : -1, id: hit ? hit.id : null,
+      part: hit ? hit.part : "new", origin: ticks, x: x, moved: false, value: null };
+    laneCanvas().setPointerCapture(ev.pointerId);
+    paintCues();
+    requestLane();
+  }
+  function onLaneMove(ev) {
+    var c = laneCanvas();
+    var view = laneView();
+    var x = laneX(ev);
+    var drag = S.laneDrag;
+    if (!drag) {
+      var hover = LN.hit(S.proj ? S.proj.cues : [], view, x, S.settings.snapPx);
+      c.style.cursor = !hover ? "default" : (hover.part === "body" ? "grab" : "ew-resize");
+      return;
+    }
+    if (Math.abs(x - drag.x) < 2 && !drag.moved) { return; }
+    drag.moved = true;
+    var ticks = clamp(LN.ticksAt(view, x), 0, laneTotal());
+    var cues = S.proj.cues;
+    if (drag.part === "start" || drag.part === "end") {
+      var snapped = ev.shiftKey ? ticks : LN.snap(ticks, laneSnaps(), S.settings.snapPx * view.tpp);
+      drag.value = LN.edge(cues, drag.index, drag.part, snapped, laneMinGap(), seqTicks(),
+        laneTotal());
+    } else if (drag.part === "body") {
+      drag.value = LN.body(cues, drag.index, ticks - drag.origin, laneMinGap(), laneTotal());
+    } else {
+      drag.value = LN.range(drag.origin, ticks, laneTotal());
+      S.laneSel = drag.value;
+    }
+    requestLane();
+  }
+  function onLaneUp() {
+    var drag = S.laneDrag;
+    S.laneDrag = null;
+    if (!drag || !drag.moved || drag.value === null) { requestLane(); return; }
+    if (drag.part === "new") {
+      say("새 선택 — Enter로 이 구간에 새 자막을 넣고 Esc로 취소합니다.", false);
+      requestLane();
+      return;
+    }
+    if (drag.part === "body") { laneShift(drag.id, drag.value, "자막 옮기기"); return; }
+    laneSetEdge(drag.id, drag.part, drag.value);
+  }
+  function laneEdit(label, build) {
+    try {
+      var next = build();
+      change(next, label);
+      paint();
+    } catch (error) {
+      if (!TL.isError(error)) { throw error; }
+      say(label + " — 하지 못했습니다: " + error.message, true);
+      requestLane();
+    }
+  }
+  function laneSetEdge(id, part, ticks) {
+    laneEdit(part === "start" ? "자막 시작(파형)" : "자막 끝(파형)", function () {
+      var cue = rawCue(id);
+      var at = TL.sourceMsAt(S.doc, ticks, part === "start" ? TL.SIDE_START : TL.SIDE_END);
+      if (at[0] !== cue[1]) {
+        throw { tlError: true, message: "그 자리는 이 자막의 원본이 아니다" };
+      }
+      return TL.cueSetTimes(S.doc, id, part === "start" ? at[1] : cue[2],
+        part === "start" ? cue[3] : at[1]);
+    });
+  }
+  function laneShift(id, deltaTicks, label) {
+    laneEdit(label, function () {
+      return TL.cueShift(S.doc, id, Math.round(deltaTicks / TL.msTicks(S.doc.facts)));
+    });
+  }
+  // ⌥누름 — 고른 자막을 길이째 옮겨 그 자리에서 시작하게(이웃·간격 안으로).
+  function laneShiftTo(id, ticks) {
+    var index = S.proj.cues.map(function (cue) { return cue[0]; }).indexOf(id);
+    if (index < 0) { say("컷에 가려진 자막은 옮기지 않습니다.", true); return; }
+    var delta = LN.body(S.proj.cues, index, ticks - S.proj.cues[index][2], laneMinGap(),
+      laneTotal());
+    laneShift(id, delta, "자막 옮기기(⌥)");
+  }
+  // Enter — 새 선택 구간에 빈 자막을 넣고 글 칸으로(같은 원본 안에서만 — 문서 연산이 가른다).
+  function insertSelection() {
+    var sel = S.laneSel;
+    S.laneSel = null;
+    var id = "n" + S.doc.nextCue;
+    laneEdit("새 자막(파형)", function () {
+      var a = TL.sourceMsAt(S.doc, sel[0], TL.SIDE_START);
+      var b = TL.sourceMsAt(S.doc, sel[1], TL.SIDE_END);
+      if (a[0] !== b[0]) { throw { tlError: true, message: "선택이 두 원본에 걸쳐 있다" }; }
+      return TL.cueInsert(S.doc, a[0], a[1], b[1], "");
+    });
+    if (rawCue(id)) { S.cue = id; paintCues(); focusCueText(); }
+  }
+  function onLaneWheel(ev) {
+    if (!S.doc) { return; }
+    ev.preventDefault();
+    var view = laneView();
+    if (ev.altKey || ev.ctrlKey || ev.metaKey) {
+      var rate = laneRate();
+      var factor = LN.wheelFactor(ev.deltaY, ev.deltaMode, S.settings.zoomStepPercent,
+        S.settings.wheelZoomNotchPx);
+      S.lane = LN.zoom(view, factor, laneX(ev), rate / S.settings.zoomMaxPxPerS,
+        rate / S.settings.zoomMinPxPerS);
+    } else {
+      var delta = Math.abs(ev.deltaX) > Math.abs(ev.deltaY) ? ev.deltaX : ev.deltaY;
+      S.lane = { start: view.start + delta * view.tpp, tpp: view.tpp };
+    }
+    requestLane();
+  }
+
   // ─── 렌더(W-71e): 저장된 리비전 그대로 원본에서 한 번 ──────────
   // 저장 대기 편집을 먼저 보내고, 저장이 끝난 리비전을 이름으로 건다 — 서버는 다른 리비전이면
   // 렌더하지 않는다. 결과는 초안과 같은 폴더라 결과 카드·영어 변환·자막 입히기가 그대로 쓴다.
@@ -1144,6 +1398,12 @@ PLAYER_APP_JS = r"""
       return;
     }
     if (editable(ev.target)) { return; }
+    if (S.laneSel && !mod && !ev.altKey && (ev.code === "Enter" || ev.code === "Escape")) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (ev.code === "Enter") { insertSelection(); } else { S.laneSel = null; requestLane(); }
+      return;
+    }
     var special = cueKey(ev, mod);
     if (special) {
       // 자막 키가 먼저다(아래 클립 키와 겹치는 것은 ⌫ 하나 — 고른 자막이 있을 때만 자막).
@@ -1287,6 +1547,16 @@ PLAYER_APP_JS = r"""
       c.__tlBound = true;
       c.addEventListener("pointerdown", onStripDown);
       if (W.ResizeObserver) { new W.ResizeObserver(paintStrip).observe(c); }
+    }
+    var lane = laneCanvas();
+    if (lane && !lane.__tlBound) {
+      lane.__tlBound = true;
+      lane.addEventListener("pointerdown", onLaneDown);
+      lane.addEventListener("pointermove", onLaneMove);
+      lane.addEventListener("pointerup", onLaneUp);
+      lane.addEventListener("pointercancel", onLaneUp);
+      lane.addEventListener("wheel", onLaneWheel, { passive: false });
+      if (W.ResizeObserver) { new W.ResizeObserver(requestLane).observe(lane); }
     }
     var list = $("tl-cue-list");
     if (list && !list.__tlBound) {
