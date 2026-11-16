@@ -212,7 +212,7 @@ Final Cut 전체 타임라인(D44·D45·D56). 플러그인은 제거됐다. 계�
 | W-89 | 재생기 키 표 하나(D154) — `ui/keymap.py` 한 표(창 `any`·`timeline`·`captions`) · 순수 `__vlKeys.match`(수식키 정확 · Mod = ⌘/Ctrl · 글 칸은 `inText` 줄만) · 마지막으로 누른 창이 정한다(⌫ 자막 창 = 줄 · 타임라인 창 = 클립 · A·D·S·T·Enter는 자막 창) · `,`·`.`(⇧ 10) 고른 줄 프레임 밀기(시작점 설정과 같은 프레임 규칙) · 표에서 짓는 단축키 시트 · 시험 `test_keymap` | ✅ 2026-11-16 (🧑 키 측정 뒤 표만 고친다 · 영어 칸 직접 편집은 결정) |
 | W-90 | 어두움 짝을 Final Cut 보라 쪽으로(`design_tokens.py`만) — 어두운 `accent` #645FF0(흰 글자 4.73:1 — FCP #706BFF는 4.01:1이라 한 단 짙게) · `accent-hover` #5852E0 · `accent-ink` #A9A6FF(모든 바탕 ≥ 5.26:1) · `accent-soft` #25234A · 밝은 짝 그대로 · 대비 기준 그대로 · 시험 `test_workbench_theme`(본점이 테마마다 하나) | ✅ 2026-11-16 (보이는 창의 느낌 🧑) |
 | W-91 | 초안 편집(D117)·숨은 「자막」 탭 은퇴 + W-32(D150) | 📋 |
-| P-1 | 성능 4-2 창 payload 한 번 짓기 | 📋 |
+| P-1 | 창 요청 신원 한 번 재기(성능 4-2, D155) — 한 원본의 분석 꼬리(`_finish_source`) 동안만 창마다 잰 신원 sha · 공식 단가 상한을 기억(`request_identity_scope`, 열쇠 = 모델 · 증거 값 · 설정 · 파일마다 크기·mtime·inode) · 본문은 기억하지 않고 물을 일꾼이 그때 짓는다 · 전송 문은 기억을 쓰지 않는다 · 창마다 짓기 5 → 2(재사용 창 1) · 합성 12 MB 클립 실행 480 → 287 ms/창, 최대 RSS 689 → 466 MB · 시험 `test_request_identity_scope` | ✅ 2026-11-16 |
 | P-2 | 성능 4-6 일괄 승인 `unanalyzed` upsert O(N²) → 한 행 · 영어 묶음 병렬은 `srt_english.py` 기준으로 다시 본다 | 📋 |
 | P-3 | 성능 3-5 미리보기·렌더 디코드 `-hwaccel`(macOS만)과 실패 기억 | 📋 |
 | P-4 | 성능 4-4 1단계 동안 Gemini 클립 미리 인코드(「전사만」 제외) | 📋 |

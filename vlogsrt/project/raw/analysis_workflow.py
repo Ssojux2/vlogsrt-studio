@@ -24,17 +24,18 @@ Luna 판정 → **비디오 격자 조정** → 불변 문서 기록.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import inspect
 import json
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from datetime import date as date_type
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, ParamSpec, Protocol, TypeVar, cast
 
 from vlogsrt import log, oscompat, preprocess
 from vlogsrt.project.raw import asr_epoch as asr_epoch_store
@@ -2012,6 +2013,23 @@ def _window_clips(
     return clips
 
 
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _identity_scoped(run: Callable[_P, _R]) -> Callable[_P, _R]:
+    """한 원본의 분석 꼬리 동안 창 요청 신원을 한 번 잰다(D155) — 판정 캐시 찾기 · 응답자 공장 ·
+    문맥 · 판정 단계가 같은 창의 본문을 다시 짓지 않는다. 기억은 이 호출이 끝나면 사라진다."""
+
+    @functools.wraps(run)
+    def scoped(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        with luna.request_identity_scope():
+            return run(*args, **kwargs)
+
+    return scoped
+
+
+@_identity_scoped
 def _finish_source(
     context: JobContext,
     workspace: RawWorkspace,
@@ -2075,8 +2093,7 @@ def _finish_source(
     cache_dir.mkdir(parents=True, exist_ok=True)
     cached_annotations = {}
     for evidence in evidence_windows:
-        payload = luna.build_semantic_payload(evidence, settings, workflow.models.luna_model)
-        digest = luna.luna_request_sha256(workflow.models.luna_model, payload)
+        digest = luna.semantic_request_sha256(evidence, settings, workflow.models.luna_model)
         candidate = cache_dir / (digest + ".json")
         if candidate.is_file():
             try:

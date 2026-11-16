@@ -128,7 +128,7 @@
    - `CountingReservationGate`(`:1421`)에 잠금을 둔다.
    - 공급자별 동시 호출 세마포어 `RawProviderConcurrency`를 `RawAnalysisConcurrency` 옆에 두고 기본값을 정한다. **1이면 직렬과 바이트가 같다**는 시험을 둔다.
    - 승인된 창 수·요청 신원·비용은 그대로다.
-2. **창 payload를 다섯 번 짓던 것을 한 번으로** (`understanding_luna.py:379`, `analysis_workflow.py:2077`) — 창마다 `(sha, cost bound)`를 한 번 재서 다시 쓰고, 보내기 직전에 한 번만 직렬화한다. GIL을 덜 잡아 다른 영상 스레드와 UI도 덜 막는다.
+2. **창 payload를 다섯 번 짓던 것을 한 번으로** — **했다(P-1, D155: 재기는 한 번 · 보낼 때 한 번, 480 → 287 ms/창)** (`understanding_luna.py:379`, `analysis_workflow.py:2077`) — 창마다 `(sha, cost bound)`를 한 번 재서 다시 쓰고, 보내기 직전에 한 번만 직렬화한다. GIL을 덜 잡아 다른 영상 스레드와 UI도 덜 막는다.
 3. **1단계 청크 병렬** (`understanding.py:407`) — 같은 세마포어를 쓰고 `CountingAsrGate`(`analysis_workflow.py:463`)에 잠금을 둔다. 규칙 6은 그대로다(프롬프트를 더하지 않는다).
 4. **클립 선인코드를 1단계 동안 하기** — 창 격자가 고정 폭이라 PCM 직후 범위를 안다.
    - 「전사만」 범위의 승인에서는 하지 않는다. 그 클립은 버리게 된다.
