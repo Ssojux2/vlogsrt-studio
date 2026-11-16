@@ -137,8 +137,14 @@ def test_the_clip_edit_buttons_are_on_the_page_and_every_button_has_a_handler() 
         assert re.search(rf'(^|[\s{{,])"?{re.escape(action)}"?: function', PLAYER_JS, re.M) or (
             re.search(rf'(^|[\s{{,])"?{re.escape(action)}"?: [A-Za-z]+[,}} ]', PLAYER_JS, re.M)
         ), action
-    assert 'clipOp("blade")' in PLAYER_JS and 'ev.code === "KeyB"' in PLAYER_JS
-    assert 'ev.code === "Backspace"' in PLAYER_JS and 'ev.code === "Delete"' in PLAYER_JS
+    # 키는 표 하나(W-89, D154) — ⌘B 블레이드 · ⌫/⌦ 삭제는 타임라인 창의 줄이다.
+    from ui.keymap import PLAYER_KEYMAP
+
+    clip_keys = {(k.code, k.mod, k.action) for k in PLAYER_KEYMAP if k.pane == "timeline"}
+    assert ("KeyB", True, "blade") in clip_keys
+    assert {("Backspace", False, "delete-clip"), ("Delete", False, "delete-clip")} <= clip_keys
+    assert 'blade: function () { clipOp("blade"); }' in PLAYER_JS
+    assert '"delete-clip": function () { clipOp("delete"); }' in PLAYER_JS
 
 
 def test_the_cue_panel_is_on_the_page_and_its_buttons_have_handlers() -> None:
@@ -155,13 +161,23 @@ def test_the_cue_panel_is_on_the_page_and_its_buttons_have_handlers() -> None:
 
 
 def test_the_cue_keys_follow_the_draft_editor_and_delete_prefers_a_picked_cue() -> None:
-    """D117과 같은 글자([ ] ⇧B ⇧M ⌥C ⌥↑↓ Enter) — ⌫는 고른 자막이 있을 때만 자막을 지운다."""
+    """D117과 같은 글자([ ] ⇧B ⇧M ⌥C ⌥↑↓ Enter) — 재생기 표(W-89, D154)의 같은 동작이다.
+    ⌫는 자막 창에서 고른 자막이 있을 때만 자막을 지우고(없으면 할 일이 없다 — 클립을 지우지 않는다),
+    타임라인 창에서는 클립을 지운다."""
+    from ui.keymap import PLAYER_KEYMAP
+
     keys = {key.action: key.code for key in KEYMAP}
     assert keys["cue-start"] == "BracketLeft" and keys["cue-end"] == "BracketRight"
-    for code in ("BracketLeft", "BracketRight", "KeyB", "KeyM", "KeyC", "ArrowUp", "ArrowDown"):
-        assert f'ev.code === "{code}") {{ return function () {{' in PLAYER_JS, code
-    assert 'plain && S.cue && (ev.code === "Delete" || ev.code === "Backspace")' in PLAYER_JS
-    assert PLAYER_JS.index("var special = cueKey(ev, mod);") < PLAYER_JS.index('clipOp("delete")')
+    player = {(k.code, k.shift, k.alt, k.mod): k.action for k in PLAYER_KEYMAP if k.pane == "any"}
+    assert player[("BracketLeft", False, False, False)] == "cue-start"
+    assert player[("BracketRight", False, False, False)] == "cue-end"
+    assert player[("KeyB", True, False, False)] == "cue-split"
+    assert player[("KeyM", True, False, False)] == "cue-merge"
+    assert player[("KeyC", False, True, False)] == "cue-insert"
+    assert player[("ArrowUp", False, True, False)] == "prev-cue"
+    assert player[("ArrowDown", False, True, False)] == "next-cue"
+    delete = PLAYER_JS[PLAYER_JS.index('"delete-cue": function () {') :][:240]
+    assert "if (!S.cue) { return false; }" in delete and 'cueOp("delete", S.cue);' in delete
 
 
 def test_an_unconfirmed_cue_text_is_committed_before_saving_rendering_adding_or_hiding() -> None:

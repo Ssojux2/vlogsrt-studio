@@ -80,23 +80,36 @@ def test_the_grid_rides_with_the_player_and_never_moves_time() -> None:
 
 def test_subtitle_edit_keys_reach_the_document_operations() -> None:
     """A·F11 시작 · D·F12 끝 · S 나누기 · T·⌘T 입력칸 · F8·⇧F8 경고 줄 · ⌘⇧E 늘리기 · ⌘⇧M 합치기."""
+    # 키는 재생기 표 하나(W-89, D154) — 같은 키가 같은 동작 이름에 닿고, 동작이 문서 연산을 부른다.
+    from ui.keymap import PLAYER_KEYMAP
+
     js = PLAYER_APP_JS
-    assert (
-        '(ev.code === "KeyA" || ev.code === "F11")) {\n      return function () { cueOp("start"); }'
-        in js
-    )
-    assert (
-        '(ev.code === "KeyD" || ev.code === "F12")) {\n      return function () { cueOp("end"); }'
-        in js
-    )
-    assert 'plain && ev.code === "KeyS") { return function () { cueOp("split"); }; }' in js
-    assert (
-        'ev.code === "F8") {\n      return function () { stepError(ev.shiftKey ? -1 : 1); }' in js
-    )
-    assert 'if (modShift && ev.code === "KeyE") { return extendToNext; }' in js
-    assert 'if (modShift && ev.code === "KeyM") { return function () { cueOp("merge"); }; }' in js
-    assert 'var textKey = plain && ev.code === "KeyT";' in js
-    assert '(mod && (ev.code === "Enter" || ev.code === "KeyT"))' in js
+    rows = {(k.code, k.mod, k.shift): (k.action, k.pane) for k in PLAYER_KEYMAP if not k.in_text}
+    assert rows[("KeyA", False, False)] == ("cue-start", "captions")
+    assert rows[("F11", False, False)] == ("cue-start", "captions")
+    assert rows[("KeyD", False, False)] == ("cue-end", "captions")
+    assert rows[("F12", False, False)] == ("cue-end", "captions")
+    assert rows[("KeyS", False, False)] == ("cue-split", "captions")
+    assert rows[("KeyT", False, False)] == ("edit-text", "captions")
+    assert rows[("KeyT", True, False)] == ("edit-text", "captions")
+    assert rows[("F8", False, False)] == ("next-error", "any")
+    assert rows[("F8", False, True)] == ("prev-error", "any")
+    assert rows[("KeyE", True, True)] == ("cue-extend", "captions")
+    assert rows[("KeyM", True, True)] == ("cue-merge", "captions")
+    in_text = {(k.code, k.mod): k.action for k in PLAYER_KEYMAP if k.in_text}
+    assert in_text[("Escape", False)] == in_text[("Enter", True)] == "leave-text"
+    assert in_text[("KeyT", True)] == "leave-text"
+    for wiring in (
+        '"cue-start": function () { cueOp("start"); }',
+        '"cue-end": function () { cueOp("end"); }',
+        '"cue-split": function () { cueOp("split"); }',
+        '"cue-merge": function () { cueOp("merge"); }',
+        '"cue-extend": extendToNext',
+        '"next-error": function () { stepError(1); }',
+        '"prev-error": function () { stepError(-1); }',
+        '"leave-text": leaveText',
+    ):
+        assert wiring in js, wiring
     # 다음 줄까지 늘리기 · 입력칸 시각은 플레이헤드 대신 그 프레임을 문서 연산에 넘긴다.
     assert 'cueOp("end", id, undefined, Math.floor(next[2] / seqTicks()));' in js
     assert 'cueOp(input.getAttribute("data-side"), id, undefined, frame);' in js

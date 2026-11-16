@@ -15,6 +15,7 @@ PLAYER_APP_JS = r"""
   var TL = W.__vlTL;
   var CG = W.__vlCaptionGrid;
   var LN = W.__vlCaptionLane;
+  var KEYS = W.__vlKeys;
   var S = W.__vlTimelinePlayer;
   if (!S) {
     S = W.__vlTimelinePlayer = { epoch: null, doc: null, spans: [], total: 0, playhead: 0, span: 0,
@@ -1610,105 +1611,129 @@ PLAYER_APP_JS = r"""
     return !!target && (target.isContentEditable ||
       /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName || ""));
   }
+  // 키는 표 하나(`ui/keymap.py`, W-89 · D154) — 키를 받은 칸이 든 창(없으면 마지막으로 누른 창)이
+  // 줄을 고른다. 동작이 false를 돌려주면(할 일이 없다) 기본 동작을 막지 않는다.
+  function paneOf(target) {
+    if (!target || typeof target.closest !== "function") { return null; }
+    if (target.closest(".tl-cues, .tl-cues-body")) { return "captions"; }
+    if (target.closest("#tl-index-list")) {
+      return indexState().tab === "cues" ? "captions" : "timeline";
+    }
+    if (target.closest(".tl-strip, .tl-range, .tl-transport, .tl-stage")) { return "timeline"; }
+    return null;
+  }
+  function notePane(ev) {
+    var pane = paneOf(ev.target);
+    if (pane && pane !== S.pane) {
+      S.pane = pane;
+      if (S.rootEl) { S.rootEl.setAttribute("data-tl-pane", pane); }
+    }
+  }
   function onKey(ev) {
     if (!S.doc) { return; }
+    var inText = editable(ev.target);
+    if (inText && ev.target.id !== "tl-cue-text") { return; }
     var mod = ev.metaKey || ev.ctrlKey;
-    if (ev.target && ev.target.id === "tl-cue-text" &&
-      (ev.code === "Escape" || (mod && (ev.code === "Enter" || ev.code === "KeyT")))) {
-      ev.preventDefault();
-      ev.stopPropagation();
-      leaveText();
-      return;
-    }
-    if (editable(ev.target)) { return; }
-    if (S.laneSel && !mod && !ev.altKey && (ev.code === "Enter" || ev.code === "Escape")) {
+    var laneKey = ev.code === "Enter" || ev.code === "Escape";
+    if (!inText && S.laneSel && !mod && !ev.altKey && laneKey) {
       ev.preventDefault();
       ev.stopPropagation();
       if (ev.code === "Enter") { insertSelection(); } else { S.laneSel = null; requestLane(); }
       return;
     }
-    var special = cueKey(ev, mod);
-    if (special) {
-      // 자막 키가 먼저다(아래 클립 키와 겹치는 것은 ⌫ 하나 — 고른 자막이 있을 때만 자막).
-    } else if (ev.altKey && !mod && ev.code === "BracketLeft") {
-      special = function () { trimToCursor(TL.SIDE_START); };
-    } else if (ev.altKey && !mod && ev.code === "BracketRight") {
-      special = function () { trimToCursor(TL.SIDE_END); };
-    } else if (mod && ev.shiftKey && !ev.altKey && ev.code === "Digit2") {
-      special = toggleIndex;
-    } else if (mod && !ev.altKey && ev.code === "KeyZ") {
-      special = function () { undo(ev.shiftKey); };
-    } else if (mod && !ev.altKey && ev.code === "KeyS") {
-      special = function () { commitText(); saveNow(false); };
-    } else if (mod && !ev.altKey && !ev.shiftKey && ev.code === "KeyB") {
-      special = function () { clipOp("blade"); };
-    } else if (!mod && !ev.altKey && !ev.shiftKey &&
-      (ev.code === "Delete" || ev.code === "Backspace")) {
-      special = function () { clipOp("delete"); };
-    }
-    if (special) { ev.preventDefault(); ev.stopPropagation(); special(); return; }
-    if (mod || ev.altKey) { return; }
-    var big = ev.shiftKey ? S.settings.bigStepFrames : 1;
-    var acts = {
-      Space: toggle, KeyK: stopPlayback,
-      ArrowLeft: function () { step(-big); }, ArrowRight: function () { step(big); },
-      ArrowUp: function () { goCut(-1); }, ArrowDown: function () { goCut(1); },
-      Home: function () { step(-S.total); }, End: function () { step(S.total); },
-    };
-    var act = acts[ev.code];
-    if (!act) { return; }
+    var pane = paneOf(ev.target) || S.pane || "timeline";
+    var action = KEYS.match(KEYS.table, ev, pane, inText);
+    var run = action ? keyActions()[action] : null;
+    if (!run || run(ev) === false) { return; }
     ev.preventDefault();
     ev.stopPropagation();
-    act();
   }
-  // 자막 키(D117과 같은 글자) — 고른 자막이 있으면 ⌫가 자막을 지운다.
-  function cueKey(ev, mod) {
-    var plain = !mod && !ev.altKey && !ev.shiftKey;
-    var shiftOnly = !mod && !ev.altKey && ev.shiftKey;
-    var altOnly = !mod && ev.altKey && !ev.shiftKey;
-    if (plain && ev.code === "BracketLeft") { return function () { cueOp("start"); }; }
-    if (plain && ev.code === "BracketRight") { return function () { cueOp("end"); }; }
-    if (shiftOnly && ev.code === "KeyB") { return function () { cueOp("split"); }; }
-    if (shiftOnly && ev.code === "KeyM") { return function () { cueOp("merge"); }; }
-    if (altOnly && ev.code === "KeyC") { return function () { cueOp("insert"); }; }
-    if (altOnly && ev.code === "ArrowUp") { return function () { stepCue(-1); }; }
-    if (altOnly && ev.code === "ArrowDown") { return function () { stepCue(1); }; }
-    // Subtitle Edit 키(W-87, D146) — 사용자가 Subtitle Edit에서 쓰던 A·D·S·T와 그 기본
-    // F11·F12·F8, ⌘⇧E(다음 줄까지 늘리기)·⌘⇧M(합치기)·⌘T(입력칸). 재생기 안에서만 산다.
-    var modShift = mod && !ev.altKey && ev.shiftKey;
-    if (plain && (ev.code === "KeyA" || ev.code === "F11")) {
-      return function () { cueOp("start"); };
-    }
-    if (plain && (ev.code === "KeyD" || ev.code === "F12")) {
-      return function () { cueOp("end"); };
-    }
-    if (plain && ev.code === "KeyS") { return function () { cueOp("split"); }; }
-    if (!mod && !ev.altKey && ev.code === "F8") {
-      return function () { stepError(ev.shiftKey ? -1 : 1); };
-    }
-    if (modShift && ev.code === "KeyE") { return extendToNext; }
-    if (modShift && ev.code === "KeyM") { return function () { cueOp("merge"); }; }
-    var textKey = plain && ev.code === "KeyT";
-    var modT = mod && !ev.altKey && !ev.shiftKey && ev.code === "KeyT";
-    if ((plain && ev.code === "Enter" && ev.target.tagName !== "BUTTON") || textKey || modT) {
-      return function () {
+  function keyActions() {
+    if (S.keyActions) { return S.keyActions; }
+    var big = function () { return S.settings.bigStepFrames; };
+    S.keyActions = {
+      "leave-text": leaveText, toggle: toggle, stop: stopPlayback,
+      "frame-back": function () { step(-1); }, "frame-forward": function () { step(1); },
+      "big-back": function () { step(-big()); }, "big-forward": function () { step(big()); },
+      "prev-cut": function () { goCut(-1); }, "next-cut": function () { goCut(1); },
+      "go-start": function () { step(-S.total); }, "go-end": function () { step(S.total); },
+      undo: function () { undo(false); }, redo: function () { undo(true); },
+      save: function () { commitText(); saveNow(false); }, index: toggleIndex,
+      blade: function () { clipOp("blade"); }, "delete-clip": function () { clipOp("delete"); },
+      "trim-start": function () { trimToCursor(TL.SIDE_START); },
+      "trim-end": function () { trimToCursor(TL.SIDE_END); },
+      "cue-insert": function () { commitText(); cueOp("insert"); },
+      "cue-start": function () { cueOp("start"); }, "cue-end": function () { cueOp("end"); },
+      "cue-split": function () { cueOp("split"); }, "cue-merge": function () { cueOp("merge"); },
+      "cue-extend": extendToNext,
+      "prev-cue": function () { stepCue(-1); }, "next-cue": function () { stepCue(1); },
+      "next-error": function () { stepError(1); }, "prev-error": function () { stepError(-1); },
+      "cue-nudge-back": function () { return nudgeCues(-1); },
+      "cue-nudge-forward": function () { return nudgeCues(1); },
+      "cue-big-back": function () { return nudgeCues(-big()); },
+      "cue-big-forward": function () { return nudgeCues(big()); },
+      "edit-text": function (ev) {
+        if (ev.code === "Enter" && ev.target && ev.target.tagName === "BUTTON") { return false; }
         var id = targetCue();
-        if (!id) { say("고칠 자막이 없습니다 — 목록에서 고르세요.", true); return; }
+        if (!id) { say("고칠 자막이 없습니다 — 목록에서 고르세요.", true); return true; }
         S.cue = id;
         paintCues();
         focusCueText();
-      };
+        return true;
+      },
+      "delete-cue": function () {
+        if (S.picked.length > 1) { deletePicked(); return true; }
+        if (!S.cue) { return false; }
+        cueOp("delete", S.cue);
+        return true;
+      },
+      "clear-cue": function () {
+        if (!S.cue && !S.picked.length) { return false; }
+        clearPicked();
+        paintCues();
+        requestLane();
+        return true;
+      }
+    };
+    return S.keyActions;
+  }
+  // , · . — 고른 줄(여러 줄이면 함께)을 시퀀스 프레임만큼 민다. 이웃 · 최소 간격 · 끝 안에서만
+  // (파형 몸통 끌기와 같은 계산 · 같은 문서 연산). 고른 줄이 없으면 할 일이 없다.
+  function nudgeCues(frames) {
+    var ids = visibleIds();
+    var indices = pickedIds().map(function (id) { return ids.indexOf(id); })
+      .filter(function (i) { return i >= 0; });
+    if (!indices.length) { return false; }
+    var delta = LN.bodyMany(S.proj.cues, indices, frames * seqTicks(), laneMinGap(), laneTotal());
+    if (!delta) {
+      say("더 밀 자리가 없습니다 — 이웃 자막 · 최소 간격 · 타임라인 끝.", true);
+      return true;
     }
-    if (plain && ev.code === "Escape" && (S.cue || S.picked.length)) {
-      return function () { clearPicked(); paintCues(); requestLane(); };
-    }
-    if (plain && S.picked.length > 1 && (ev.code === "Delete" || ev.code === "Backspace")) {
-      return deletePicked;
-    }
-    if (plain && S.cue && (ev.code === "Delete" || ev.code === "Backspace")) {
-      return function () { cueOp("delete", S.cue); };
-    }
-    return null;
+    var ms = nudgeMs(ids[indices[0]], delta, frames);
+    var moved = indices.map(function (i) { return ids[i]; });
+    laneEdit(moved.length > 1 ? "자막 " + moved.length + "개 밀기" : "자막 밀기", function () {
+      return moved.reduce(function (doc, id) { return TL.cueShift(doc, id, ms); }, S.doc);
+    });
+    return true;
+  }
+  // 프레임 단위 밀기의 밀리초 — 시작을 「시작점 설정」과 같은 규칙(`TL.sourceMsAt` 프레임 시작)으로
+  // 그 프레임에 놓는다. 틱을 밀리초로 내림하면 한 프레임(33.37ms → 33ms)이 같은 프레임에 남는다.
+  // 이웃 · 간격에 막혀 덜 움직이거나 원본이 바뀌는 자리면 막힌 만큼만(틱 → 밀리초).
+  function nudgeMs(id, deltaTicks, frames) {
+    var plain = Math.round(deltaTicks / TL.msTicks(S.doc.facts));
+    if (deltaTicks !== frames * seqTicks()) { return plain; }
+    var cue = projectedCue(id);
+    var raw = rawCue(id);
+    var frame = Math.floor(cue[2] / seqTicks()) + frames;
+    var at = TL.sourceMsAt(S.doc, clamp(frame, 0, S.total) * seqTicks(), TL.SIDE_START);
+    if (at[0] !== raw[1]) { return plain; }
+    // 반내림한 밀리초가 그 프레임 시작 바로 앞으로 돌아오면(앞 프레임으로 보인다)
+    // 1ms 뒤가 그 프레임이다.
+    var ms = at[1] - raw[2];
+    var moved = TL.project(TL.cueShift(S.doc, id, ms)).cues.filter(function (row) {
+      return row[0] === id;
+    })[0];
+    return moved && Math.floor(moved[2] / seqTicks()) < frame ? ms + 1 : ms;
   }
   function onClick(ev) {
     var target = ev.target.closest ? ev.target.closest("[data-tl]") : null;
@@ -1764,6 +1789,7 @@ PLAYER_APP_JS = r"""
       rootEl.__tlBound = true;
       rootEl.addEventListener("keydown", onKey);
       rootEl.addEventListener("click", onClick);
+      rootEl.addEventListener("pointerdown", notePane, true);
     }
     // 「자막」 작업공간(W-87c, D152)이 자막 목록 · 입력칸을 재생기 밖(브라우저 열)으로 옮기면
     // 키·누름이 뿌리까지 오지 않는다 — 밖에 있을 때만 같은 처리로 넘긴다(두 번 돌지 않게).
@@ -1776,6 +1802,9 @@ PLAYER_APP_JS = r"""
       body.addEventListener("click", function (ev) {
         if (S.rootEl && !S.rootEl.contains(body)) { onClick(ev); }
       });
+      body.addEventListener("pointerdown", function (ev) {
+        if (S.rootEl && !S.rootEl.contains(body)) { notePane(ev); }
+      }, true);
     }
     decks().forEach(function (v) {
       if (v && !v.__tlBound) {

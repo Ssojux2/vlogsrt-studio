@@ -21,7 +21,7 @@ from typing import Any
 
 import gradio as gr
 
-from ui import platform_keys
+from ui import keymap, platform_keys
 from ui.caption_grid_js import CAPTION_GRID_JS
 from ui.caption_lane_js import CAPTION_LANE_JS
 from ui.final_edit_ui import JOB_ENDED, RELOAD_ID
@@ -33,7 +33,9 @@ PLAYER_ROOT_ID = "tl-root"
 TAB_LABEL = "원본 범위 타임라인"
 BURN_NONE = "none"
 """「번인 캡션: 없음」 — 예전 렌더 그대로(`timeline_share.BURN_NONE`과 같다, 시험이 대조한다)."""
-PLAYER_JS = TIMELINE_CORE_JS + CAPTION_GRID_JS + CAPTION_LANE_JS + PLAYER_APP_JS
+PLAYER_JS = (
+    TIMELINE_CORE_JS + CAPTION_GRID_JS + CAPTION_LANE_JS + keymap.keymap_js() + PLAYER_APP_JS
+)
 READY = "ready"
 
 
@@ -164,7 +166,7 @@ def timeline_player_html(model: dict[str, Any] | None) -> str:
             '<div class="tl-source-bar"><canvas id="tl-source-canvas"'
             ' aria-label="고른 클립의 원본 범위 — 손잡이를 끌어 앞뒤를 조정"></canvas></div></div>'
         )
-        + f"{_cue_panel_html()}</div>"
+        + f"{_cue_panel_html()}{keymap.keysheet_html()}</div>"
     )
 
 
@@ -257,6 +259,14 @@ TIMELINE_PLAYER_CSS = """
   cursor: pointer; border: 1px solid var(--vl-line-strong); background: var(--vl-surface-raised);
   color: var(--vl-ink); }
 .tl-cues button:disabled { opacity: 0.5; cursor: default; }
+/* 키를 받을 창(W-89, D154) — 마지막으로 누른 창을 옅게 표시한다(⌫ 등 뜻이 창마다 다르다). */
+.tl-root[data-tl-pane="captions"] .tl-cues,
+.tl-root[data-tl-pane="timeline"] .tl-strip { box-shadow: 0 0 0 1px var(--vl-accent-soft); }
+.tl-keys { font-size: 12px; color: var(--vl-ink-muted); }
+.tl-keys h4 { margin: 6px 0 2px; font-size: 12px; color: var(--vl-ink); }
+.tl-keys dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 10px; margin: 0; }
+.tl-keys dt { white-space: nowrap; }
+.tl-keys dd { margin: 0; }
 .tl-index { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
 .tl-index[hidden] { display: none; }
 .tl-index-head { display: flex; gap: 6px; align-items: center; }
