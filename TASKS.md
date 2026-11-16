@@ -200,8 +200,10 @@ Final Cut 전체 타임라인(D44·D45·D56). 플러그인은 제거됐다. 계�
 | W-84 | 세 운영체제 기반(D144) — CI 행렬 macos·windows·ubuntu(오프라인 · mac만 막음 · win·linux 보고) · `scripts/check_all.py`(Makefile `check`와 같은 단계 — 시험이 대조) · `scripts/smoke_ui.py` · 리눅스 실행기 `실행.sh` · `launch_check advice`(tkinter 안내, 막지 않음) · `ui/platform_keys.py`(Mod = ⌘/Ctrl, macOS 바이트 그대로) · `scripts/preview_workbench.py`(합성 라이브러리 · 임시 폴더 — 저장소 안은 숨김 경로라 거부됨 · 오프라인 · `UiInstance` 없음) · 키 가로채기 측정 html · 번인 ffmpeg는 이미 PATH 먼저·운영체제별 안내라 그대로 · 시험 `test_check_all`·`test_ci_workflow`·`test_platform_keys`·`test_preview_launch`·`test_launch_check` | ✅ 2026-11-16 (첫 CI 결과·실기 첫 실행·키 측정은 `docs/plans/2026-11-16-cross-platform.md` 🧑) |
 | W-84a… | 첫 CI가 드러낸 Windows → Linux 실패 고치기 · 다 초록이면 막는 게이트로 | 📋 |
 | W-85 | Final Cut식 창 골격(D145) — 원본 범위 타임라인 요약·재생기를 「영상 정리」 무대 아래 덱(`#vl-timeline-deck`, 격자 `deck`)으로 · 열 비율 토큰(539 · 539 · 403, 최소 240·280px) · 카드 여러 열 · 타임라인이 있으면 무대 내용 높이 + 뷰어 영상 `deck-viewer-h` · 「타임라인으로 보내기」는 같은 창에 머묾 · `[data-vl-own-keys]` 키 새는 버그 · 화면 틱 임대(`ui/timer_lease_js.py` — 숨은 단추 둘, 덱을 만지거나 덱 영상이 돌면 쉼, 유휴 4초 · 초점 나감이면 켬) · 시험 `test_fcp_window_ui`·`test_range_marks_ui`(새는 키)·`test_workbench_layout`·`test_timeline_cell_ui`·`test_timeline_player_ui` · 실측 덱 만지는 7초 틱 0번 | ✅ 2026-11-16 (탭 이름·0.5/0.5는 W-86 · LoAF는 보이는 창 🧑) |
-| W-86 | 창 DOM · FCP 이름 · 골든 한 번 — 뷰어 하나 · 인스펙터 탭(정보·자막·공유) · 타임라인 인덱스 · 트랙 손잡이 | 📋 |
-| W-87 | 「자막」 작업공간 — Subtitle Edit식(D146) — 자막 목록·입력칸·파형 자막 레인 · SE 조작·키(A/D/S/T · F11/F12 …) · 한/영 번역 모드 · `splitText` 하나로 · 프레임 단위 밀기(D138 남은 것) | 📋 |
+| W-86 | 창 DOM · FCP 이름 · 골든 한 번 — **나눴다**: 탭·단추 이름은 그 칸을 만지는 W-87·W-88에서, 뷰어 하나(덱의 둘째 영상을 위 뷰어로)·인스펙터 탭·트랙 손잡이는 W-86b로 | ⏭ 나눔(2026-11-16) |
+| W-86b | 뷰어 하나(타임라인에 초점이면 위 뷰어가 프로그램 화면) · 인스펙터 탭(정보·자막·공유) · 타임라인 인덱스 · 트랙 손잡이 · 위·아래 0.5/0.5 | 📋 |
+| W-87 | Subtitle Edit식 자막 편집(D146) — 목록 표(# · 시작 · 끝 · 길이 · 텍스트⏎ · 간격 · 문자/초, 경고 칸만 붉게, `ui/caption_grid_js.py` 순수) · 입력칸 시각(시:분:초:프레임 → `TL.cueEdit` 그 프레임) · 길이 · 문자/초 · 줄 글자 수 · 키 A/F11 · D/F12 · S · T · ⌘T · F8/⇧F8 · ⌘⇧E · ⌘⇧M · 문서 연산·저장 그대로 · 시험 `test_caption_grid` | ✅ 2026-11-16 (파형 자막 레인·영어 열·「자막」 작업공간은 W-87b) |
+| W-87b | 파형 자막 레인(SE 조작 — 빈 곳 끌기 새 선택 · 가장자리 · 몸통 · ⇧/⌘/⌥ 클릭 · 확대) · 원본 타임라인 파형 자료 · 영어 열(번역 모드) · 「자막」 작업공간 | 📋 |
 | W-88 | 「공유」(D147) — 타임라인에서 렌더 + 한/영 번인 한 작업 · 결과 카드·영어 변환·번인 손잡이를 공유 탭으로 · 입구 두 단추(UI-3)는 그때 묻는다 | 📋 |
 | W-89 | 창 기준 키 맵 하나(D148) — 포커스한 창이 정한다 · Mod/Alt 표기 · 측정 통과 키만 · 영어 칸 직접 편집은 그때 묻는다 | 📋 |
 | W-90 | 어두움 짝을 Final Cut 쪽으로 — 채움 #645FF0 · 표시 #706BFF · 대비 기준 그대로 | 📋 |

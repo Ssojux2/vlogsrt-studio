@@ -13,6 +13,7 @@ PLAYER_APP_JS = r"""
 (function () {
   var W = window;
   var TL = W.__vlTL;
+  var CG = W.__vlCaptionGrid;
   var S = W.__vlTimelinePlayer;
   if (!S) {
     S = W.__vlTimelinePlayer = { epoch: null, doc: null, spans: [], total: 0, playhead: 0, span: 0,
@@ -750,7 +751,8 @@ PLAYER_APP_JS = r"""
   function projectedCue(id) {
     return S.proj.cues.filter(function (cue) { return cue[0] === id; })[0] || null;
   }
-  function cueOp(op, id, text) {
+  // `frame`를 주면 플레이헤드 대신 그 프레임(입력칸의 시각 · 다음 줄 시작)에서 고친다(W-87).
+  function cueOp(op, id, text, frame) {
     if (!S.doc || !S.spans.length) { return; }
     var target = op === "insert" ? null : (id || targetCue());
     if (op !== "insert" && !target) {
@@ -759,7 +761,8 @@ PLAYER_APP_JS = r"""
     }
     var out;
     try {
-      out = TL.cueEdit(S.doc, op, target, S.playhead, S.settings, text);
+      out = TL.cueEdit(S.doc, op, target, frame === undefined ? S.playhead : frame, S.settings,
+        text);
     } catch (error) {
       if (!TL.isError(error)) { throw error; }
       say(CUE_LABELS[op] + " — 하지 못했습니다: " + error.message, true);
@@ -836,15 +839,66 @@ PLAYER_APP_JS = r"""
         " 넣으세요.</div>";
       return;
     }
-    list.innerHTML = S.proj.cues.map(function (cue) {
-      var warn = warnText(cue[0]);
-      return '<div class="tl-cue-row' + (cue[0] === S.cue ? " is-selected" : "") +
-        '" role="option" data-cue="' + esc(cue[0]) + '">' +
-        '<span class="tl-cue-time">' + cueTime(cue) + "</span>" +
-        '<span class="tl-cue-words">' + esc(cue[4].split("\n").join(" / ") || "(빈 글)") +
-        "</span>" + (warn ? '<span class="tl-cue-warn">' + esc(warn) + "</span>" : "") + "</div>";
-    }).join("");
+    // Subtitle Edit식 표(W-87, D146) — # · 시작 · 끝 · 길이 · 텍스트 · 간격 · 문자/초.
+    // 경고는 그 칸만 붉게(지우거나 숨기지 않는다), 까닭은 줄의 title에. F8·⇧F8로 오간다.
+    list.innerHTML = '<div class="tl-cue-grid-head" aria-hidden="true"><span>#</span>' +
+      "<span>시작</span><span>끝</span><span>길이</span><span>텍스트</span><span>간격</span>" +
+      "<span>문자/초</span></div>" + captionRows().map(function (row) {
+        var warn = warnText(row.id);
+        return '<div class="tl-cue-row' + (row.id === S.cue ? " is-selected" : "") +
+          '" role="option" data-cue="' + esc(row.id) + '"' +
+          (warn ? ' title="' + esc(warn) + '"' : "") + ">" +
+          '<span class="tl-cue-n">' + row.n + "</span>" +
+          '<span class="tl-cue-time">' + timecode(row.startFrame) + "</span>" +
+          '<span class="tl-cue-time">' + timecode(row.endFrame) + "</span>" +
+          cell("tl-cue-num", row.bad.dur, row.seconds.toFixed(2)) +
+          cell("tl-cue-words", row.bad.text, esc(CG.oneLine(row.text)) || "(빈 글)") +
+          cell("tl-cue-num", row.bad.gap,
+            row.gapSeconds === null ? "" : row.gapSeconds.toFixed(2)) +
+          cell("tl-cue-num", row.bad.cps, row.cps === null ? "" : row.cps.toFixed(1)) + "</div>";
+      }).join("");
     paintCueFollow();
+  }
+  function captionRows() {
+    return CG.rows(S.proj.cues, S.warns, seqTicks(), TL.tickRate(S.doc.facts), TL.textChars);
+  }
+  function cell(cls, bad, html) {
+    return '<span class="' + cls + (bad ? " is-bad" : "") + '">' + html + "</span>";
+  }
+  // F8·⇧F8 — 다음(앞) 경고 줄을 고르고 그 시작으로 간다.
+  function stepError(direction) {
+    var id = CG.nextError(captionRows(), targetCue(), direction);
+    if (id === null) { say("더 갈 경고 줄이 없습니다."); return; }
+    pickCue(id);
+  }
+  // ⌘⇧E — 고른 자막의 끝을 다음 보이는 자막의 시작까지(같은 원본일 때만 — 문서 연산이 가른다).
+  function extendToNext() {
+    var id = targetCue();
+    var ids = S.proj.cues.map(function (cue) { return cue[0]; });
+    var next = S.proj.cues[ids.indexOf(id) + 1];
+    if (!id || !next) { say("늘릴 다음 자막이 없습니다.", true); return; }
+    cueOp("end", id, undefined, Math.floor(next[2] / seqTicks()));
+  }
+  // 입력칸의 시작·끝 — 시간 코드(시:분:초:프레임)를 그 프레임으로 받아 문서 연산에 넘긴다.
+  function parseTimecode(text) {
+    var parts = String(text).trim().split(":").map(function (part) { return Number(part); });
+    if (parts.length !== 4 || parts.some(function (n) { return !isFinite(n) || n < 0; })) {
+      return null;
+    }
+    var seq = S.doc.facts.sequence;
+    var fps = Math.max(1, Math.round(seq.den / seq.num));
+    return ((parts[0] * 60 + parts[1]) * 60 + parts[2]) * fps + parts[3];
+  }
+  function commitTime(ev) {
+    var input = ev.target;
+    var id = input.getAttribute("data-cue");
+    var frame = parseTimecode(input.value);
+    if (frame === null) {
+      say("시각은 시:분:초:프레임 꼴로 적어 주세요(예 00:00:12:05).", true);
+      paintCueEditor(true);
+      return;
+    }
+    cueOp(input.getAttribute("data-side"), id, undefined, frame);
   }
   // 재생 중에는 목록을 다시 짓지 않고 플레이헤드 아래 줄의 표시만 옮긴다.
   function paintCueFollow() {
@@ -872,7 +926,7 @@ PLAYER_APP_JS = r"""
   // 때 누른 단추가 사라지거나 움직여 누름을 잃지 않게(누름과 뗌 사이에 단추가 바뀌면 click이 오지
   // 않는다). 고름(「고름」·「플레이헤드」)도 다시 짓는 열쇠가 아니다 — 확정이 고름을 바꾼다.
   // 경고 줄도 비어 있을 때 같은 높이를 둔다.
-  function paintCueEditor() {
+  function paintCueEditor(force) {
     var box = $("tl-cue-edit");
     if (!box || !S.doc) { return; }
     var area = $("tl-cue-text");
@@ -888,11 +942,16 @@ PLAYER_APP_JS = r"""
         " 없습니다 — 목록에서 고르거나 「새 자막」(⌥C)으로 넣으세요.</span>";
       var fresh = $("tl-cue-text");
       if (fresh) { fresh.addEventListener("change", commitText); }
+      ["tl-cue-start", "tl-cue-end"].forEach(function (name) {
+        var input = $(name);
+        if (input) { input.addEventListener("change", commitTime); }
+      });
     }
     var head = $("tl-cue-head");
     if (head) { head.textContent = "자막 " + id + (S.cue === id ? " · 고름" : " · 플레이헤드"); }
-    if (!cue || box.__tlProj === S.proj) { return; }
+    if (!cue || (box.__tlProj === S.proj && !force)) { return; }
     box.__tlProj = S.proj;
+    paintCueTimes(id, cue);
     var raw = S.doc.cues.filter(function (row) { return row[0] === id; })[0];
     var meta = $("tl-cue-meta");
     if (meta) {
@@ -905,8 +964,35 @@ PLAYER_APP_JS = r"""
     var text = $("tl-cue-text");
     if (text && !typing && text.value !== cue[4]) { text.value = cue[4]; }
   }
+  // 입력칸의 시각·길이·문자/초·줄 길이(Subtitle Edit 입력칸) — 고치는 중인 칸은 덮지 않는다.
+  function paintCueTimes(id, cue) {
+    var row = captionRows().filter(function (r) { return r.id === id; })[0];
+    if (!row) { return; }
+    [["tl-cue-start", row.startFrame], ["tl-cue-end", row.endFrame]].forEach(function (pair) {
+      var input = $(pair[0]);
+      if (input && document.activeElement !== input) { input.value = timecode(pair[1]); }
+    });
+    var dur = $("tl-cue-dur");
+    if (dur) {
+      dur.textContent = "길이 " + row.seconds.toFixed(2) + "초";
+      dur.classList.toggle("is-bad", row.bad.dur);
+    }
+    var stats = $("tl-cue-stats");
+    if (stats) {
+      stats.textContent = "문자/초 " + (row.cps === null ? "—" : row.cps.toFixed(1)) +
+        " · 줄 " + CG.lineLengths(cue[4], TL.textChars).join("/") + "자";
+      stats.classList.toggle("is-bad", row.bad.cps);
+    }
+  }
   function cueEditorHtml(id) {
     return '<strong id="tl-cue-head"></strong>' +
+      '<div class="tl-cue-times"><label>시작 <input id="tl-cue-start" class="tl-tc"' +
+      ' data-side="start" data-cue="' + esc(id) + '" spellcheck="false"' +
+      ' aria-label="자막 시작 — 시:분:초:프레임"></label>' +
+      '<label>끝 <input id="tl-cue-end" class="tl-tc" data-side="end" data-cue="' + esc(id) +
+      '" spellcheck="false" aria-label="자막 끝 — 시:분:초:프레임"></label>' +
+      '<span id="tl-cue-dur" class="tl-cue-num"></span>' +
+      '<span id="tl-cue-stats" class="tl-cue-num"></span></div>' +
       '<span id="tl-cue-meta" class="tl-cue-muted"></span>' +
       '<span id="tl-cue-warn" class="tl-cue-warn"></span>' +
       '<textarea id="tl-cue-text" data-cue="' + esc(id) + '" spellcheck="false"' +
@@ -1041,7 +1127,7 @@ PLAYER_APP_JS = r"""
     if (!S.doc) { return; }
     var mod = ev.metaKey || ev.ctrlKey;
     if (ev.target && ev.target.id === "tl-cue-text" &&
-      (ev.code === "Escape" || (mod && ev.code === "Enter"))) {
+      (ev.code === "Escape" || (mod && (ev.code === "Enter" || ev.code === "KeyT")))) {
       ev.preventDefault();
       ev.stopPropagation();
       leaveText();
@@ -1092,7 +1178,24 @@ PLAYER_APP_JS = r"""
     if (altOnly && ev.code === "KeyC") { return function () { cueOp("insert"); }; }
     if (altOnly && ev.code === "ArrowUp") { return function () { stepCue(-1); }; }
     if (altOnly && ev.code === "ArrowDown") { return function () { stepCue(1); }; }
-    if (plain && ev.code === "Enter" && ev.target.tagName !== "BUTTON") {
+    // Subtitle Edit 키(W-87, D146) — 사용자가 Subtitle Edit에서 쓰던 A·D·S·T와 그 기본
+    // F11·F12·F8, ⌘⇧E(다음 줄까지 늘리기)·⌘⇧M(합치기)·⌘T(입력칸). 재생기 안에서만 산다.
+    var modShift = mod && !ev.altKey && ev.shiftKey;
+    if (plain && (ev.code === "KeyA" || ev.code === "F11")) {
+      return function () { cueOp("start"); };
+    }
+    if (plain && (ev.code === "KeyD" || ev.code === "F12")) {
+      return function () { cueOp("end"); };
+    }
+    if (plain && ev.code === "KeyS") { return function () { cueOp("split"); }; }
+    if (!mod && !ev.altKey && ev.code === "F8") {
+      return function () { stepError(ev.shiftKey ? -1 : 1); };
+    }
+    if (modShift && ev.code === "KeyE") { return extendToNext; }
+    if (modShift && ev.code === "KeyM") { return function () { cueOp("merge"); }; }
+    var textKey = plain && ev.code === "KeyT";
+    var modT = mod && !ev.altKey && !ev.shiftKey && ev.code === "KeyT";
+    if ((plain && ev.code === "Enter" && ev.target.tagName !== "BUTTON") || textKey || modT) {
       return function () {
         var id = targetCue();
         if (!id) { say("고칠 자막이 없습니다 — 목록에서 고르세요.", true); return; }

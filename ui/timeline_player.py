@@ -22,6 +22,7 @@ from typing import Any
 import gradio as gr
 
 from ui import platform_keys
+from ui.caption_grid_js import CAPTION_GRID_JS
 from ui.final_edit_ui import JOB_ENDED, RELOAD_ID
 from ui.timeline_edit_js import TIMELINE_CORE_JS
 from ui.timeline_player_js import PLAYER_APP_JS
@@ -29,7 +30,7 @@ from ui.timeline_player_js import PLAYER_APP_JS
 PLAYER_BLOCK_ID = "vl-timeline-player"
 PLAYER_ROOT_ID = "tl-root"
 TAB_LABEL = "원본 범위 타임라인"
-PLAYER_JS = TIMELINE_CORE_JS + PLAYER_APP_JS
+PLAYER_JS = TIMELINE_CORE_JS + CAPTION_GRID_JS + PLAYER_APP_JS
 READY = "ready"
 
 
@@ -227,11 +228,19 @@ TIMELINE_PLAYER_CSS = """
   color: var(--vl-ink); }
 .tl-cues button:disabled { opacity: 0.5; cursor: default; }
 .tl-cues-body { display: flex; gap: 8px; align-items: stretch; }
-.tl-cue-list { position: relative; flex: 1 1 55%; min-width: 0; max-height: 220px;
+.tl-cue-list { position: relative; flex: 1 1 60%; min-width: 0; max-height: 260px;
   overflow-y: auto;
   border: 1px solid var(--vl-line); border-radius: 6px; background: var(--vl-surface-sunken); }
-.tl-cue-row { display: flex; gap: 8px; padding: 3px 8px; cursor: pointer;
-  border-bottom: 1px solid var(--vl-line); }
+/* Subtitle Edit식 표(W-87, D146) — # · 시작 · 끝 · 길이 · 텍스트 · 간격 · 문자/초.
+   머리는 목록 위에 붙는다. */
+.tl-cue-row, .tl-cue-grid-head { display: grid; column-gap: 8px; padding: 3px 8px;
+  grid-template-columns: 2.5em 6.5em 6.5em 3.5em minmax(0, 1fr) 3.5em 3.5em; }
+.tl-cue-grid-head { position: sticky; top: 0; z-index: 1; background: var(--vl-surface-raised);
+  color: var(--vl-ink-muted); border-bottom: 1px solid var(--vl-line-strong); }
+.tl-cue-row { cursor: pointer; border-bottom: 1px solid var(--vl-line); }
+.tl-cue-row .tl-cue-n, .tl-cue-num { font-variant-numeric: tabular-nums; color: var(--vl-ink-muted);
+  text-align: right; }
+.tl-cues .is-bad { background: var(--vl-danger-soft); color: var(--vl-danger); }
 .tl-cue-row:last-child { border-bottom: none; }
 .tl-cue-row.is-current { background: var(--vl-accent-soft); }
 .tl-cue-row.is-selected { box-shadow: inset 3px 0 0 var(--vl-accent); }
@@ -241,13 +250,18 @@ TIMELINE_PLAYER_CSS = """
   white-space: nowrap; }
 .tl-cue-row .tl-cue-warn { color: var(--vl-warn); flex: none; }
 .tl-cue-empty { padding: 6px 8px; color: var(--vl-ink-muted); }
-.tl-cue-edit { flex: 1 1 45%; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.tl-cue-edit { flex: 1 1 40%; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .tl-cue-edit textarea { font: inherit; font-size: 13px; min-height: 52px; resize: vertical;
   padding: 4px 6px; border: 1px solid var(--vl-line-strong); border-radius: 4px;
   background: var(--vl-surface-raised); color: var(--vl-ink); }
 .tl-cue-edit .tl-cue-buttons { display: flex; flex-wrap: wrap; gap: 4px; }
 .tl-cue-edit .tl-cue-muted { color: var(--vl-ink-muted); }
 .tl-cue-edit .tl-cue-warn { color: var(--vl-warn); min-height: 1.4em; }
+.tl-cue-times { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+.tl-cue-times .tl-tc { width: 9em; font-family: var(--vl-font-mono); font-size: 12px;
+  padding: 1px 4px; border: 1px solid var(--vl-line-strong); border-radius: 4px;
+  background: var(--vl-surface-raised); color: var(--vl-ink); }
+.tl-cue-times .tl-cue-num { text-align: left; padding: 0 4px; border-radius: 4px; }
 @media (max-width: 720px) { .tl-cues-body { flex-direction: column; } }
 """
 

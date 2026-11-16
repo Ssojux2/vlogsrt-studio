@@ -11236,3 +11236,23 @@ Phase 2-6 「유휴 수다」가 이 몫이다. 지시: 「영상 정리」 탭�
 - **기대값 변경(계획 승인)**: `test_workbench_layout::test_grid_areas_at_three_breakpoints`(열 토큰 · `deck` 영역 · 행) ·
   `test_timeline_cell_ui`(보내기 뒤 탭 = `REVIEW_TAB_KEY`) · `test_timeline_player_ui`(재생기 조상 = `vl-timeline-deck`·`visual-stage`,
   더 엄격). 골든(`workbench_render_18_sources.html`)은 그대로다.
+
+## D146 — 자막 편집은 Subtitle Edit을 따른다: 목록 표 · 입력칸 시각 · SE 키 (2026-11-16, W-87, 사용자 결정)
+
+사용자 지시(2026-11-16): 「자막편집은 subtitle edit을 참조해야돼 … UI에 같이 구성해줘」. Subtitle Edit 5.2.0 정적 분석(어셈블리
+`ShortcutsMain.GetDefaultShortcuts` · `SubtitleGridColumnKeys` · 사용자 `Settings.json`, `docs/plans/2026-11-16-fcp-window.md`)을 원본
+범위 타임라인(D125)의 자막 칸(D138, 아래 덱)에 옮겼다. **문서 연산은 그대로다** — 모든 고침은 `TL.cueEdit`이고 저장은 `tl_save`다.
+
+- **목록 표** `ui/caption_grid_js.py`(`__vlCaptionGrid`, 순수 · 노드 시험): 열 # · 시작 · 끝 · 길이(초) · 텍스트(줄바꿈 ⏎) · 간격(초) ·
+  문자/초. 경고(`TL.warnings`)는 그 칸만 붉게(`--vl-danger-soft`) — 빈 글 → 텍스트 · 길이 0·짧음·김 → 길이 · 빠름 → 문자/초 · 겹침·좁은 틈
+  → 간격. 줄을 지우거나 숨기지 않는다(규칙 9). 까닭은 줄의 title. 시각은 계산하지 않는다 — 시퀀스 틱을 프레임·초로 보일 뿐이다.
+- **입력칸**: 시작·끝 시각 칸(시:분:초:프레임) · 길이 · 문자/초 · 줄마다 글자 수. 시각 칸을 바꾸면 그 프레임을 플레이헤드 대신
+  `TL.cueEdit("start"|"end", …, frame)`에 넘긴다 — 자막의 원본이 아닌 자리면 문서 연산이 거절한다. 원본 프레임 격자에 맞춰지므로
+  레이트가 다르면 적은 프레임과 한 프레임 다를 수 있다(실측 24fps 원본 · 30fps 시퀀스: 05:00 → 04:29). 고치는 중인 칸은 덮지 않는다.
+- **키(재생기 안)**: 사용자가 Subtitle Edit에서 쓰던 **A 시작점 · D 종료점 · S 나누기 · T 입력칸 · ⌘T 입력칸↔목록**과 SE 기본
+  **F11 · F12 · F8/⇧F8(다음·앞 경고 줄) · ⌘⇧E(다음 줄 시작까지 늘리기) · ⌘⇧M(합치기)**. 지금 재생기 안에서 이 글자들은 다른 뜻이 없어
+  겹치지 않는다 — 창 기준 키 맵(W-89)에서 「자막 창」으로 묶는다. D138의 `[`·`]`·⇧B·⇧M·⌥C·⌥↑↓·Enter·Esc는 그대로다.
+- **미룬 것(W-87b)**: 파형 위 자막 레인(SE 조작 — 빈 곳 끌기로 새 선택 · 가장자리 · 몸통 · ⇧/⌘/⌥ 클릭)과 확대 · 원본 타임라인의 파형 자료,
+  영어 열(번역 모드 — 공유 W-88의 번역 자리와 함께), 「자막」 작업공간 전환.
+- **시험**: `test_caption_grid`(표 계산 노드 · 키 배선 · 입력칸), `test_timeline_player_ui` 그대로. 실측(오프라인 미리보기): 표 12줄 ·
+  끝 시각 입력 · ⌘⇧E가 다음 줄 시작에 붙임(간격 0.00) · 되돌리기 가능.
