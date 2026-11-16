@@ -164,10 +164,12 @@ def test_a_crash_between_insert_and_the_ledger_does_not_buy_again(
 
 
 class FailSecond(RefillSender):
-    """둘째 whisper 요청만 실패한다 — 조각 하나는 받고 하나는 못 받는다."""
+    """둘째 조각(청크 차례 1)의 whisper 요청만 실패한다 — 조각 하나는 받고 하나는 못 받는다.
+
+    조각은 함께 보낸다(P-5, D159) — 「두 번째로 온 요청」이 아니라 둘째 조각을 실패시킨다."""
 
     def send_request(self, request: Any, cfg: Any, *, kind: str, stem: str, source: str) -> Any:
-        if kind == CAPTION_TIMING_KIND and len(self.whisper) == 1:
+        if kind == CAPTION_TIMING_KIND and request.chunk.index == 1:
             self.whisper.append(request)
             raise RuntimeError("네트워크가 끊겼다")
         return super().send_request(request, cfg, kind=kind, stem=stem, source=source)

@@ -183,7 +183,9 @@ def test_a_hallucinated_chunk_is_replaced_by_the_first_agreeing_answer(tmp_path:
     assert first.request_id == "run-1:chunk-0000:rescue-0.8"
     assert second == evidence.chunks[1]  # 맞는 청크는 그대로
     asked = [(index, temperature) for index, temperature, _ in provider.seen]
-    assert asked == [(0, None), (1, None), (0, 0.8)]  # 맞는 청크는 한 번도 다시 묻지 않는다
+    # 1차는 청크를 함께 보낸다(P-5, D159) — 1차 둘은 차례 없이, 다시 묻기는 그 뒤에 하나뿐이다.
+    assert sorted(asked[:2]) == [(0, None), (1, None)]
+    assert asked[2:] == [(0, 0.8)]  # 맞는 청크는 한 번도 다시 묻지 않는다
 
 
 def test_when_every_attempt_disagrees_the_first_answer_stays(tmp_path: Path) -> None:
