@@ -118,15 +118,15 @@ def timeline_player_html(model: dict[str, Any] | None) -> str:
             '<span id="tl-source" class="tl-source"></span>'
             '<span class="tl-gap"></span>'
             '<button type="button" data-tl="blade"'
-            ' title="플레이헤드에서 클립 자르기 (⌘B)">자르기</button>'
+            ' title="플레이헤드에서 클립 자르기 (⌘B)">블레이드</button>'
             '<button type="button" data-tl="delete-clip"'
-            ' title="고른 클립 지우기 — 뒤가 당겨 온다 (⌫)">클립 지우기</button>'
+            ' title="고른 클립 지우기 — 뒤가 당겨 온다 (⌫)">삭제</button>'
             '<button type="button" data-tl="join"'
             ' title="고른 클립을 맞닿은 다음 조각과 합치기">합치기</button>'
             '<button type="button" data-tl="undo" id="tl-undo"'
-            ' title="되돌리기 (⌘Z)">되돌리기</button>'
+            ' title="실행 취소 (⌘Z)">실행 취소</button>'
             '<button type="button" data-tl="redo" id="tl-redo"'
-            ' title="다시 하기 (⌘⇧Z)">다시 하기</button>'
+            ' title="실행 복귀 (⌘⇧Z)">실행 복귀</button>'
             '<button type="button" data-tl="force-save" id="tl-force" hidden>'
             "내 편집으로 덮기</button>"
             '<button type="button" data-tl="prepare" id="tl-prepare" hidden>미리보기 준비</button>'
@@ -139,7 +139,17 @@ def timeline_player_html(model: dict[str, Any] | None) -> str:
             '<button type="button" data-tl="render" id="tl-render"'
             ' title="저장한 타임라인을 원본에서 한 번 렌더하고, 고르면 자막을 입힌다(무료 로컬)">'
             "공유</button>"
+            '<button type="button" data-tl="index" id="tl-index-toggle" aria-pressed="false"'
+            ' title="타임라인 인덱스 — 클립 · 자막 목록 (⇧⌘2)">인덱스</button>'
             '<span id="tl-status" class="tl-status" aria-live="polite"></span></div>'
+            # 타임라인 인덱스(W-86c, D150) — Final Cut 「인덱스」: 클립 · 자막(「오류 보기」) 목록.
+            '<div id="tl-index" class="tl-index" hidden><div class="tl-index-head">'
+            '<button type="button" data-tl="index-clips" aria-pressed="true">클립</button>'
+            '<button type="button" data-tl="index-cues" aria-pressed="false">자막</button>'
+            '<label class="tl-index-errors"><input type="checkbox" id="tl-index-errors">'
+            " 오류 보기</label></div>"
+            '<div id="tl-index-list" class="tl-index-list" role="listbox"'
+            ' aria-label="타임라인 인덱스 — 누르면 그 자리로 간다"></div></div>'
             '<div class="tl-strip"><canvas id="tl-canvas"></canvas></div>'
             '<div class="tl-range"><div class="tl-range-head"><span id="tl-source-head"></span>'
             '<span class="tl-gap"></span>'
@@ -243,6 +253,18 @@ TIMELINE_PLAYER_CSS = """
   cursor: pointer; border: 1px solid var(--vl-line-strong); background: var(--vl-surface-raised);
   color: var(--vl-ink); }
 .tl-cues button:disabled { opacity: 0.5; cursor: default; }
+.tl-index { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.tl-index[hidden] { display: none; }
+.tl-index-head { display: flex; gap: 6px; align-items: center; }
+.tl-index-head button[aria-pressed="true"] { background: var(--vl-accent-soft); }
+.tl-index-errors { color: var(--vl-ink-muted); }
+.tl-index-list { max-height: 160px; overflow-y: auto; border: 1px solid var(--vl-line);
+  border-radius: 6px; background: var(--vl-surface-sunken); }
+.tl-index-row { display: grid; grid-template-columns: 2.5em 6.5em minmax(0, 1fr) auto;
+  column-gap: 8px; padding: 3px 8px; cursor: pointer; border-bottom: 1px solid var(--vl-line); }
+.tl-index-row.is-selected { box-shadow: inset 3px 0 0 var(--vl-accent); }
+.tl-index-row > span:nth-child(3) { min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
 .tl-lane { display: block; width: 100%; height: 96px; border-radius: 6px;
   touch-action: none; }
 .tl-cues-body { display: flex; gap: 8px; align-items: stretch; }

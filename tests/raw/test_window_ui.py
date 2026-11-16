@@ -95,3 +95,26 @@ def test_bind_carries_names_as_data_and_never_deletes_cells() -> None:
     # 칸은 숨길 뿐 지우지 않는다 — 옮기는 것은 타임라인 화면 노드 하나다.
     assert ".remove()" not in js
     assert "localStorage" in js and "catch (error)" in js
+
+
+def test_fit_window_splits_the_decks_by_tokens_and_folds_source_rows_for_the_program() -> None:
+    """W-86c(D150) — 「화면 맞춤」: 무대를 화면 높이에 묶고 위·아래 덱을 토큰 비율로 나눈다.
+    타임라인 화면이면 원본 레일·추천 구간(원본 쪽 칸)을 접는다. 넓은 화면만."""
+    css = window_js.window_css()
+    wide = css[css.index("@media (min-width: 1051px)") :]
+    assert '#visual-stage[data-vl-fit="on"]:has(#vl-timeline-deck' in wide
+    assert "minmax(0, var(--vl-upper-deck-fr))" in wide
+    assert "minmax(0, var(--vl-lower-deck-fr))" in wide
+    assert '"thumbs player quote" "thumbs timeline ranges" "deck deck deck"' in wide
+    assert '[data-vl-viewer="program"] #visual-timeline' in wide
+    from ui import design_tokens
+
+    assert design_tokens.SCALAR_TOKENS["upper-deck-fr"] == "1fr"
+    assert design_tokens.SCALAR_TOKENS["lower-deck-fr"] == "1fr"
+    js = window_js.window_bind_js()
+    assert 'id="vl-fit-toggle"' in js and "WIN.showInspector = function (key)" in js
+
+
+def test_the_player_opens_the_share_tab_when_sharing_ends() -> None:
+    body = PLAYER_APP_JS[PLAYER_APP_JS.index("reopenDraft();") :][:200]
+    assert 'W.__vlWindow.showInspector("share")' in body

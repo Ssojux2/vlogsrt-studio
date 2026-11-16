@@ -41,6 +41,8 @@ INSPECTOR_TABS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ),
 )
 STORAGE_KEY = "vlogsrt.inspectorTab"
+FIT_STORAGE_KEY = "vlogsrt.fitWindow"
+FIT_ON = "on"
 
 WINDOW_CORE_JS = r"""
 (function (root) {
@@ -189,6 +191,41 @@ _BIND_JS = r"""
       b.setAttribute("aria-selected", b.getAttribute("data-vl-tab") === key ? "true" : "false");
     });
   }
+  WIN.showInspector = function (key) { writeTab(key); paintTabs(); };
+  // ─── 화면 맞춤(W-86c) — 켜면 무대를 화면 높이에 묶고 위·아래 덱을 토큰 비율로 나눈다 ───
+  function readFit() {
+    try { return W.localStorage.getItem(CFG.fitKey) === CFG.fitOn; } catch (error) { return false; }
+  }
+  function writeFit(on) {
+    try { W.localStorage.setItem(CFG.fitKey, on ? CFG.fitOn : ""); } catch (error) { /* 편의 */ }
+  }
+  function paintFit() {
+    var stage = $(CFG.stage);
+    var on = readFit();
+    if (stage) {
+      if (on) { stage.setAttribute("data-vl-fit", CFG.fitOn); }
+      else { stage.removeAttribute("data-vl-fit"); }
+    }
+    var button = document.getElementById("vl-fit-toggle");
+    if (button) { button.setAttribute("aria-pressed", on ? "true" : "false"); }
+  }
+  function ensureFit() {
+    var deck = $(CFG.deck);
+    if (!deck) { return; }
+    if (!deck.querySelector(".vl-deck-tools")) {
+      var tools = document.createElement("div");
+      tools.className = "vl-deck-tools";
+      tools.innerHTML = '<button type="button" id="vl-fit-toggle" aria-pressed="false"' +
+        ' title="위 덱 · 아래 덱을 화면 높이에 맞춰 나눈다(Final Cut 창처럼)">화면 맞춤</button>';
+      tools.addEventListener("click", function (ev) {
+        if (!(ev.target.closest && ev.target.closest("#vl-fit-toggle"))) { return; }
+        writeFit(!readFit());
+        paintFit();
+      });
+      deck.insertBefore(tools, deck.firstChild);
+    }
+    paintFit();
+  }
   function settle() {
     if (!WIN.stageNode) {
       var found = document.querySelector("#" + CFG.deck + " .tl-root:not(.tl-empty)");
@@ -196,6 +233,7 @@ _BIND_JS = r"""
     }
     if (WIN.stageNode && !WIN.stageNode.isConnected) { ensureProgram(); }
     ensureTabs();
+    ensureFit();
     paint();
   }
   if (typeof MutationObserver === "function") {
@@ -222,6 +260,8 @@ def window_bind_js() -> str:
         "source": SOURCE,
         "programMode": PROGRAM,
         "storageKey": STORAGE_KEY,
+        "fitKey": FIT_STORAGE_KEY,
+        "fitOn": FIT_ON,
         "tabs": [[key, label, list(ids)] for key, label, ids in INSPECTOR_TABS],
     }
     return WINDOW_CORE_JS + _BIND_JS.replace("__CONFIG__", json.dumps(config, ensure_ascii=False))
@@ -252,4 +292,30 @@ def window_css() -> str:
   color: var(--vl-ink); box-shadow: inset 0 -2px 0 var(--vl-accent-ink); }}
 {hide_share} {{ display: none !important; }}
 {hide_analysis} {{ display: none !important; }}
+/* 화면 맞춤(W-86c, D150) — 덱 머리의 단추. 켜면(넓은 화면, 타임라인이 있을 때) 무대를
+   화면 높이에 묶고 위 덱(재생기 줄)과 아래 덱을 토큰 비율로 나눈다 — 덱과 뷰어는 제 칸
+   안에서 스크롤·맞춤한다. */
+.vl-deck-tools {{ display: flex; justify-content: flex-end; gap: 6px; }}
+.vl-deck-tools button {{ font: inherit; font-size: 12px; padding: 1px 8px; border-radius: 4px;
+  border: 1px solid var(--vl-line-strong); background: var(--vl-surface-raised);
+  color: var(--vl-ink); cursor: pointer; }}
+.vl-deck-tools button[aria-pressed="true"] {{ background: var(--vl-accent-soft); }}
+@media (min-width: 1051px) {{
+  #{STAGE_ID}[data-vl-fit="{FIT_ON}"]:has(#{DECK_ID} .tl-root:not(.tl-empty)) {{
+    height: max(var(--vl-stage-min-h), calc(100vh - var(--vl-stage-top)));
+    grid-template-areas: "thumbs player quote" "thumbs timeline ranges" "deck deck deck"
+      "foot foot foot";
+    grid-template-rows: minmax(0, var(--vl-upper-deck-fr)) auto
+      minmax(0, var(--vl-lower-deck-fr)) var(--vl-statusline-h);
+    --vl-viewer-video-h: auto; --vl-viewer-video-flex: 1 1 auto; }}
+  /* 인스펙터는 위 덱 칸 안에서 스크롤 · 패널은 「고급 도구」 길이라 맞춤에서는 접는다. */
+  #{STAGE_ID}[data-vl-fit="{FIT_ON}"] #{INSPECTOR_ID} {{ max-height: none; min-height: 0; }}
+  #{STAGE_ID}[data-vl-fit="{FIT_ON}"] #vl-panel {{ display: none; }}
+  #{STAGE_ID}[data-vl-fit="{FIT_ON}"] #vl-ranges {{ max-height: var(--vl-rail-h); }}
+  /* 원본 레일 · 추천 구간은 원본 쪽 칸이다 — 뷰어가 타임라인이면 접어 위 덱을 넓힌다. */
+  #{STAGE_ID}[data-vl-fit="{FIT_ON}"][data-vl-viewer="{PROGRAM}"] #visual-timeline,
+  #{STAGE_ID}[data-vl-fit="{FIT_ON}"][data-vl-viewer="{PROGRAM}"] #vl-ranges {{ display: none; }}
+  #{STAGE_ID}[data-vl-fit="{FIT_ON}"] #{DECK_ID} {{ min-height: 0; overflow: hidden auto; }}
+  #{STAGE_ID}[data-vl-fit="{FIT_ON}"] #{PROGRAM_ID} .tl-frame {{ height: 100%; }}
+}}
 """

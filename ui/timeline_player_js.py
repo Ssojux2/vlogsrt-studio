@@ -336,7 +336,7 @@ PLAYER_APP_JS = r"""
       two(seconds % 60) + ":" + two(frame % fps);
   }
   function paint() {
-    paintTransport(); paintMissing(); paintPlayhead(); paintCues(); requestLane();
+    paintTransport(); paintMissing(); paintPlayhead(); paintCues(); requestLane(); paintIndex();
   }
   function relayout() {
     S.spans = TL.layout(S.doc);
@@ -619,7 +619,7 @@ PLAYER_APP_JS = r"""
   // ─── 클립 편집(W-71f): 플레이헤드에서 자르기 · 고른 클립 지우기(리플) · 다음 조각과 합치기 ─
   // 연산은 모델(`TL.clipEdit`)이 하고 거부도 모델의 글 그대로 보인다. 지운 클립의 원본 구간은
   // 문서의 뺀 구간으로 남는다(렌더 보고서 `timeline_cut`) — 되돌리기로 돌아온다.
-  var CLIP_EDIT_LABELS = { blade: "자르기", "delete": "지우기", join: "합치기" };
+  var CLIP_EDIT_LABELS = { blade: "블레이드", "delete": "삭제", join: "합치기" };
   function clipOp(op) {
     if (!S.doc || !S.spans.length) { return; }
     var number = op === "blade" ? TL.sourcePoint(S.doc, Math.min(S.playhead, S.total - 1))[0]
@@ -1020,6 +1020,73 @@ PLAYER_APP_JS = r"""
   }
 
 
+
+  // ─── 타임라인 인덱스(W-86c, D150) ──────────────────────────────────
+  // Final Cut 「인덱스」 — 클립 목록 · 자막 목록(「오류 보기」면 경고 줄만). 누르면 그 자리로 간다.
+  function indexState() {
+    if (!S.index) { S.index = { open: false, tab: "clips", errors: false }; }
+    return S.index;
+  }
+  function toggleIndex() { indexState().open = !indexState().open; paintIndex(); }
+  function indexTab(tab) { indexState().tab = tab; paintIndex(); }
+  function paintIndex() {
+    var box = $("tl-index");
+    var list = $("tl-index-list");
+    var state = indexState();
+    var toggle = $("tl-index-toggle");
+    if (toggle) { toggle.setAttribute("aria-pressed", state.open ? "true" : "false"); }
+    if (!box || !list || !S.doc) { return; }
+    box.hidden = !state.open;
+    if (!state.open) { return; }
+    Array.prototype.forEach.call(box.querySelectorAll("[data-tl^='index-']"), function (b) {
+      b.setAttribute("aria-pressed", b.getAttribute("data-tl") === "index-" + state.tab ?
+        "true" : "false");
+    });
+    var errors = $("tl-index-errors");
+    if (errors) { errors.disabled = state.tab !== "cues"; errors.checked = state.errors; }
+    list.innerHTML = state.tab === "clips" ? indexClipRows() : indexCueRows(state.errors);
+  }
+  function indexClipRows() {
+    return S.spans.map(function (span, i) {
+      var seconds = frameSeconds(span.sourceId);
+      return '<div class="tl-index-row' + (i === S.sel ? " is-selected" : "") +
+        '" role="option" data-index-clip="' + i + '"><span class="tl-cue-n">' + (i + 1) +
+        '</span><span class="tl-cue-time">' + timecode(span.outStart) + "</span><span>" +
+        esc(nameOf(span.sourceId)) + '</span><span class="tl-cue-num">' +
+        (span.startFrame * seconds).toFixed(2) + "–" + (span.endFrame * seconds).toFixed(2) +
+        "초</span></div>";
+    }).join("") || '<div class="tl-cue-empty">클립이 없습니다.</div>';
+  }
+  function indexCueRows(errorsOnly) {
+    var rows = captionRows().filter(function (row) { return !errorsOnly || row.warned; });
+    return rows.map(function (row) {
+      var warn = warnText(row.id);
+      return '<div class="tl-index-row' + (row.id === S.cue ? " is-selected" : "") +
+        '" role="option" data-index-cue="' + esc(row.id) + '"><span class="tl-cue-n">' + row.n +
+        '</span><span class="tl-cue-time">' + timecode(row.startFrame) + "</span><span>" +
+        esc(CG.oneLine(row.text) || "(빈 글)") + '</span><span class="tl-cue-warn">' +
+        esc(warn) + "</span></div>";
+    }).join("") || '<div class="tl-cue-empty">' +
+      (errorsOnly ? "경고가 있는 자막이 없습니다." : "보이는 자막이 없습니다.") + "</div>";
+  }
+  function onIndexDown(ev) {
+    var row = ev.target.closest ? ev.target.closest(".tl-index-row") : null;
+    if (!row) { return; }
+    ev.preventDefault();
+    var clip = row.getAttribute("data-index-clip");
+    if (clip !== null) {
+      commitText();
+      S.sel = Number(clip);
+      S.cursor = null;
+      if (S.playing) { stopPlayback(); }
+      seek(S.spans[S.sel].outStart);
+    } else {
+      pickCue(row.getAttribute("data-index-cue"));
+    }
+    if (S.rootEl) { S.rootEl.focus({ preventScroll: true }); }
+    paint();
+  }
+
   // ─── 파형 자막 레인(W-87b, D149) ───────────────────────────────────
   // Subtitle Edit 파형 조작: 누름 = 그 자리로 · 블록 고름 / 가장자리 끌기 = 시작·끝 /
   // 몸통 끌기 = 옮김 / 빈 곳 끌기 = 새 선택(Enter 넣기 · Esc 취소) / ⇧누름 = 시작 ·
@@ -1316,6 +1383,7 @@ PLAYER_APP_JS = r"""
           " 입혔으면 <이름>.burned.mp4 · 영어 번역이 아직 없으면 한국어만). 「최종 편집」 탭도" +
           " 새 초안으로 열었습니다.", false);
         reopenDraft();
+        if (W.__vlWindow && W.__vlWindow.showInspector) { W.__vlWindow.showInspector("share"); }
       });
     }, POLL_MS);
   }
@@ -1411,6 +1479,8 @@ PLAYER_APP_JS = r"""
       special = function () { trimToCursor(TL.SIDE_START); };
     } else if (ev.altKey && !mod && ev.code === "BracketRight") {
       special = function () { trimToCursor(TL.SIDE_END); };
+    } else if (mod && ev.shiftKey && !ev.altKey && ev.code === "Digit2") {
+      special = toggleIndex;
     } else if (mod && !ev.altKey && ev.code === "KeyZ") {
       special = function () { undo(ev.shiftKey); };
     } else if (mod && !ev.altKey && ev.code === "KeyS") {
@@ -1498,7 +1568,9 @@ PLAYER_APP_JS = r"""
       "cue-merge": function () { cueOp("merge", cueTargetOf(target)); },
       "cue-delete": function () { cueOp("delete", cueTargetOf(target)); },
       "cue-insert": function () { commitText(); cueOp("insert"); },
-      "force-save": function () { saveNow(true); }, render: render };
+      "force-save": function () { saveNow(true); }, render: render, index: toggleIndex,
+      "index-clips": function () { indexTab("clips"); },
+      "index-cues": function () { indexTab("cues"); } };
     var act = acts[target.getAttribute("data-tl")];
     if (act) { act(); }
   }
@@ -1547,6 +1619,19 @@ PLAYER_APP_JS = r"""
       c.__tlBound = true;
       c.addEventListener("pointerdown", onStripDown);
       if (W.ResizeObserver) { new W.ResizeObserver(paintStrip).observe(c); }
+    }
+    var indexList = $("tl-index-list");
+    if (indexList && !indexList.__tlBound) {
+      indexList.__tlBound = true;
+      indexList.addEventListener("pointerdown", onIndexDown);
+    }
+    var indexErrors = $("tl-index-errors");
+    if (indexErrors && !indexErrors.__tlBound) {
+      indexErrors.__tlBound = true;
+      indexErrors.addEventListener("change", function () {
+        indexState().errors = indexErrors.checked;
+        paintIndex();
+      });
     }
     var lane = laneCanvas();
     if (lane && !lane.__tlBound) {

@@ -500,3 +500,16 @@ def _ancestor_elem_ids(config: dict[str, Any], target: int, by_elem: dict[Any, A
 
     path = walk(config["layout"], []) or []
     return [names[i] for i in reversed(path) if names.get(i)]
+
+
+def test_the_timeline_index_lists_clips_and_cues_and_filters_errors() -> None:
+    """W-86c(D150) — Final Cut 「인덱스」: 클립 · 자막(「오류 보기」) 목록, 누르면 그 자리로."""
+    page = timeline_player_html(client_model("sig", "tok", _opened(), _media(), TIERS))
+    for needle in ('id="tl-index-toggle"', 'id="tl-index"', 'id="tl-index-errors"',
+                   'data-tl="index-clips"', 'data-tl="index-cues"', ">블레이드</button>",
+                   ">실행 취소</button>", ">실행 복귀</button>"):  # fmt: skip
+        assert needle in page, needle
+    for action in ("index", "index-clips", "index-cues"):
+        assert re.search(rf'"{re.escape(action)}": ', PLAYER_JS) or f"{action}: " in PLAYER_JS
+    assert "!errorsOnly || row.warned" in PLAYER_JS
+    assert 'indexList.addEventListener("pointerdown", onIndexDown);' in PLAYER_JS

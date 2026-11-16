@@ -120,6 +120,10 @@ SCALAR_TOKENS: dict[str, str] = {
     # 값). 위·아래 0.5/0.5는 덱이 둘째 영상을 내려놓는 W-86에서 맞춘다(지금 덱의 재생기는 제 영상을
     # 싣고 있어 크다).
     "deck-viewer-h": "clamp(300px, 46vh, 540px)",
+    # 「화면 맞춤」(W-86c)을 켜면 위 덱(재생기 줄)과 아래 덱이 남는 높이를 이 비율로 나눈다 —
+    # Final Cut 기본 작업공간의 0.5/0.5.
+    "upper-deck-fr": "1fr",
+    "lower-deck-fr": "1fr",
     "font-sans": ", ".join(FONT_SANS_STACK),
     "font-mono": ", ".join(FONT_MONO_STACK),
 }
