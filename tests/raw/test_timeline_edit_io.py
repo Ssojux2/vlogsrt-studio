@@ -440,3 +440,26 @@ def test_adding_a_source_refuses_a_stale_revision_or_a_clipped_source_and_writes
         )
     assert (created.folder / "timeline.json").read_bytes() == before
     assert _record_of(created)["revision"] == 1
+
+
+def test_edited_cues_are_saved_reopened_and_carried_into_the_srt(trip: Folder) -> None:
+    """W-71i — 타임라인 화면의 자막 편집(글·나누기·넣기)은 저장의 자막이다 — 심은 리비전 그대로."""
+    created = _create(trip, datetime(2026, 11, 13, 0, 9, 0, tzinfo=UTC))
+    timeline_id = created.folder.name
+    document = created.document
+    first = timeline_edit.project(document).cues[0]
+    cue = next(c for c in document.cues if c.cue_id == first.cue_id)
+    edited = timeline_edit.cue_set_text(document, cue.cue_id, "고친 글", FINAL_EDIT_SETTINGS)
+    middle = (cue.start_ms + cue.end_ms) // 2
+    edited = timeline_edit.cue_split(edited, cue.cue_id, middle, "앞 반", "뒤 반")
+    source_id, at = timeline_edit.source_ms_at(edited, 0, timeline_edit.SIDE_START)
+    edited = timeline_edit.cue_insert(edited, source_id, at, at + 10, "새 자막")
+    saved = trip.service.timeline_save(trip.root, timeline_id, 1, timeline_edit.to_payload(edited))
+    assert saved["revision"] == 2
+    reopened = trip.service.timeline_open(trip.root, timeline_id)
+    assert reopened["doc"]["seeded"] == timeline_edit.to_payload(document)["seeded"]
+    back = timeline_edit.from_payload(reopened["doc"], document.facts)
+    assert back == edited
+    srt = timeline_edit.srt_text(back)
+    assert "앞 반" in srt and "뒤 반" in srt and "고친 글" not in srt
+    assert "새 자막" in srt

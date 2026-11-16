@@ -138,7 +138,20 @@ def timeline_player_html(model: dict[str, Any] | None) -> str:
         "</div>"
         '<div class="tl-source-bar"><canvas id="tl-source-canvas"'
         ' aria-label="고른 클립의 원본 범위 — 손잡이를 끌어 앞뒤를 조정"></canvas></div></div>'
-        "</div>"
+        f"{_cue_panel_html()}</div>"
+    )
+
+
+def _cue_panel_html() -> str:
+    """자막 칸(W-71i) — 보이는 자막 목록과 고른 자막의 편집 칸. 내용은 실행본이 그린다."""
+    return (
+        '<div class="tl-cues"><div class="tl-cues-head"><strong>자막</strong>'
+        '<span id="tl-cue-count" class="tl-cue-count"></span><span class="tl-gap"></span>'
+        '<button type="button" data-tl="cue-insert"'
+        ' title="플레이헤드에 빈 자막 넣기 (⌥C)">새 자막 ⌥C</button></div>'
+        '<div class="tl-cues-body"><div id="tl-cue-list" class="tl-cue-list" role="listbox"'
+        ' aria-label="보이는 자막 — 누르면 고르고 그 시작으로 간다"></div>'
+        '<div id="tl-cue-edit" class="tl-cue-edit"></div></div></div>'
     )
 
 
@@ -182,7 +195,8 @@ TIMELINE_PLAYER_CSS = """
 .tl-timecode { font-family: var(--vl-font-mono); font-size: 14px; }
 .tl-source { color: var(--vl-ink-muted); }
 .tl-gap { flex: 1 1 auto; }
-.tl-status { color: var(--vl-ink-muted); }
+.tl-status { color: var(--vl-ink-muted); flex: 1 0 100%; min-height: 1.4em; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
 .tl-status.is-error { color: var(--vl-danger); }
 .tl-strip { position: relative; height: 56px; border: 1px solid var(--vl-line);
   border-radius: 6px; background: var(--vl-surface-sunken); overflow: hidden; }
@@ -199,6 +213,36 @@ TIMELINE_PLAYER_CSS = """
 .tl-transport button:disabled { opacity: 0.5; cursor: default; }
 .tl-strip canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: pointer;
   touch-action: none; }
+.tl-cues { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.tl-cues-head { display: flex; gap: 6px; align-items: center; }
+.tl-cue-count { color: var(--vl-ink-muted); }
+.tl-cues button { font: inherit; font-size: 12px; padding: 1px 8px; border-radius: 4px;
+  cursor: pointer; border: 1px solid var(--vl-line-strong); background: var(--vl-surface-raised);
+  color: var(--vl-ink); }
+.tl-cues button:disabled { opacity: 0.5; cursor: default; }
+.tl-cues-body { display: flex; gap: 8px; align-items: stretch; }
+.tl-cue-list { position: relative; flex: 1 1 55%; min-width: 0; max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--vl-line); border-radius: 6px; background: var(--vl-surface-sunken); }
+.tl-cue-row { display: flex; gap: 8px; padding: 3px 8px; cursor: pointer;
+  border-bottom: 1px solid var(--vl-line); }
+.tl-cue-row:last-child { border-bottom: none; }
+.tl-cue-row.is-current { background: var(--vl-accent-soft); }
+.tl-cue-row.is-selected { box-shadow: inset 3px 0 0 var(--vl-accent); }
+.tl-cue-row .tl-cue-time { font-family: var(--vl-font-mono); color: var(--vl-ink-muted);
+  flex: none; }
+.tl-cue-row .tl-cue-words { min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.tl-cue-row .tl-cue-warn { color: var(--vl-warn); flex: none; }
+.tl-cue-empty { padding: 6px 8px; color: var(--vl-ink-muted); }
+.tl-cue-edit { flex: 1 1 45%; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.tl-cue-edit textarea { font: inherit; font-size: 13px; min-height: 52px; resize: vertical;
+  padding: 4px 6px; border: 1px solid var(--vl-line-strong); border-radius: 4px;
+  background: var(--vl-surface-raised); color: var(--vl-ink); }
+.tl-cue-edit .tl-cue-buttons { display: flex; flex-wrap: wrap; gap: 4px; }
+.tl-cue-edit .tl-cue-muted { color: var(--vl-ink-muted); }
+.tl-cue-edit .tl-cue-warn { color: var(--vl-warn); min-height: 1.4em; }
+@media (max-width: 720px) { .tl-cues-body { flex-direction: column; } }
 """
 
 

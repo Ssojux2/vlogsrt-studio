@@ -556,6 +556,83 @@ TIMELINE_CORE_JS = r"""
     throw fail("모르는 클립 편집이다: " + op);
   };
 
+  // ─── 자막 편집: 플레이헤드에서(W-71i) ──────────────────────────────
+  // 자막은 원본 밀리초에 산다 — 플레이헤드(출력 프레임)를 그 아래 원본의 밀리초로 바꿔 모델 연산
+  // (`cueSetTimes`·`cueSplit`…)에 넘기고, 화면이 다음에 고를 자막(`cue`)만 정한다. 컷에 가려진
+  // 자막은 고치지 않는다(클립을 늘리면 그대로 돌아온다, 규칙 9). → { doc | null, cue }
+  TL.splitText = function (text) {
+    var newline = text.indexOf("\n");
+    if (newline >= 0) { return [text.slice(0, newline), text.slice(newline + 1)]; }
+    var list = chars(text);
+    var middle = list.length / 2;
+    var best = -1;
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] !== " ") { continue; }
+      if (best < 0 || Math.abs(i - middle) < Math.abs(best - middle)) { best = i; }
+    }
+    if (best < 0) { return [text, ""]; }
+    return [list.slice(0, best).join(""), list.slice(best + 1).join("")];
+  };
+  function visibleIds(doc) { return TL.project(doc).cues.map(function (cue) { return cue[0]; }); }
+  TL.cueAt = function (doc, playhead) {
+    var t = playhead * TL.sequenceFrameTicks(doc.facts);
+    var hit = TL.project(doc).cues.filter(function (cue) {
+      return cue[2] === cue[3] ? cue[2] === t : cue[2] <= t && t < cue[3];
+    })[0];
+    return hit ? hit[0] : null;
+  };
+  // 플레이헤드 아래 원본의 밀리초 — 자막의 원본이 아니면 거부한다(다른 원본 시계를 줄 수 없다).
+  function playheadMs(doc, cue, playhead, side) {
+    var at = TL.sourceMsAt(doc, playhead * TL.sequenceFrameTicks(doc.facts), side);
+    if (at[0] !== cue[1]) { throw fail("플레이헤드가 이 자막의 원본에 있지 않다"); }
+    return at[1];
+  }
+  function cueInsertAt(doc, playhead, settings) {
+    if (!(0 <= playhead && playhead < TL.editedFrames(doc))) {
+      throw fail("플레이헤드 자리에 클립이 없다");
+    }
+    var seq = TL.sequenceFrameTicks(doc.facts);
+    var start = TL.sourceMsAt(doc, playhead * seq, SIDE_START);
+    var span = TL.layout(doc)[TL.sourcePoint(doc, playhead)[0]];
+    var clipEnd = TL.sourceMsAt(doc, (span.outStart + span.outFrames) * seq, SIDE_END)[1];
+    var id = "n" + doc.nextCue;
+    var end = Math.max(start[1], Math.min(start[1] + settings.newCueMs, clipEnd));
+    return { doc: TL.cueInsert(doc, start[0], start[1], end, ""), cue: id };
+  }
+  function cueAfterDelete(doc, id) {
+    var ids = visibleIds(doc);
+    var at = ids.indexOf(id);
+    var kept = TL.cueDelete(doc, id);
+    var next = ids[at + 1] !== undefined ? ids[at + 1] : ids[at - 1];
+    return { doc: kept, cue: next === undefined ? null : next };
+  }
+  TL.cueEdit = function (doc, op, id, playhead, settings, text) {
+    if (op === "insert") { return cueInsertAt(doc, playhead, settings); }
+    var cue = doc.cues[cueIndex(doc, id)];
+    if (visibleIds(doc).indexOf(id) < 0) {
+      throw fail("컷에 가려진 자막은 고치지 않는다 — 클립을 늘리면 돌아온다");
+    }
+    if (op === "start" || op === "end") {
+      var isStart = op === "start";
+      var ms = playheadMs(doc, cue, playhead, isStart ? SIDE_START : SIDE_END);
+      if (isStart ? ms > cue[3] : ms < cue[2]) { throw fail("자막 시작이 끝보다 늦어진다"); }
+      return { doc: TL.cueSetTimes(doc, id, isStart ? ms : cue[2], isStart ? cue[3] : ms),
+        cue: id };
+    }
+    if (op === "split") {
+      var parts = TL.splitText(cue[4]);
+      var at = playheadMs(doc, cue, playhead, SIDE_START);
+      return { doc: TL.cueSplit(doc, id, at, parts[0], parts[1]), cue: id };
+    }
+    if (op === "merge") { return { doc: TL.cueMergeNext(doc, id), cue: id }; }
+    if (op === "delete") { return cueAfterDelete(doc, id); }
+    if (op === "text") {
+      if (text === cue[4]) { return { doc: null, cue: id }; }
+      return { doc: TL.cueSetText(doc, id, text, settings), cue: id };
+    }
+    throw fail("모르는 자막 편집이다: " + op);
+  };
+
   root.__vlTL = TL;
   if (typeof module !== "undefined" && module.exports) { module.exports = TL; }
 })(typeof window !== "undefined" ? window : globalThis);
