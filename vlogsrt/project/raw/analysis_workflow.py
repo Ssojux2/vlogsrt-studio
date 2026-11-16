@@ -27,7 +27,6 @@ from __future__ import annotations
 import contextvars
 import functools
 import hashlib
-import inspect
 import json
 import math
 import threading
@@ -37,7 +36,7 @@ from datetime import UTC, datetime
 from datetime import date as date_type
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, ClassVar, ParamSpec, Protocol, TypeVar, cast
+from typing import Any, ClassVar, ParamSpec, Protocol, TypeVar
 
 from vlogsrt import log, oscompat, preprocess
 from vlogsrt.project.raw import asr_epoch as asr_epoch_store
@@ -58,7 +57,6 @@ from vlogsrt.project.raw import understanding_luna as luna
 from vlogsrt.project.raw.analysis_approval import (
     AsrPhaseApproval,
     require_live_asr_approval,
-    require_text_approval,
 )
 from vlogsrt.project.raw.analysis_config import (
     ANALYSIS_PROXY_LIMITS,
@@ -71,13 +69,10 @@ from vlogsrt.project.raw.analysis_store import (
     new_analysis_revision_id,
 )
 from vlogsrt.project.raw.caption_provider import (
-    RescueTimingProvider,
     TimingProvider,
-    TransportTextProvider,
     gemini_timed_transcript,
     parse_timing_response,
     timing_provider_for,
-    words_provider_for,
 )
 from vlogsrt.project.raw.config import (
     ANALYSIS_PROVIDER_GOOGLE,
@@ -184,10 +179,6 @@ class ReplayFixtures:
     sources: Mapping[str, tuple[tuple[float, float, str], ...]] = field(default_factory=dict)
     chunks: Mapping[str, tuple[tuple[float, float, str], ...]] = field(default_factory=dict)
     windows: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
-    # 1단계 글자 경로(D59 19c)의 선언 — `text-fixtures.json`이 없으면 None(글자 경로는 묻지 않는다).
-    # `text_chunks`는 WAV sha → 글자, `text_sources`는 원본 sha → {청크 번호: 글자}다.
-    text_chunks: Mapping[str, str] | None = None
-    text_sources: Mapping[str, Mapping[int, str]] = field(default_factory=dict)
     # Gemini 글자 경로(W-35b)의 선언 — `word-text-fixtures.json`이 없으면 None(묻지 않는다).
     # `word_chunks`는 WAV sha → Gemini 응답, `word_sources`는 원본 sha → {청크 번호: 응답}이다.
     word_chunks: Mapping[str, Mapping[str, Any]] | None = None
@@ -213,25 +204,6 @@ class ReplayFixtures:
             exact=self.chunks,
             gemini_exact=self.word_chunks or {},
             gemini_declared=self.word_sources.get(source_sha256),
-        )
-
-    def text_for(self, source_sha256: str) -> source_text.ReplayTextProvider | None:
-        """원본 하나의 글자 재생자 — 글자 픽스처 파일이 없으면 None(글자 경로는 묻지 않는다).
-
-        파일이 있는데 그 청크의 선언이 없으면 그 청크는 글자 경로 실패로 남는다(지어내지 않는다).
-        """
-        if self.text_chunks is None:
-            return None
-        return source_text.ReplayTextProvider(
-            exact=self.text_chunks, declared=self.text_sources.get(source_sha256)
-        )
-
-    def words_for(self, source_sha256: str) -> gemini_text.ReplayWordProvider | None:
-        """원본 하나의 Gemini 글자 재생자 — 선언 파일이 없으면 None(묻지 않는다)."""
-        if self.word_chunks is None:
-            return None
-        return gemini_text.ReplayWordProvider(
-            exact=self.word_chunks, declared=self.word_sources.get(source_sha256)
         )
 
 
@@ -263,14 +235,11 @@ def load_replay_fixtures(directory: Path) -> ReplayFixtures:
         windows = {
             str(key): value for key, value in _mapping_field(payload, "windows", luna_path).items()
         }
-    text_chunks, text_sources = _load_text_fixtures(directory / "text-fixtures.json")
     word_chunks, word_sources = _load_word_fixtures(directory / "word-text-fixtures.json")
     return ReplayFixtures(
         sources=sources,
         chunks=chunks,
         windows=windows,
-        text_chunks=text_chunks,
-        text_sources=text_sources,
         word_chunks=word_chunks,
         word_sources=word_sources,
     )
@@ -302,34 +271,6 @@ def _fixture_response(value: object, path: Path) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise ReplayFixtureError(f"Gemini 응답 선언은 객체여야 한다: {path} ({value!r})")
     return dict(value)
-
-
-def _load_text_fixtures(
-    path: Path,
-) -> tuple[Mapping[str, str] | None, Mapping[str, Mapping[int, str]]]:
-    """1단계 글자 경로 재생 선언(D59 19c) — `{"chunks": {WAV sha: 글자}, "sources": {원본 sha:
-    {청크 번호: 글자}}}`. 파일이 없으면 (None, {}) — 재생 글자 경로는 묻지 않는다."""
-    if not path.is_file():
-        return None, {}
-    payload = _read_json(path)
-    chunks = {
-        str(sha): _fixture_text(value, path)
-        for sha, value in _mapping_field(payload, "chunks", path).items()
-    }
-    sources: dict[str, Mapping[int, str]] = {}
-    for sha, declared in _mapping_field(payload, "sources", path).items():
-        if not isinstance(declared, Mapping):
-            raise ReplayFixtureError(f"글자 선언이 객체가 아니다: {path} ({sha})")
-        sources[str(sha)] = {
-            int(index): _fixture_text(text, path) for index, text in declared.items()
-        }
-    return chunks, sources
-
-
-def _fixture_text(value: object, path: Path) -> str:
-    if not isinstance(value, str):
-        raise ReplayFixtureError(f"글자 선언은 문자열이어야 한다: {path} ({value!r})")
-    return value
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -573,9 +514,6 @@ class ApprovedPhaseAsrProvider:
     audio: SelectedAudio
     approval: AsrPhaseApproval
     gate: AsrReservationGate
-    rescue_gate: AsrReservationGate | None = None
-    """「다른 귀 기준 재전사」(D78) 예산 문 — 승인이 다시 묻기를 묶었을 때만. 없으면 온도를 단
-    요청(다시 묻기)은 보내지 않는다."""
 
     def timed_transcript(
         self,
@@ -586,7 +524,6 @@ class ApprovedPhaseAsrProvider:
         on: date_type,
         stem: str = "",
         source: str = "",
-        temperature: float | None = None,
     ) -> Any:
         require_live_asr_approval(
             self.approval,
@@ -606,8 +543,6 @@ class ApprovedPhaseAsrProvider:
                 f"청크 범위가 선택 오디오 밖이다: [{binding.sample_start}, {binding.sample_end})"
                 f" / {self.audio.sample_count} 샘플"
             )
-        if temperature is not None:
-            return self._rescue(binding, chunk, settings, on, stem, source, temperature)
         self.gate.reserve(count=1, key=str(binding.request_id))
         return self.inner.timed_transcript(
             binding=binding, chunk=chunk, settings=settings, on=on, stem=stem, source=source
@@ -616,39 +551,6 @@ class ApprovedPhaseAsrProvider:
     # ─────────────────────────────────────────────────────────────
     #  원본별 입력 지문 — 캐시 무효화의 열쇠(§14.2)
     # ─────────────────────────────────────────────────────────────
-
-    def _rescue(
-        self,
-        binding: Any,
-        chunk: Any,
-        settings: RawWorkflowConfig,
-        on: date_type,
-        stem: str,
-        source: str,
-        temperature: float,
-    ) -> Any:
-        """다시 묻기 한 번 — 승인의 다시 묻기 예산에서 센다(1차 예산과 따로). 문은 위에서 이미
-        지났다."""
-        if self.rescue_gate is None:
-            raise AnalysisApprovalError(
-                "승인이 다시 묻기를 묶지 않았다 — 다른 귀와 어긋난 조각을 다시 묻지 않는다"
-            )
-        if "temperature" not in inspect.signature(self.inner.timed_transcript).parameters:
-            raise AnalysisApprovalError(
-                "이 시간 엔진은 다시 묻기(온도)를 받지 않는다 — D78 다시 묻기는 whisper 원본에만"
-                " 있다(D92). 기본 온도로 몰래 다시 묻지 않는다(D28)"
-            )
-        self.rescue_gate.reserve(count=1, key=str(binding.request_id))
-        tempered = cast(RescueTimingProvider, self.inner)  # 온도 손잡이를 확인했다
-        return tempered.timed_transcript(
-            binding=binding,
-            chunk=chunk,
-            settings=settings,
-            on=on,
-            stem=stem,
-            source=source,
-            temperature=temperature,
-        )
 
 
 def source_input_fingerprint(
@@ -1479,6 +1381,10 @@ def _transcribe_source(
     # 글자 귀는 소리가 없는 원본도 이 차례에 고정한다(W-35b) — 고정이 없으면 자막 문서가 생긴 뒤
     # 「이미 들은 영상」으로 읽혀 결속 꼬리표가 바뀐다(재개 지문이 어긋난다).
     text_ear.pin(workspace, asset.asset_id, asr_epoch, text_ear.resolve(workspace, asset.asset_id))
+    # 시간 엔진도 같다(D163) — 무성 원본이 고정 없이 자막 문서를 얻으면 2단계에서 「이미 들은 영상」
+    # (whisper)으로 읽혀 입력 지문이 어긋난다.
+    engine = timing_engine_for_model(workflow.models.timing_model)
+    timing_engine.pin(workspace, asset.asset_id, asr_epoch, engine.key)
     if audio is not None:
         context.check_cancel()
         asr_evidence, utterances, text_record = _hear_source(
@@ -1512,10 +1418,7 @@ def _hear_source(
     ear = text_ear.resolve(workspace, asset.asset_id)  # `_transcribe_source`가 이미 고정했다
     asr_provider = _asr_provider_for(providers, workflow, settings, audio, asset.asset_id)
     hearing = _Hearing(
-        asr_provider,
-        workspace.root / "cache" / "source-asr" / asset.asset_id,
-        asr_epoch,
-        _may_rescue(asr_provider),
+        asr_provider, workspace.root / "cache" / "source-asr" / asset.asset_id, asr_epoch
     )
     evidence = _first_hearing(
         revision, asset, settings, workflow, providers, audio, source_dir, hearing
@@ -1536,7 +1439,6 @@ def _hear_source(
         audio,
         evidence,
         source_dir,
-        hearing if engine.rescue else None,
     )
 
 
@@ -1575,14 +1477,6 @@ def _first_hearing(
     )
 
 
-def _may_rescue(provider: TimingProvider) -> bool:
-    """새로 다시 물어도 되는가(D78) — 승인된 실제 호출은 승인이 다시 묻기 예산을 묶었을 때만이다.
-    묶지 않았으면 전에 채택한 답만 캐시에서 이어 쓴다(거절 기록을 남기며 두드리지 않는다)."""
-    if isinstance(provider, ApprovedPhaseAsrProvider):
-        return provider.rescue_gate is not None
-    return True
-
-
 def _cross_check_text(
     workspace: RawWorkspace,
     revision: AnalysisRevision,
@@ -1593,7 +1487,6 @@ def _cross_check_text(
     audio: SelectedAudio,
     evidence: AsrEvidence,
     source_dir: Path,
-    hearing: _Hearing | None = None,
 ) -> tuple[AsrEvidence, tuple[UtteranceEvidence, ...], dict[str, object]]:
     """1단계 글자 경로(D59 19c) — whisper가 들은 같은 WAV를 두 번째 귀에 묻고 게이트로 얹는다.
 
@@ -1615,8 +1508,6 @@ def _cross_check_text(
     )
     provider = _text_provider_for(providers, workflow, settings, audio, asset.asset_id, request)
     outcomes = source_text.run_text_pass(audio, evidence, request, provider)
-    if hearing is not None:
-        evidence = _rescue_evidence(audio, evidence, outcomes, workflow, hearing, request)
     utterances = stage1.utterance_evidence(audio, evidence)
     result = source_text.apply_text_pass(
         utterances, outcomes, request, audio.sample_rate, _seeded_rows(workspace, asset)
@@ -1664,80 +1555,18 @@ def _word_provider_for(
     asset_id: str,
     request: gemini_text.WordPassRequest,
 ) -> gemini_text.GeminiWordsProvider | None:
-    """Gemini 글자 경로의 제공자 — 재생 선언이거나, 승인이 이 경로의 글자를 묶은 실제 전송(W-35b).
-
-    글자 모델이 빠진 승인은 캐시만 쓴다. 글자 문이 닫히면 WARN하고 묻지 않는다(D39)."""
-    if not providers.is_live():
-        return None if providers.replay is None else providers.replay.words_for(audio.source_sha256)
-    approval = (providers.asr_approvals or {}).get(asset_id)
-    if approval is None or _approved_text_model(approval) is None:
-        return None
-    identity = gemini_text.text_identity(request.settings)
-    try:
-        require_text_approval(
-            approval,
-            workflow=workflow,
-            identity=identity,
-            on=request.on,
-            model=request.settings.model,
-        )
-    except AnalysisApprovalError as error:
-        log.warn(
-            "1단계 Gemini 글자 경로: 글자 요청을 보내지 않습니다 — whisper 글자 그대로 둡니다:"
-            f" {error}"
-        )
-        return None
-    return gemini_text.ApprovedPhaseWordProvider(
-        inner=words_provider_for(
-            sender=providers.live_sender, gemini_client=providers.timing_client
-        ),
-        workflow=workflow,
-        understanding=settings,
-        audio=audio,
-        approval=approval,
-        settings=request.settings,
-        approved_identity=identity,
-        gate=CountingAsrGate(limit=approval.text_chunk_budget),
-        approved_keys=None
-        if approval.text_chunk_keys is None
-        else frozenset(approval.text_chunk_keys),
-    )
-
-
-def _rescue_evidence(
-    audio: SelectedAudio,
-    evidence: AsrEvidence,
-    outcomes: Sequence[source_text.TextChunkOutcome],
-    workflow: RawWorkflowConfig,
-    hearing: _Hearing,
-    request: source_text.TextPassRequest,
-) -> AsrEvidence:
-    """다른 귀 답을 받은 청크만 넘긴다 — 빈 답은 「아무것도 못 들음」, 없는 청크는 「이번엔 답
-    없음」."""
-    received = {o.chunk_index: o.text for o in outcomes if o.status == source_text.STATUS_RECEIVED}
-    return stage1.rescue_disagreeing_chunks(
-        audio,
-        evidence,
-        received,
-        settings=workflow,
-        provider=hearing.provider,
-        on=request.on,
-        workdir=request.workdir,
-        cache_dir=hearing.cache_dir,
-        asr_epoch=hearing.asr_epoch,
-        may_ask=hearing.may_ask,
-    )
+    """Gemini 글자 경로(W-35b)의 제공자 — 새로 묻지 않는다(D163). 전에 산 답은 캐시에서 쓴다."""
+    del providers, workflow, settings, audio, asset_id, request
+    return None  # Gemini 글자 경로(D95)는 whisper와 함께 지웠다(D163) — 캐시만 쓴다
 
 
 @dataclass(frozen=True, slots=True)
 class _Hearing:
-    """1차 whisper를 들은 그 제공자·캐시·차례 — 다시 묻기(D78)가 같은 열쇠 계열을 쓴다. `may_ask`가
-    거짓이면 새로 묻지 않고 전에 채택한 답만 잇는다."""
+    """1차로 들은 그 제공자·캐시·차례 — 다시 묻기(D78)는 whisper와 함께 지웠다(D163)."""
 
     provider: TimingProvider
     cache_dir: Path
     asr_epoch: int
-    may_ask: bool = True
 
 
 def _seeded_rows(workspace: RawWorkspace, asset: SourceAsset) -> list[dict]:
@@ -2470,8 +2299,7 @@ def _approved_phase_provider(
     audio: SelectedAudio,
     approval: AsrPhaseApproval,
 ) -> ApprovedPhaseAsrProvider:
-    """승인의 두 예산 문 — 1차 청크 예산과, 승인이 묶었을 때만 다시 묻기 예산(D78)."""
-    rescue = approval.rescue_chunk_budget
+    """승인의 청크 예산 문 — 다시 묻기(D78)는 whisper와 함께 지웠다(D163)."""
     return ApprovedPhaseAsrProvider(
         inner=inner,
         workflow=workflow,
@@ -2479,7 +2307,6 @@ def _approved_phase_provider(
         audio=audio,
         approval=approval,
         gate=CountingAsrGate(limit=approval.chunk_budget),
-        rescue_gate=CountingAsrGate(limit=rescue) if rescue else None,
     )
 
 
@@ -2491,52 +2318,9 @@ def _text_provider_for(
     asset_id: str,
     request: source_text.TextPassRequest,
 ) -> source_text.SourceTextProvider | None:
-    """1단계 글자 경로의 제공자 — 재생 선언이거나, 승인(v2)이 글자를 묶은 실제 전송(D59 19d).
-
-    글자 모델이 빠진 승인은 캐시만 쓴다. 글자 문이 닫히면 WARN하고 묻지 않는다(D39)."""
-    if not providers.is_live():
-        return None if providers.replay is None else providers.replay.text_for(audio.source_sha256)
-    approval = (providers.asr_approvals or {}).get(asset_id)
-    model = _approved_text_model(approval)
-    if approval is None or model is None:
-        return None
-    identity = source_text.text_identity(request.settings, request.glossary_sha)
-    try:
-        require_text_approval(approval, workflow=workflow, identity=identity, on=request.on)
-    except AnalysisApprovalError as error:
-        log.warn(
-            f"1단계 글자 경로: 글자 요청을 보내지 않습니다 — whisper 글자 그대로 둡니다: {error}"
-        )
-        return None
-    return _approved_text_provider(providers, workflow, settings, audio, approval, identity)
-
-
-def _approved_text_provider(
-    providers: AnalysisProviders,
-    workflow: RawWorkflowConfig,
-    settings: RawUnderstandingSettings,
-    audio: SelectedAudio,
-    approval: AsrPhaseApproval,
-    identity: str,
-) -> source_text.ApprovedPhaseTextProvider:
-    """글자 문을 지난 승인의 전송 경계 — 상한·청크 집합은 승인(견적)이 묶은 그대로다."""
-    sender, cfg = providers.live_sender, providers.live_cfg
-    if sender is None or cfg is None:
-        raise AnalysisApprovalError(
-            "실제 호출에는 전송 경계(sender)와 엔진 설정(cfg)이 필요하다 — 사람이 공급한다"
-        )
-    keys = approval.text_chunk_keys
-    return source_text.ApprovedPhaseTextProvider(
-        inner=TransportTextProvider(sender=sender, cfg=cfg),  # type: ignore[arg-type]
-        workflow=workflow,
-        understanding=settings,
-        audio=audio,
-        approval=approval,
-        approved_model=str(approval.text_model),
-        approved_identity=identity,
-        gate=CountingAsrGate(limit=approval.text_chunk_budget),
-        approved_keys=None if keys is None else frozenset(keys),
-    )
+    """1단계 글자 경로(D59 19c)의 제공자 — 새로 묻지 않는다(D163). 전에 산 답은 캐시에서 쓴다."""
+    del providers, workflow, settings, audio, asset_id, request
+    return None  # gpt 다른 귀는 whisper와 함께 지웠다(D163) — 캐시만 쓴다
 
 
 def _reusable_phase(
@@ -2544,40 +2328,18 @@ def _reusable_phase(
 ) -> dict[str, Any] | None:
     """같은 리비전의 1단계 기록을 그대로 쓸 수 있으면 그 기록, 아니면 None(1단계를 다시 듣는다).
 
-    whisper 실패가 남았거나(`_phase_reusable`), 승인이 글자를 묶었거나(`_text_due`), 기록의 입력
+    전사 실패가 남았거나(`_phase_reusable`), 기록의 입력
     지문이 지금과 다르면 다시 듣는다. 입력이 다른 기록은 교차 확인이 켜진 리비전에서 생긴다(D59
     19d): 결속은 두 번째 귀 글자를 빼므로 용어집을 되돌리면 옛 리비전에 다시 붙는데, 그 기록은 다른
     글자로 심은 것이다. 다시 들어도 whisper·글자는 캐시에서 오고 새로 사는 것은 승인이 묶은
     만큼뿐이다."""
-    if not _phase_reusable(artifact_path) or _text_due(providers, asset.asset_id):
+    if not _phase_reusable(artifact_path):
         return None
     artifact = _read_asr_phase_artifact(artifact_path)
     if str(artifact.get("input_fingerprint")) == input_fp:
         return artifact
     log.warn(f"1단계 기록이 지금 입력과 달라 다시 듣습니다: {asset.source_name} (캐시 우선)")
     return None
-
-
-def _text_due(providers: AnalysisProviders, asset_id: str) -> bool:
-    """승인이 이 원본의 글자 요청을 묶었는가(D59 19d) — 그러면 1단계 기록을 다시 쓰지 않는다.
-
-    견적은 답이 캐시에 없는 청크가 있을 때만 글자 분량을 세고, 승인은 그때만 글자를 묶는다. 그
-    청크를 묻는 것이 이 승인의 일이므로 같은 리비전의 1단계 기록(글자 실패가 남은 「전사만」)을
-    그대로 쓰지 않고 다시 듣는다 — whisper는 청크 캐시에서 오고 글자는 답이 없는 청크만 묻는다."""
-    if not providers.is_live():
-        return False
-    return _approved_text_model((providers.asr_approvals or {}).get(asset_id)) is not None
-
-
-def _approved_text_model(approval: AsrPhaseApproval | None) -> str | None:
-    """1단계 승인이 묶은 글자 모델(D59 19d) — 승인이 없거나 글자 칸이 비었으면 None(요청 0회).
-
-    글자 칸은 「다른 귀로 교차 확인」이 켜져 있고 견적이 물을 청크를 셌을 때만 채워진다
-    (`browser_runtime.mint_asr_approvals`) — 사람이 본 견적 없이 유료 글자 요청이 나가는 길이
-    없다."""
-    if approval is None or not approval.text_model:
-        return None
-    return approval.text_model
 
 
 def _luna_responder_for(

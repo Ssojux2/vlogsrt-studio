@@ -19,29 +19,22 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from datetime import date
-from decimal import ROUND_CEILING, Decimal
-from fractions import Fraction
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from vlogsrt import log
-from vlogsrt.config import Config
 from vlogsrt.project.raw import (
-    asr_epoch,
-    ear_rescue,
     gemini_text,
     glossary,
     read_scope,
     source_text,
     text_ear,
-    timing_engine,
 )
-from vlogsrt.project.raw.capabilities import ROLE_TIMING, price_per_minute
-from vlogsrt.project.raw.config import GEMINI_TEXT_SETTINGS, SOURCE_TEXT_SETTINGS, TIMING_ENGINES
-from vlogsrt.project.raw.models import AnalysisEstimate, RawWorkspaceError
+from vlogsrt.project.raw.config import GEMINI_TEXT_SETTINGS, SOURCE_TEXT_SETTINGS
+from vlogsrt.project.raw.models import AnalysisEstimate
 from vlogsrt.project.raw.understanding import CHUNK_PLAN_FIXED, SampleSpan
 from vlogsrt.project.raw.understanding_luna import ORIGIN_LIVE
 
@@ -73,20 +66,6 @@ def _enabled(workspace: Any) -> bool:
     with workspace.connect() as db:
         row = db.execute("SELECT value FROM meta WHERE key=?", (META_KEY,)).fetchone()
     return row is None or str(row[0]) != SETTING_OFF
-
-
-def set_enabled(workspace: Any, on: bool) -> bool:
-    """사람이 고른 값을 저장한다(무료) — 앱을 다시 열어도 남는다."""
-    if not isinstance(on, bool):
-        raise RawWorkspaceError(f"교차 확인 설정은 켬·끔 둘 중 하나입니다: {on!r}")
-    with workspace.connect() as db:
-        db.execute(
-            "INSERT INTO meta(key,value) VALUES(?,?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (META_KEY, SETTING_ON if on else SETTING_OFF),
-        )
-        db.commit()
-    return on
 
 
 def request_identity(workspace: Any) -> str:
@@ -138,50 +117,11 @@ class _RecordedChunk:
 def with_text_passes(
     workspace: Any, estimates: Sequence[AnalysisEstimate]
 ) -> tuple[AnalysisEstimate, ...]:
-    """견적 줄마다 교차 확인 글자 분량을 다시 잰다 — 꺼져 있으면 그 칸을 비운다(바이트 그대로)."""
-    if not enabled(workspace):
-        return tuple(_without_text(item) for item in estimates)
-    digest = glossary.current(workspace).sha
-    owners = {
-        asset.asset_id: asset.content_sha256 or "" for asset in workspace.list_source_assets()
-    }
-    texts = (
-        _with_ear_text(workspace, item, owners.get(item.asset_id, ""), digest) for item in estimates
-    )
-    # 다시 묻기(D78)는 그 원본의 시간 엔진이 받고 글자 귀가 gpt일 때만이다(D92 — Gemini 원본은 칸이
-    # 없다, W-35b — Gemini 글자 귀는 D78 신호를 Gemini로 다시 정할 때까지 끈다).
-    return tuple(
-        with_rescue(item)
-        if TIMING_ENGINES[timing_engine.resolve(workspace, item.asset_id)].rescue
-        and text_ear.resolve(workspace, item.asset_id) == text_ear.EAR_GPT
-        else item
-        for item in texts
-    )
+    """견적 줄마다 교차 확인 글자 분량 칸을 비운다 — gpt·whisper 귀는 은퇴했다(D163, 바이트 그대로).
 
-
-def _with_ear_text(
-    workspace: Any, item: AnalysisEstimate, source_sha256: str, glossary_digest: str
-) -> AnalysisEstimate:
-    """그 원본의 글자 귀로 센 견적 줄 — Gemini 글자 귀면 그 경로의 열쇠·단가(W-35b)."""
-    replanned = asr_epoch.state(workspace, item.asset_id).pending
-    ear = text_ear.resolve(workspace, item.asset_id)
-    if ear == text_ear.EAR_NONE:
-        return _without_text(item)  # Gemini 시간 엔진 원본 — 물을 다른 귀가 없다(D104)
-    if ear == text_ear.EAR_GEMINI:
-        return _with_gemini_text(workspace.root, item, source_sha256, replanned=replanned)
-    return _with_text(workspace.root, item, source_sha256, glossary_digest, replanned=replanned)
-
-
-def with_rescue(item: AnalysisEstimate) -> AnalysisEstimate:
-    """「다른 귀 기준 재전사」(W-29b, D78)의 상한 — 소리가 있으면 청크마다 온도 차례만큼 다시
-    묻는다고 본다. 실제로는 다른 귀와 어긋난 청크만 묻는다(상한이지 예상이 아니다)."""
-    if not item.has_audio:
-        return item
-    attempts = len(ear_rescue.temperatures(Config()))
-    seconds = Fraction(item.asr_seconds) * attempts
-    exact = Decimal(seconds.numerator) / Decimal(seconds.denominator) / Decimal(60)
-    usd = (exact * price_per_minute(ROLE_TIMING)).quantize(USD_STEP, rounding=ROUND_CEILING)
-    return replace(item, rescue_chunk_count=item.asr_chunk_count * attempts, rescue_usd=str(usd))
+    켬·끔 표지는 이미 들은 원본의 결속 꼬리표(`source_tag`)로만 읽는다."""
+    del workspace
+    return tuple(_without_text(item) for item in estimates)
 
 
 def _without_text(item: AnalysisEstimate) -> AnalysisEstimate:
@@ -197,116 +137,11 @@ def _without_text(item: AnalysisEstimate) -> AnalysisEstimate:
     )
 
 
-def _with_text(
-    root: Path,
-    item: AnalysisEstimate,
-    source_sha256: str,
-    glossary_digest: str,
-    *,
-    replanned: bool = False,
-) -> AnalysisEstimate:
-    if not item.has_audio:
-        return _without_text(item)  # 소리가 없으면 물을 것이 없다
-    cache_dir = root / "cache" / source_text.TEXT_CACHE_DIRNAME / item.asset_id
-    count, seconds, keys = _pending_text(
-        root,
-        item,
-        source_sha256,
-        lambda chunk: _text_key(chunk, glossary_digest),
-        lambda key: source_text.cached_answer_exists(cache_dir, key),
-        replanned=replanned,
-    )
-    return replace(
-        item,
-        text_chunk_count=count,
-        text_seconds=str(seconds),
-        text_usd=str(text_cost(seconds)),
-        text_chunk_keys=keys,
-    )
-
-
-def _with_gemini_text(
-    root: Path, item: AnalysisEstimate, source_sha256: str, *, replanned: bool = False
-) -> AnalysisEstimate:
-    """Gemini 글자 경로(W-35b)의 견적 칸 — 물을 청크·길이·공식 분당 단가 금액·열쇠, 그리고 모델.
-
-    단가 재확인 기한이 지났으면 금액은 None이다(가격 미정 — 승인이 닫는다, 0원이 아니다)."""
-    if not item.has_audio:
-        return _without_text(item)
-    cache_dir = root / "cache" / gemini_text.TEXT_CACHE_DIRNAME / item.asset_id
-    count, seconds, keys = _pending_text(
-        root,
-        item,
-        source_sha256,
-        _gemini_key,
-        lambda key: gemini_text.cached_answer_exists(cache_dir, key),
-        replanned=replanned,
-    )
-    usd = gemini_text_cost(seconds, date.today())
-    return replace(
-        item,
-        text_chunk_count=count,
-        text_seconds=str(seconds),
-        text_usd=None if usd is None else str(usd),
-        text_chunk_keys=keys,
-        text_model=GEMINI_TEXT_SETTINGS.model,
-    )
-
-
-def gemini_text_cost(seconds: Fraction, on: date) -> Decimal | None:
-    """Gemini 글자 경로 분량의 공식 단가 금액 — 전사 엔진 분당 단가 × 분, 올림(기한 뒤 None)."""
-    from vlogsrt.project.raw.capabilities import timing_price_per_minute
-
-    per_minute = timing_price_per_minute(GEMINI_TEXT_SETTINGS.model, on)
-    if per_minute is None:
-        return None
-    exact = Decimal(seconds.numerator) / Decimal(seconds.denominator) / Decimal(60)
-    return (exact * per_minute).quantize(USD_STEP, rounding=ROUND_CEILING)
-
-
-def text_cost(seconds: Fraction) -> Decimal:
-    """글자 요청 분량의 공식 단가 금액 — 분당 단가(문구 역할 스냅샷) × 분, 올림."""
-    from vlogsrt.project.raw.capabilities import ROLE_TEXT, price_per_minute
-
-    exact = Decimal(seconds.numerator) / Decimal(seconds.denominator) / Decimal(60)
-    return (exact * price_per_minute(ROLE_TEXT)).quantize(USD_STEP, rounding=ROUND_CEILING)
-
-
-def _pending_text(
-    root: Path,
-    item: AnalysisEstimate,
-    source_sha256: str,
-    keyer: Callable[[_RecordedChunk], str],
-    answered: Callable[[str], bool],
-    *,
-    replanned: bool = False,
-) -> tuple[int, Fraction, tuple[str, ...] | None]:
-    """(물을 청크 수, 그 길이, 그 청크의 글자 캐시 열쇠) — 기록이 없으면 전부·열쇠 없음.
-
-    기록의 청크 계획이 견적과 같을 때만 캐시를 빼고 센다. 열쇠는 승인이 「이 청크만」으로 묶는다.
-    `replanned`(다시 듣기 대기)면 다음 실행이 조용한 계획으로 다시 자르므로(D74) 고정 계획 기록은
-    쓰지 않는다."""
-    chunks = _recorded_chunks(root, item.asset_id, source_sha256, replanned=replanned)
-    if chunks is None or len(chunks) != item.asr_chunk_count:
-        return item.asr_chunk_count, Fraction(item.asr_seconds), None
-    keyed = [(chunk, keyer(chunk)) for chunk in chunks]
-    pending = [(c, key) for c, key in keyed if not answered(key)]
-    seconds = sum(
-        (Fraction(c.sample_end - c.sample_start, c.sample_rate) for c, _ in pending), Fraction(0)
-    )
-    return len(pending), seconds, tuple(key for _, key in pending)
-
-
 def _text_key(chunk: _RecordedChunk, glossary_digest: str) -> str:
     span = SampleSpan(chunk.sample_start, chunk.sample_end)
     return source_text.text_chunk_key(
         chunk.wav_sha256, SOURCE_TEXT_SETTINGS, glossary_digest, span, ORIGIN_LIVE
     )
-
-
-def _gemini_key(chunk: _RecordedChunk) -> str:
-    span = SampleSpan(chunk.sample_start, chunk.sample_end)
-    return gemini_text.chunk_key(chunk.wav_sha256, GEMINI_TEXT_SETTINGS, span, ORIGIN_LIVE)
 
 
 def _recorded_chunks(
@@ -362,10 +197,7 @@ __all__ = [
     "GEMINI_TAG_PREFIX",
     "binding_tag",
     "enabled",
-    "gemini_text_cost",
     "request_identity",
-    "set_enabled",
     "source_tag",
-    "text_cost",
     "with_text_passes",
 ]

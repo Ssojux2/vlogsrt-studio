@@ -7,7 +7,7 @@
 `data-vl-viewer`가 어느 쪽을 보일지 정한다. 바꿀 때 다른 쪽 영상은 멈춘다. 그라디오가 뷰어 칸을
 다시 그려 `#vl-program`이 사라지면 같은 노드를 새 칸에 다시 넣는다(`MutationObserver`).
 
-**인스펙터 탭** — 오른쪽 열(`#vl-quote`)을 「분석」(승인 범위 · 교차 확인)과 「공유」(초안
+**인스펙터 탭** — 오른쪽 열(`#vl-quote`)을 「분석」(승인 범위)과 「공유」(초안
 결과 · 영어 변환 · 자막 입히기)로 나눠 한 번에 하나만 보인다. 고른 탭은 이 브라우저에만
 기억한다(실패해도 된다).
 
@@ -26,7 +26,7 @@ INSPECTOR_ID = "vl-quote"
 SOURCE, PROGRAM = "source", "program"
 ANALYSIS, SHARE = "analysis", "share"
 INSPECTOR_TABS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    (ANALYSIS, "분석", ("vl-approval-mode", "vl-cross-check")),
+    (ANALYSIS, "분석", ("vl-approval-mode",)),
     (
         SHARE,
         "공유",

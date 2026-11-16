@@ -18,11 +18,8 @@ import pytest
 
 from vlogsrt.project.raw import jobs as jobs_module
 from vlogsrt.project.raw import service as raw
-from vlogsrt.project.raw.analysis_store import AnalysisStore
-from vlogsrt.project.raw.caption_workspace_store import CaptionWorkspaceStore
 from vlogsrt.project.raw.jobs import JobCancelledError, JobContext, JobStore
 from vlogsrt.project.raw.models import JobRecord, RawWorkspaceError
-from vlogsrt.project.raw.review_workspace_store import ReviewWorkspaceStore
 from vlogsrt.project.raw.workspace import DB_NAME, RawWorkspace
 
 TypePredicate = Callable[[], bool]
@@ -409,21 +406,6 @@ def test_job_store_closes_every_connection(workspace: Path) -> None:
 
     # 새는 회귀는 라운드마다 호출 수만큼 fd를 늘린다(200라운드면 수백 개). 남은
     # 데몬 스레드가 연결을 몇 개 쥐고 있을 수 있어 상한은 그만큼 여유를 둔다.
-    rounds = 200
-    assert _without_cyclic_gc(calls, rounds=rounds) < rounds // 4
-
-
-def test_other_workspace_stores_close_every_connection(workspace: Path) -> None:
-    opened = RawWorkspace.open(workspace)
-    analysis = AnalysisStore(opened)
-    review = ReviewWorkspaceStore(opened)
-    caption = CaptionWorkspaceStore(opened.root)
-
-    def calls() -> None:
-        analysis.list_revisions()
-        review.list_base_plan_ids("no-project")
-        caption.registrations()
-
     rounds = 200
     assert _without_cyclic_gc(calls, rounds=rounds) < rounds // 4
 

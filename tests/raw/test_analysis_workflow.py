@@ -29,6 +29,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.raw.gemini_echo import GeminiEcho
 from vlogsrt import preprocess
 from vlogsrt.config import Config
 from vlogsrt.project.raw import analysis_workflow
@@ -645,18 +646,10 @@ def test_interrupted_job_resumes_with_same_id_and_cached_sources(
 # ── 실제 호출 문 — 두 단계 승인: 1단계(전사) → 대기 → 2단계(의미) ─────────────
 
 
-class _FakeSender:
-    """전사 전송 경계 가짜 — 보낸 요청을 세고 정해진 응답을 돌려준다."""
+class _FakeSender(GeminiEcho):
+    """시간 엔진 가짜(Gemini 3.5 Transcribe, D163) — 보낸 요청을 세고 정해진 발화를 돌려준다.
 
-    def __init__(self, segments: list[dict[str, object]] | None = None) -> None:
-        self.calls: list[object] = []
-        self._segments = segments if segments is not None else []
-
-    def send_request(self, request, cfg, *, kind, stem, source):
-        self.calls.append(request)
-        # 실제 전사처럼 발화를 돌려준다 — 2단계 지문은 이 발화가 만든 창 계획을
-        # 묶어야 한다(빈 골격이 아니라).
-        return {"segments": list(self._segments)}
+    실제 전사처럼 발화를 돌려준다 — 2단계 지문은 이 발화가 만든 창 계획을 묶어야 한다."""
 
 
 class _FakeClient:
@@ -716,7 +709,8 @@ def test_live_two_phase_asr_stops_for_semantic_then_resumes(
     _ingest_card(service, workspace, _card(tmp_path, "cardJ", {"스테레오.mov": stereo_offset}))
     service.confirm_global_source_order(workspace)
     asset = service.list_source_assets(workspace)[0]
-    workflow = service.settings(workspace)
+    service.set_new_hearing_engine(workspace, raw.TIMING_ENGINE_GEMINI)  # D163
+    workflow = service.source_settings(workspace, asset.asset_id)
     probe = preprocess.probe_raw_media(workspace / asset.relative_path)
     assert probe.audio
     settings = RawUnderstandingSettings()
@@ -732,6 +726,7 @@ def test_live_two_phase_asr_stops_for_semantic_then_resumes(
             asset.asset_id: _asr_approval(asset, workflow, settings, probe.audio[0].stream_index)
         },
         sender=sender,
+        timing_client=sender.client(),
         cfg=Config(),
     )
     assert record.status == "succeeded", record.error
@@ -784,6 +779,7 @@ def test_live_two_phase_asr_stops_for_semantic_then_resumes(
             asset.asset_id: _asr_approval(asset, workflow, settings, probe.audio[0].stream_index)
         },
         sender=sender,
+        timing_client=sender.client(),
         cfg=Config(),
     )
     replayed = _wait_terminal(service, workspace, phase1_again.job_id)
@@ -880,7 +876,8 @@ def test_an_old_prompt_revision_cannot_resume_its_semantic_phase(
     _ingest_card(service, workspace, _card(tmp_path, "cardP", {"스테레오.mov": stereo_offset}))
     service.confirm_global_source_order(workspace)
     asset = service.list_source_assets(workspace)[0]
-    workflow = service.settings(workspace)
+    service.set_new_hearing_engine(workspace, raw.TIMING_ENGINE_GEMINI)  # D163
+    workflow = service.source_settings(workspace, asset.asset_id)
     probe = preprocess.probe_raw_media(workspace / asset.relative_path)
     stream_index = probe.audio[0].stream_index
     old = replace(RawUnderstandingSettings(), prompt_revision="raw-suitability-v2")
@@ -892,6 +889,7 @@ def test_an_old_prompt_revision_cannot_resume_its_semantic_phase(
         settings=old,
         asr_approvals={asset.asset_id: _asr_approval(asset, workflow, old, stream_index)},
         sender=sender,
+        timing_client=sender.client(),
         cfg=Config(),
     )
     assert record.status == "succeeded", record.error
@@ -926,6 +924,7 @@ def test_an_old_prompt_revision_cannot_resume_its_semantic_phase(
             handle.job_id,
             asr_approvals={asset.asset_id: _asr_approval(asset, workflow, old, stream_index)},
             sender=sender,
+            timing_client=sender.client(),
             cfg=Config(),
         )
     assert client.calls == [] and len(sender.calls) == 1
@@ -937,6 +936,7 @@ def test_an_old_prompt_revision_cannot_resume_its_semantic_phase(
         mode="live",
         asr_approvals={asset.asset_id: _asr_approval(asset, workflow, settings, stream_index)},
         sender=sender,
+        timing_client=sender.client(),
         cfg=Config(),
     )
     assert fresh.status == "succeeded", fresh.error
@@ -958,7 +958,8 @@ def test_live_asr_gates_refuse_wrong_approvals_before_any_send(
     _ingest_card(service, workspace, _card(tmp_path, "cardK", {"스테레오.mov": stereo_offset}))
     service.confirm_global_source_order(workspace)
     asset = service.list_source_assets(workspace)[0]
-    workflow = service.settings(workspace)
+    service.set_new_hearing_engine(workspace, raw.TIMING_ENGINE_GEMINI)  # D163
+    workflow = service.source_settings(workspace, asset.asset_id)
     probe = preprocess.probe_raw_media(workspace / asset.relative_path)
     assert probe.audio
     settings = RawUnderstandingSettings()
@@ -972,6 +973,7 @@ def test_live_asr_gates_refuse_wrong_approvals_before_any_send(
             mode="live",
             asr_approvals={asset.asset_id: approval},
             sender=sender,
+            timing_client=sender.client(),
             cfg=cfg,
             **kwargs,
         )
@@ -989,8 +991,8 @@ def test_live_asr_gates_refuse_wrong_approvals_before_any_send(
                 asset, workflow, RawUnderstandingSettings(window_seconds=11.0), stream_index
             )
         )
-    # 종료일 이후 — 수명주기 문이 어떤 전송보다 먼저 닫힌다(§11.10).
-    with pytest.raises(raw.AnalysisError, match="종료 예정일"):
+    # 기한 이후 — 수명주기 문이 어떤 전송보다 먼저 닫힌다(§11.10, Gemini는 단가 재확인 기한).
+    with pytest.raises(raw.AnalysisError, match="수명주기 문이 닫혔다"):
         _start(_asr_approval(asset, workflow, settings, stream_index), on=date(2027, 3, 1))
     assert sender.calls == []  # 위의 어떤 경우도 0송신이다
 
@@ -1021,7 +1023,8 @@ def test_live_noaudio_visual_phase_zero_asr(
     _ingest_card(service, workspace, _card(tmp_path, "cardL", {"무성.mov": ntsc_noaudio}))
     service.confirm_global_source_order(workspace)
     asset = service.list_source_assets(workspace)[0]
-    workflow = service.settings(workspace)
+    service.set_new_hearing_engine(workspace, raw.TIMING_ENGINE_GEMINI)  # D163
+    workflow = service.source_settings(workspace, asset.asset_id)
 
     sender = _FakeSender()  # 전사 전송 경계가 있어도 무성 원본은 부르지 않는다
     handle, record = _analyze(
@@ -1030,6 +1033,7 @@ def test_live_noaudio_visual_phase_zero_asr(
         mode="live",
         asr_approvals={},  # 무성 — 승인할 전사가 없다
         sender=sender,
+        timing_client=sender.client(),
         cfg=Config(),
     )
     assert record.status == "succeeded", record.error

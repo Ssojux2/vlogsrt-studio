@@ -50,6 +50,8 @@ def test_a_started_environment_key_reaches_runtime_and_clears_the_notice(tmp_pat
     server.quick_approve_view(server.current_signature())
     assert server._quick["connection_required"] is True
     server._startup_credentials = raw_service.EnvironmentCredentials("sk-test-only", None)
+    # 처음 듣는 영상은 Gemini로 듣는다(D163) — 그 키도 같은 `.env`에서 찍힌다.
+    server._startup_gemini = raw_service.GeminiCredentials(api_key="AIza-synthetic")
     server.quick_approve_view(server.current_signature())
     wait_until(lambda: server._quick.get("stage") in ("추천 구간 준비 완료", "분석 확인 필요"))
     assert server._quick["stage"] == "추천 구간 준비 완료", server._quick

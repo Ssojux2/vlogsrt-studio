@@ -1439,15 +1439,12 @@ def test_project_extraction_never_invokes_the_legacy_mp3_split(
 ) -> None:
     """파생 계층의 구간 추출은 레거시 MP3 세그먼트 분할을 부르지도 이름대지도 않는다.
 
-    독을 단 `split_at`을 달아두고 프로젝트 경로 전체(참조 만들기 → 구간 잘라 내기)를
-    돌려도 발동하지 않는다. 모듈 원문에 그 이름이 없다는 정적 확인이 동적 확인과
-    겹친다 — CSV 좌표가 흔들리는 길과는 완전히 갈라선 것이다(S17).
+    레거시 `split_at`은 whisper와 함께 지웠다(D163) — 그 이름이 다시 서지 않고, 프로젝트
+    경로 전체(참조 만들기 → 구간 잘라 내기)가 그 없이 돈다. 모듈 원문에 그 이름이 없다는
+    정적 확인이 겹친다 — CSV 좌표가 흔들리는 길과는 완전히 갈라선 것이다(S17).
     """
 
-    def poisoned(*args: object, **kwargs: object) -> object:
-        raise AssertionError("프로젝트 구간 추출이 레거시 MP3 분할을 불렀다")
-
-    monkeypatch.setattr(preprocess, "split_at", poisoned)
+    assert not hasattr(preprocess, "split_at")  # 레거시 분할은 whisper와 함께 지웠다(D163)
     assert not hasattr(pcm, "split_at")
     assert "split_at" not in Path(pcm.__file__).read_text(encoding="utf-8")
 
@@ -1700,7 +1697,7 @@ def test_real_rebuild_reuses_the_verified_reference(
 
 
 # ─────────────────────────────────────────────────────────────
-#  합성 MP3 진단 — 레거시 좌표 어긋남의 재현과 증거의 경계 (P2-03)
+#  합성 MP3 진단 — 디코드한 참조의 샘플 주소 (P2-03)
 # ─────────────────────────────────────────────────────────────
 
 
@@ -1734,18 +1731,11 @@ def _strongest_sample(samples: list[int], lo: int, hi: int) -> int:
 
 
 @needs_ffmpeg
-def test_legacy_mp3_drift_reproduces_only_the_synthetic_mismatch(tmp_path: Path) -> None:
-    """Astra의 합성 진단을 같은 환경에서 다시 돈다 — 재현과 **경계**를 함께 지킨다.
+def test_a_decoded_mp3_reference_splits_at_exact_samples(tmp_path: Path) -> None:
+    """MP3로 인코딩한 임펄스 트랙도 디코드한 저장 PCM 참조로 자르면 샘플이 정확하다.
 
-    임펄스 트랙을 레거시 추출 기본값(libmp3lame 64k, 16 kHz 모노)으로 인코딩해
-    레거시 `split_at`으로 자르면 CSV 오프셋이 0이 아닌 조각이 전부 **같은 양만**
-    늦게 밀린다. 같은 CSV 오프셋을 중간·마지막으로 바꿔도 밀림은 그대로다. 같은
-    미디어를 디코드해 저장 PCM 참조로 자르는 대조는 정확하다 — 그래서 프로젝트
-    길은 샘플로 주소를 매긴다. 여기서 잰 숫자는 회귀 증거일 뿐, 어떤 보정 상수도
-    아니다(36 ms·576 샘플·0.2초를 코드에 새기지 않는다).
-
-    이 재현은 **합성 미디어의 좌표 어긋남만** 보인다. 역사적 77분 회차의 원인·규모,
-    그리고 중간/마지막 차이는 재현되지 않았다 — `not reproduced / PENDING_HUMAN`.
+    Astra 합성 진단(P2-03)의 대조 절반이다 — 레거시 `split_at`의 CSV 오프셋 어긋남을
+    재던 절반은 그 분할과 함께 지웠다(D163). 프로젝트 길은 샘플로 주소를 매긴다.
     """
     raw = tmp_path / "impulse.s16"
     raw.write_bytes(_impulse_track_12s())
@@ -1768,34 +1758,7 @@ def test_legacy_mp3_drift_reproduces_only_the_synthetic_mismatch(tmp_path: Path)
         _strongest_sample(full, second * 16000, (second + 1) * 16000) for second in range(12)
     ] == expected_peaks
 
-    six = preprocess.split_at(media, [2.0, 4.0, 6.0, 8.0, 10.0], tmp_path / "work-six")
-    two = preprocess.split_at(media, [2.0, 4.0], tmp_path / "work-two")
-
-    def mapped_drifts(chunk: object, windows: list[tuple[int, int]]) -> list[Fraction]:
-        """조각을 디코드해 안의 임펄스를 CSV 오프셋으로 전체 좌표에 옮겨 잰 어긋남."""
-        samples = _decode_pcm(chunk.path)  # type: ignore[attr-defined]
-        offset = Fraction(str(chunk.offset))  # type: ignore[attr-defined]
-        return [
-            offset * 16000 + _strongest_sample(samples, lo, lo + 16000) - Fraction(true)
-            for lo, true in windows
-        ]
-
-    # 여섯 조각은 각각 [2k, 2k+2)초 — 임펄스는 조각 안 8000·24000 자리에 하나씩
-    six_drifts = [
-        mapped_drifts(chunk, [(0, 32000 * index + 8000), (16000, 32000 * index + 24000)])
-        for index, chunk in enumerate(six)
-    ]
-    assert six_drifts[0] == [Fraction(0), Fraction(0)], "오프셋 0인 첫 조각은 정확하다"
-    nonzero = [drift for drifts in six_drifts[1:] for drift in drifts]
-    assert nonzero and all(drift > 0 for drift in nonzero), "나머지는 전부 늦게 밀린다"
-    assert len(set(nonzero)) == 1, "밀림은 조각마다 같은 양이다 — 좌표가 통째로 어긋난 것이다"
-
-    # 같은 CSV 오프셋을 중간(여섯 조각의 3번째)과 마지막(두 조각의 끝)으로 놓아도 같다
-    assert six[2].offset == two[-1].offset
-    final_drifts = mapped_drifts(two[-1], [(16000 * j, 64000 + 16000 * j + 8000) for j in range(8)])
-    assert set(final_drifts) == {nonzero[0]}, "마지막이어서 밀림이 달라지지 않는다"
-
-    # 대조 — 같은 미디어를 디코드해 저장 PCM 참조로 자르면 어긋남이 없다(프로젝트 길)
+    # 같은 미디어를 디코드해 저장 PCM 참조로 자르면 어긋남이 없다(프로젝트 길)
     reference = _hand_reference(tmp_path / "ref.pcm", array.array("h", full).tobytes())
     pieces = split_retained_ranges(
         reference,

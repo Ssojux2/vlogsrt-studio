@@ -239,7 +239,6 @@ def media_command(args: argparse.Namespace) -> int:
         "clips": cmd_clips,
         "analyze": cmd_analyze,
         "review": cmd_review,
-        "caption": cmd_caption,
         "finalcut": cmd_finalcut,
         "sync-check": cmd_sync_check,
         "settings": cmd_settings,
@@ -376,20 +375,6 @@ def add_media_parser(sub: argparse._SubParsersAction) -> None:
         help="최신 계획·분석 증거에서 검토 기본 리비전을 만든다(이미 있으면 새로 만든다)",
     )
 
-    caption = commands.add_parser(
-        "caption",
-        help="최종 영상을 등록하고 자막 실행 추정을 인쇄한다(로컬만 — 실행은 브라우저 승인 경로)",
-    )
-    caption.add_argument("--workspace", type=Path, required=True, help="작업공간 경로")
-    caption.add_argument("--path", type=Path, required=True, help="최종 영상 절대 경로")
-    caption.add_argument("--source-id", default="final_1", help="출처 ID(기본 final_1)")
-    caption.add_argument(
-        "--audio-ordinal",
-        type=int,
-        default=None,
-        help="오디오 트랙 서수(여럿일 때). 없으면 자동(첫 트랙)",
-    )
-    caption.add_argument("--run", default="run-1", help="실행 ID(기본 run-1)")
     _add_workspace_parsers(commands)
 
 
@@ -788,47 +773,6 @@ def cmd_review(args: argparse.Namespace) -> int:
         )
     for source_id, reason in loaded.stale_sources:
         log.warn(f"낡은 원본 {source_id} — {reason}")
-    return 0
-
-
-def cmd_caption(args: argparse.Namespace) -> int:
-    """`media caption` — 최종 영상 등록·실행 추정 인쇄(로컬만).
-
-    실제 자막 실행은 브라우저 화면의 확인란 승인 경로뿐이다 — 이 명령은 등록과
-    추정(측정)까지만 한다. 백엔드(W2 caption_workspace)가 없으면 정직하게 끝난다.
-    """
-    service = _service()
-    workspace_root = Path(args.workspace)
-    path = Path(args.path).expanduser()
-    if not path.is_absolute():
-        log.error("최종 영상 경로는 절대 경로여야 한다")
-        return 1
-    try:
-        status = service.open_workspace(workspace_root)
-        root = Path(status.workspace_root)
-        workspace = service.caption_workspace(root)
-        registration = workspace.register_final_video(
-            path, source_id=args.source_id, audio_ordinal=args.audio_ordinal
-        )
-        prepared = workspace.prepare(registration, run_id=args.run)
-    except (
-        raw_service.RawWorkspaceError,
-        raw_service.CaptionWorkspaceError,
-        raw_service.FinalVideoError,
-    ) as error:
-        log.error(str(error))
-        return 1
-    log.out(
-        f"최종 영상 등록 리비전 {registration.final_video_revision}"
-        f" · 상태 {registration.status}"
-        + (f" · 오디오 서수 {registration.audio_ordinal}" if registration.ready else "")
-    )
-    log.out(
-        f"실행 {args.run} 준비 — 청크 {prepared.chunk_count}"
-        f" · 샘플 {prepared.sample_count} · 문구 모델 {prepared.text_model}"
-        f" · 시간 모델 {prepared.timing_model}"
-        " · 실제 실행은 브라우저 승인 경로에서만 연다(§14.3)"
-    )
     return 0
 
 

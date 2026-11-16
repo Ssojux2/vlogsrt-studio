@@ -240,6 +240,10 @@ def pre_19b_bindings(ui: Any, root: Path, asset_ids: tuple[str, ...]) -> dict[st
     }
 
 
+GEMINI_TAG = "timing-engine/gemini"
+"""Gemini 시간 엔진 원본의 결속 꼬리표(D92) — 실제(가짜) 흐름은 Gemini로 듣는다(D163)."""
+
+
 def pre_19b_digest(ui: Any, root: Path, quote: Any) -> str:
     """19b 이전 `_assemble_quote`의 digest 조립 그대로 — 범위·차례 칸이 없다."""
     workspace = ui.raw._workspace(root)
@@ -277,17 +281,17 @@ def relisten(ui: Any, asset_id: str, *, token: bool = True) -> dict:
 
 
 @needs_ffmpeg
-def test_relisten_rebuys_only_that_video_and_a_full_run_then_buys_no_whisper(
+def test_relisten_rebuys_only_that_video_and_a_full_run_then_buys_no_transcription(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ui, sender, client, root, ids = setup_library(tmp_path, monkeypatch)
     client.resume.set()
     a, b = ids["a.mov"], ids["b.mov"]
     every = ui._library_ids(root)
-    measured = ui.raw.selection_quote(root, every)
-    # 차례 0 — 결속·digest가 19b 이전 조립과 바이트까지 같다.
-    assert ui.raw.source_bindings(root, dict.fromkeys(every)) == pre_19b_bindings(ui, root, every)
-    assert measured.digest == pre_19b_digest(ui, root, measured)
+    # 차례 0 — 결속은 19b 이전 조립에 Gemini 시간 엔진 꼬리표 하나만 더한 것이다(D92·D163 —
+    # whisper 작업공간의 바이트 그대로는 `test_transcribe_only`가 본다).
+    expected = {a_id: [*row, GEMINI_TAG] for a_id, row in pre_19b_bindings(ui, root, every).items()}
+    assert ui.raw.source_bindings(root, dict.fromkeys(every)) == expected
     approve(ui, FULL)
     wait_until(lambda: all(stage(ui, root, i) == DONE for i in (a, b)))
     assert (len(sender.calls), len(client.calls)) == (2, 4)
@@ -297,11 +301,14 @@ def test_relisten_rebuys_only_that_video_and_a_full_run_then_buys_no_whisper(
         "edited": False,
         "heard": False,
         "explanation": workspace_service.RELISTEN_EXPLANATION,
+        "engine": workspace_service.RELISTEN_ENGINE_SAME_TEXT.format(
+            engine="Gemini 3.5 Transcribe"
+        ),
     }
 
     refused = relisten(ui, a, token=False)
     assert refused["ok"] is False and asr_epoch.state(ui.raw._workspace(root), a).epoch == 0
-    sender._segments = [{"start": 0.5, "end": 1.5, "text": RELISTENED}]
+    sender.segments = [{"start": 0.5, "end": 1.5, "text": RELISTENED}]
     reply = relisten(ui, a)
     assert reply["ok"] is True and reply["message"] == workspace_service.RELISTEN_DONE_TEXT
     assert _model_of(reply["html"])["sources"][a]["relisten"]["pending"] is True
@@ -310,8 +317,8 @@ def test_relisten_rebuys_only_that_video_and_a_full_run_then_buys_no_whisper(
     assert ui.raw.approval_mode(root) == TRANSCRIBE  # 다시 듣기는 「전사만」이 기본이다
     assert stage(ui, root, a) == raw.RELISTEN_STAGE and stage(ui, root, b) == DONE
     bound = ui.raw.source_bindings(root, dict.fromkeys(every))
-    assert bound[b] == pre_19b_bindings(ui, root, (b,))[b]  # 다른 영상은 그대로
-    assert bound[a] == [*pre_19b_bindings(ui, root, (a,))[a], "asr-epoch/1"]
+    assert bound[b] == [*pre_19b_bindings(ui, root, (b,))[b], GEMINI_TAG]  # 다른 영상은 그대로
+    assert bound[a] == [*pre_19b_bindings(ui, root, (a,))[a], "asr-epoch/1", GEMINI_TAG]
     assert ui.raw.cached_selection_analysis(root, (a,)) is None  # 끝난 분석을 다시 쓰지 않는다
     assert ui.raw.cached_selection_analysis(root, (b,)) is not None
     # 끝난 b와 남은 a가 섞였다 — 승인은 남은 a만 묶는다(D64 E).
@@ -338,7 +345,7 @@ def test_relisten_rebuys_only_that_video_and_a_full_run_then_buys_no_whisper(
 
     approve(ui, FULL)  # 마지막 전체 분석 — 1단계는 그대로 다시 쓴다
     wait_until(lambda: stage(ui, root, a) == DONE)
-    # whisper 0회 추가. 영상 분석은 바뀐 말을 듣는 창 하나만 새로 묻는다 — 말이 없는 두 창은 요청이
+    # 전사 0회 추가. 영상 분석은 바뀐 말을 듣는 창 하나만 새로 묻는다 — 말이 없는 두 창은 요청이
     # 바이트까지 같아 창 판정 캐시가 그대로 맞는다.
     assert (len(sender.calls), len(client.calls)) == (3, 5)
     assert ui.raw.cached_selection_analysis(root, (a,)) is not None
@@ -370,7 +377,7 @@ def test_relisten_never_overwrites_a_human_edit(
     assert ui.raw.asr_epoch_state(root, a) == asr_epoch.AsrEpoch(0, 0)
     # 차례를 억지로 올려 들어도(서비스 문 밖) 1단계 seed는 고친 자막을 그대로 둔다.
     asr_epoch.bump(ui.raw._workspace(root), a)
-    sender._segments = [{"start": 0.5, "end": 1.5, "text": RELISTENED}]
+    sender.segments = [{"start": 0.5, "end": 1.5, "text": RELISTENED}]
     approve(ui, TRANSCRIBE)
     wait_until(lambda: len(sender.calls) == 3)
     wait_until(lambda: stage(ui, root, a) == raw.TRANSCRIBED_STAGE)

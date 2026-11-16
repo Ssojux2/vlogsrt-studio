@@ -26,7 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -52,7 +52,6 @@ from vlogsrt.project.raw.config import (
 )
 from vlogsrt.project.raw.models import AnalysisEstimate, AnalysisSemanticEstimate
 from vlogsrt.transcribe import (
-    LiveTranscriber,
     create_claude_client,
     create_gemini_client,
     create_vision_client,
@@ -63,6 +62,16 @@ STT_KEY_ENV = "OPENAI_API_KEY"
 
 STT_BASE_URL_ENV = "OPENAI_BASE_URL"
 """선택 공개 엔드포인트 — 비면 공개 엔드포인트 그대로(전송 경계가 못 박는다)."""
+
+
+@dataclass(frozen=True, slots=True)
+class LiveRequestCarrier:
+    """실제 호출 제공자가 영수증 관찰자·취소 문을 넘겨받는 자리 — 스스로는 아무것도 보내지 않는다.
+
+    whisper 전송(`LiveTranscriber`)이 이 둘을 실어 나르던 자리다(D163 — whisper 은퇴)."""
+
+    observer: Any = None
+    cancellation: Callable[[], None] | None = None
 
 
 class BrowserRuntimeError(RuntimeError):
@@ -195,11 +204,7 @@ def live_transport_for_credentials(
     만든다 — 엔드포인트·버전·시간 한도는 **그 모델의** 프로파일 값이다(D54·D58).
     """
     return LiveAnalysisTransport(
-        sender=LiveTranscriber(
-            api_key=credentials.api_key,
-            base_url=credentials.base_url,
-            observer=request_usage.observer(),
-        ),
+        sender=LiveRequestCarrier(observer=request_usage.observer()),
         cfg=Config(),
         client=create_vision_client(api_key=credentials.api_key, base_url=credentials.base_url),
         asr_approvals=asr_approvals,
@@ -272,33 +277,6 @@ def production_live_transport(
         on=on,
         claude=capture_claude_credentials(os.environ if environ is None else environ),
         gemini=capture_gemini_credentials(os.environ if environ is None else environ),
-    )
-
-
-def caption_transport_providers(
-    credentials: EnvironmentCredentials,
-) -> tuple[Any, Any]:
-    """최종 자막 실제 실행의 생산 제공자 — 시간·문구가 같은 정본 전송 경계를 지난다.
-
-    화면 4의 승인된 실행에서만 만든다. 제공자 클래스는 받아들인 A7 어댑터
-    (`caption_provider`) 그대로 — 여기서 새 전송 길을 만들지 않는다. 호출 0회:
-    객체를 만들 뿐이고 첫 전송은 실행 문(승인·환경·네트워크)이 연 뒤에야
-    일어난다(§14.3).
-    """
-    from vlogsrt.project.raw.caption_provider import (
-        TransportTextProvider,
-        TransportTimingProvider,
-    )
-
-    sender = LiveTranscriber(
-        api_key=credentials.api_key,
-        base_url=credentials.base_url,
-        observer=request_usage.observer(),
-    )
-    cfg = Config()
-    return (
-        TransportTimingProvider(sender=sender, cfg=cfg),
-        TransportTextProvider(sender=sender, cfg=cfg),
     )
 
 
@@ -606,7 +584,6 @@ __all__ = [
     "STT_BASE_URL_ENV",
     "STT_KEY_ENV",
     "asr_estimate_digest",
-    "caption_transport_providers",
     "capture_claude_credentials",
     "capture_gemini_credentials",
     "capture_environment_credentials",

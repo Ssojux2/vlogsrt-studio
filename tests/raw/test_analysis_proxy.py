@@ -349,7 +349,9 @@ def test_paid_pre_proxy_revision_stays_reusable_after_the_proxy_exists(imported,
     # 그 시절 작업공간 — 「다른 귀로 교차 확인」(D59 19d, 새 작업공간의 기본은 켜짐)이 없었다. 켜면
     # 두 번째 귀로 들은 적 없는 분석은 그 이유로 다시 분석 대상이 된다(견적이 말한다). 이 시험은
     # 프록시가 결속을 바꾸지 않는다는 것만 본다.
-    service.set_cross_check(root, False)
+    from vlogsrt.project.raw import cross_check
+
+    workspace.set_meta_value(cross_check.META_KEY, cross_check.SETTING_OFF)  # 그 시절 표지
     revision_id = _persist_paid_revision(service, root, workspace, asset)
     media_refs.resolve(workspace, asset, "frames")  # 분석 프록시가 이제 디스크에 있다
     monkeypatch.setattr(media_refs, "_FAILED", {})  # 새 프로세스

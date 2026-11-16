@@ -496,6 +496,8 @@ def test_a_first_run_without_a_key_still_reaches_the_claude_analysis(
     for _ in range(3):
         server._quick_status()  # 타이머 — 연결 안내가 상태 줄을 붙잡고 있다
     server._startup_credentials = raw_service.EnvironmentCredentials("sk-openai-synthetic", None)
+    # 처음 듣는 영상은 Gemini로 듣는다(D163) — 그 키도 `.env`에서 함께 찍힌다.
+    server._startup_gemini = raw_service.GeminiCredentials(api_key="AIza-synthetic")
     assert (len(sender.calls), len(luna.calls), len(opener.calls)) == (0, 0, 0)
     server.quick_approve_view(signature)
     assert not server._quick.get("connection_required")  # 키가 생겼으니 안내를 걷는다

@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 
-from tests.raw.test_cross_check_ui import _NODE_HARNESS
+from tests.raw.test_visual_workbench_ui import _NODE_HARNESS
 from ui import ui_facade
 from vlogsrt.project.raw import subtitle_suspects as ss
 from vlogsrt.project.raw.service import RawWorkspaceService

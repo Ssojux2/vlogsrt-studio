@@ -700,27 +700,13 @@ def _apply_ingest_schema(connection: sqlite3.Connection) -> None:
 
 
 def _store_schema_statements() -> tuple[tuple[str, ...], ...]:
-    """검토·자막 저장소의 덧붙이기 문장 — **있는 모듈만** 가져온다.
+    """검토 저장소(W3)의 덧붙이기 문장 — 전부 `CREATE TABLE IF NOT EXISTS`다.
 
-    두 백엔드(W2·W3)는 아직 병합 전일 수 있다. 없는 모듈을 강제하면 이 파일이
-    백엔드 병합을 기다리게 되므로, import 가능한 모듈의 후크만 모은다 — 전부
-    `CREATE TABLE IF NOT EXISTS`라 없는 쪽을 건너뛰어도 기존 표는 절대 바뀌지
-    않는다.
+    옛 최종 영상 자막 저장소(W2)는 whisper와 함께 지웠다(D163) — 그 표가 있는 작업공간은 그대로다.
     """
-    collected: list[tuple[str, ...]] = []
-    for module_name in ("review_workspace_store", "caption_workspace_store"):
-        try:
-            module = __import__(f"vlogsrt.project.raw.{module_name}", fromlist=[module_name])
-        except ImportError:
-            continue
-        if module_name == "review_workspace_store":
-            collected.append(tuple(module.REVIEW_WORKSPACE_SCHEMA_STATEMENTS))
-        else:
-            # `caption_schema_sql()`은 여러 문장을 ';'로 이은 **한 덩어리 문자열**이다 —
-            # 문장 tuple은 `CAPTION_SCHEMA_STATEMENTS`가 정본이다(문자열을 tuple()로
-            # 감싸면 글자별로 쪼개진다).
-            collected.append(tuple(module.CAPTION_SCHEMA_STATEMENTS))
-    return tuple(collected)
+    from vlogsrt.project.raw import review_workspace_store
+
+    return (tuple(review_workspace_store.REVIEW_WORKSPACE_SCHEMA_STATEMENTS),)
 
 
 def _clip_values(clip: ClipArtifact) -> tuple[object, ...]:

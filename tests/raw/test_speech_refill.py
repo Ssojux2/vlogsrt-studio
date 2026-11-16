@@ -1,23 +1,27 @@
-"""D59 19f — 말소리 빈칸 재전사: 넣기 · 견적과 승인 · 규칙 1·6 탐침 · 다음 1단계 심기.
+"""D59 19f — 말소리 빈칸 재전사: 넣기 · 범위와 승인 · 규칙 1·6 탐침 · 다음 1단계 심기.
 
-유료 호출은 없다 — whisper와 두 번째 귀는 요청을 세는 가짜 전송이 받고, 환경 문은 시험 안에서만
-`vlogsrt.env.is_offline`을 가짜로 연다(다른 흐름 시험과 같은 선). 재료는 톤 덩어리 원본 하나를
-재생 분석해 원본 자막을 심되 **덩어리 둘을 일부러 빼서** 자막 없는 말소리를 만든다. 자막 시각 확인은
-가짜 에너지 VAD로 잰다.
+유료 호출은 없다 — 시간 엔진(Gemini 3.5 Transcribe)은 요청을 세는 가짜 opener(`GeminiEcho`)가
+받고, 환경 문은 시험 안에서만 `vlogsrt.env.is_offline`을 가짜로 연다(다른 흐름 시험과 같은 선).
+재료는 톤 덩어리 원본 하나를 Gemini 응답 재생으로 분석해 원본 자막을 심되 **덩어리 둘을 일부러
+빼서** 자막 없는 말소리를 만든다. 자막 시각 확인은 가짜 에너지 VAD로 잰다.
+
+whisper·gpt-transcribe는 은퇴했다(D163) — 빈칸 재전사는 Gemini 시간 엔진 원본만 묻고, 다른 귀(gpt
+글자)는 없다. whisper로 들은 원본은 0송신으로 거절한다.
 
 시험이 못 박는 것:
 
 - 기존 줄은 바이트까지 그대로, 겹치는 줄은 넣지 않고 WARN·기록, 리비전이 다르면 거절한다.
 - 넣은 자막은 고친 자막(`edited=True`)이 되어 **다음 1단계 심기가 지우지 않는다**.
-- 넣은 시각 = whisper 세그먼트 + 그 조각의 실제 표본 오프셋(+ 확인과 같은 원점) — 정확
+- 넣은 시각 = 엔진 단어 시각 + 그 조각의 실제 표본 오프셋(+ 확인과 같은 원점) — 정확
   유리수(규칙 1).
-- whisper 요청에는 힌트가 없다(규칙 6). 문맥·용어집·언어는 두 번째 귀에게만 간다.
-- 견적 digest는 구간·모델·용어집에 따라 바뀌고, 낡은 승인은 0송신으로 닫힌다. 교차 확인을 끄면
-  글자 요청이 없고 견적은 whisper 분량만 말한다.
+- 시간 엔진 요청에는 힌트가 없다(규칙 6) — 용어집을 저장해도 요청·범위에 실리지 않는다.
+- 범위 digest는 구간·자막 리비전에 따라 바뀌고, 낡은 승인은 0송신으로 닫힌다.
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import shutil
 import time
@@ -30,48 +34,67 @@ from typing import Any
 import pytest
 
 from tests._sync_fakes import bursts, energy_factory, make_media, numpy_or_fake
+from tests.raw.gemini_echo import GeminiEcho, interaction_body
 from vlogsrt import log
 from vlogsrt.config import Config
-from vlogsrt.project.raw import glossary, source_transcript, speech_refill, sync_report
+from vlogsrt.project.raw import (
+    asr_epoch,
+    glossary,
+    source_transcript,
+    speech_refill,
+    sync_report,
+    timing_engine,
+)
 from vlogsrt.project.raw import service as raw
 from vlogsrt.project.raw.analysis_approval import LiveAnalysisTransport
-from vlogsrt.project.raw.config import SOURCE_TEXT_PROMPT, RawModelRoles
+from vlogsrt.project.raw.config import (
+    GEMINI_TRANSCRIBE_PROFILE,
+    TIMING_ENGINE_GEMINI,
+    TIMING_ENGINE_WHISPER,
+)
 from vlogsrt.project.raw.models import RawWorkspaceError
-from vlogsrt.transcribe import CAPTION_TEXT_KIND, CAPTION_TIMING_KIND
 
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = [
-    pytest.mark.skipif(
-        shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
-        reason="ffmpeg/ffprobe가 없는 환경",
-    ),
-    pytest.mark.usefixtures("whisper_for_new_hearings"),
-]
+pytestmark = pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="ffmpeg/ffprobe가 없는 환경",
+)
 
 TERMINAL = frozenset({"succeeded", "failed", "cancelled"})
 REPLAY_ANALYSIS_MODEL = "gpt-6-luna"  # 재생 의미 판정 픽스처의 응답 모양(test_sync_report와 같다)
 DROPPED = (2, 9)  # 원본 자막에서 일부러 뺀 덩어리 — 5.9–8.0초 · 25.0–27.2초
 RATE = 16000
-SEGMENT = (0.5, 1.25)  # 조각 안 whisper 세그먼트 — 표본으로 정확히 떨어진다(8000·20000)
-WHISPER_TEXT = "빈칸 말"
-TEXT_ANSWER = "빈칸 말이다"
+SEGMENT = (0.5, 1.25)  # 조각 안 엔진 단어 시각 — 표본으로 정확히 떨어진다(8000·20000)
+ENGINE_TEXT = "빈칸 말"
 
 
-class RefillSender:
-    """두 귀의 가짜 전송 — 요청을 그대로 모은다(유료 호출 없음)."""
+class RefillSender(GeminiEcho):
+    """Gemini 시간 엔진의 가짜 opener — 요청 본문을 모으고 정해진 세그먼트를 단어로 돌려준다.
+
+    세그먼트 하나의 낱말은 모두 그 세그먼트의 시각을 가진다(`GeminiEcho`) — 유료 호출은 없다."""
 
     def __init__(self, segments: list[dict[str, Any]] | None = None) -> None:
-        self.whisper: list[Any] = []
-        self.text: list[Any] = []
-        self.segments = segments or [{"start": SEGMENT[0], "end": SEGMENT[1], "text": WHISPER_TEXT}]
+        default = [{"start": SEGMENT[0], "end": SEGMENT[1], "text": ENGINE_TEXT}]
+        super().__init__(segments or default)
 
-    def send_request(self, request: Any, cfg: Any, *, kind: str, stem: str, source: str) -> Any:
-        if kind == CAPTION_TEXT_KIND:
-            self.text.append(request)
-            return {"text": TEXT_ANSWER, "languages": [{"code": "ko"}]}
-        assert kind == CAPTION_TIMING_KIND
-        self.whisper.append(request)
-        return {"segments": [dict(item) for item in self.segments]}
+
+def sent_audio(body: dict[str, Any]) -> bytes:
+    """보낸 요청 본문의 인라인 오디오(조각 WAV 바이트 그대로)."""
+    (part,) = body["input"]
+    assert part["type"] == "audio"
+    return base64.b64decode(part["data"])
+
+
+def sent_pieces(sender: GeminiEcho, root: Path, asset_id: str) -> list[tuple[int, int]]:
+    """보낸 조각(표본 범위) — 인라인 오디오의 해시를 잘라 둔 조각의 WAV 해시와 맞춘다.
+
+    조각은 함께 보낸다(P-5, D159) — 보낸 차례가 아니라 보낸 조각을 본다."""
+    folder = root / "cache" / speech_refill.REFILL_DIRNAME / asset_id
+    slices = json.loads((folder / "slices.json").read_text(encoding="utf-8"))
+    by_sha: dict[str, tuple[int, int]] = {}
+    for key, sha in slices.items():
+        _pcm, start, end = str(key).split(":")
+        by_sha[str(sha)] = (int(start), int(end))
+    return sorted(by_sha[hashlib.sha256(sent_audio(body)).hexdigest()] for body in sender.calls)
 
 
 def wait(service: raw.RawWorkspaceService, root: Path, job_id: str) -> Any:
@@ -90,13 +113,15 @@ def wait_sync(service: raw.RawWorkspaceService, root: Path) -> None:
     assert wait(service, root, latest.job_id).status == "succeeded"
 
 
-def transport(sender: RefillSender) -> LiveAnalysisTransport:
+def transport(sender: GeminiEcho) -> LiveAnalysisTransport:
+    """가짜 전송 — 시간 엔진은 `timing_client`(Gemini 가짜)로만 간다."""
     return LiveAnalysisTransport(
         sender=sender,
         cfg=Config(),
         client=None,
         asr_approvals=lambda *_: {},
         luna_approvals=lambda *_: {},
+        timing_client=sender.client(),
     )
 
 
@@ -104,15 +129,27 @@ def context() -> Any:
     return types.SimpleNamespace(job_id="refill-test", check_cancel=lambda: None)
 
 
+def pin_gemini(service: raw.RawWorkspaceService, root: Path, asset_id: str) -> None:
+    """손으로 심은 원본 자막을 Gemini 시간 엔진 원본으로 고정한다(없으면 whisper로 읽힌다)."""
+    workspace = service._workspace(root)
+    epoch = asr_epoch.state(workspace, asset_id).epoch
+    timing_engine.pin(workspace, asset_id, epoch, TIMING_ENGINE_GEMINI)
+    assert timing_engine.resolve(workspace, asset_id) == TIMING_ENGINE_GEMINI
+
+
 def _replay_fixtures(root: Path, sha: str, *, dropped: tuple[int, ...]) -> None:
+    """재생 픽스처 — 원본 자막은 Gemini 응답 선언(청크 0)에서, 의미 판정은 Luna 모양에서 온다."""
     replay = root / "analysis" / "replay"
     replay.mkdir(parents=True, exist_ok=True)
     spoken = [
-        {"start": float(start), "end": float(end), "text": f"말 {index}"}
+        {"start": str(start), "end": str(end), "text": f"말 {index}"}
         for index, (start, end) in enumerate(bursts())
         if index not in dropped
     ]
-    (replay / "asr-fixtures.json").write_text(json.dumps({"sources": {sha: spoken}}), "utf-8")
+    words = {"sources": {sha: {"0": interaction_body(spoken)}}}
+    (replay / "word-text-fixtures.json").write_text(
+        json.dumps(words, ensure_ascii=False), encoding="utf-8"
+    )
     luna = {f"window_{i:06d}": _luna(f"window_{i:06d}") for i in range(12)}
     (replay / "luna-fixtures.json").write_text(json.dumps({"windows": luna}), "utf-8")
 
@@ -134,7 +171,7 @@ def _luna(window_id: str) -> dict[str, Any]:
 def gapped_workspace(
     tmp_path: Path, audio_delay: str = "0"
 ) -> tuple[raw.RawWorkspaceService, Path, str]:
-    """톤 원본 하나를 재생 분석(덩어리 둘을 뺀 자막)하고 자막 시각 확인까지 끝낸 작업공간.
+    """톤 원본 하나를 Gemini 재생으로 분석(덩어리 둘을 뺀 자막)하고 자막 시각 확인까지 끝낸 곳.
 
     `audio_delay`는 오디오 원점이다 — 0이 아니면 공통 시계가 PCM 시계보다 그만큼 늦다."""
     card = tmp_path / "card"
@@ -154,6 +191,8 @@ def gapped_workspace(
     _replay_fixtures(root, asset.content_sha256 or "", dropped=DROPPED)
     assert wait(service, root, service.start_analysis(root).job_id).status == "succeeded"
     wait_sync(service, root)
+    workspace = service._workspace(root)
+    assert timing_engine.resolve(workspace, asset.asset_id) == TIMING_ENGINE_GEMINI
     return service, root, asset.asset_id
 
 
@@ -279,7 +318,7 @@ def test_the_next_stage1_seed_keeps_the_inserted_rows(tmp_path: Path) -> None:
 # ── 범위 — 구간 · digest(견적·금액 문구는 없다, D110) ─────────────────────────────
 
 
-def test_the_scope_asks_exactly_the_dropped_bursts_with_both_ears(
+def test_the_scope_asks_exactly_the_dropped_bursts_with_the_timing_engine_alone(
     gapped: tuple[Any, Path, str],
 ) -> None:
     service, root, asset_id = gapped
@@ -288,35 +327,26 @@ def test_the_scope_asks_exactly_the_dropped_bursts_with_both_ears(
     for span, index in zip(quote.spans, DROPPED, strict=True):
         start, end = bursts()[index]
         assert span.start <= start * RATE and end * RATE <= span.end  # 덩어리를 통째로 묻는다
-    assert quote.whisper_due == quote.pieces == quote.text_due  # 처음이라 둘 다 새로 산다
+    assert quote.whisper_due == quote.pieces  # 처음이라 모두 새로 산다
+    assert quote.timing_model == GEMINI_TRANSCRIBE_PROFILE.model
+    # Gemini 원본에는 다른 귀가 없다(D104·D163) — 글자 요청 칸이 비어 있다.
+    assert (quote.text_model, quote.text_identity, quote.text_due) == (None, None, ())
     assert not hasattr(quote, "usd") and not hasattr(quote, "text")  # 금액·문구가 없다(D110)
-    assert quote.text_model == RawModelRoles().text_model and quote.text_identity is not None
     assert service.refill_scope(root, asset_id).digest == quote.digest  # 결정적이다
 
 
-def test_the_digest_moves_with_spans_glossary_and_cross_check(
+def test_the_digest_moves_with_the_transcript_revision_not_with_the_glossary(
     gapped: tuple[Any, Path, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     service, root, asset_id = gapped
     first = _quote(service, root, asset_id)
     glossary.save(service._workspace(root), "왕방\n백숙")
-    with_glossary = _quote(service, root, asset_id)
-    assert with_glossary.digest != first.digest
-    assert with_glossary.text_identity != first.text_identity
-    assert with_glossary.pieces == first.pieces  # 구간은 그대로 — 묶는 요청 신원만 바뀌었다
-    service.set_cross_check(root, False)
-    whisper_only = _quote(service, root, asset_id)
-    assert whisper_only.digest not in {first.digest, with_glossary.digest}
-    assert (whisper_only.text_model, whisper_only.text_identity, whisper_only.text_due) == (
-        None,
-        None,
-        (),
-    )
-    assert whisper_only.whisper_due == whisper_only.pieces  # whisper 분량만
+    # 용어집은 시간 엔진에 가지 않는다(규칙 6) — 범위가 묶을 요청 신원이 없다.
+    assert _quote(service, root, asset_id) == first
     transcript = service.source_transcript(root, asset_id)
     first_row = transcript["utterances"][0]
     queued: list[tuple[str, ...]] = []
-    # 고친 뒤의 확인을 붙잡아 두고 본다 — 확인 작업(VAD 캐시)이 견적보다 먼저 끝나는 경합을 없앤다.
+    # 고친 뒤의 확인을 붙잡아 두고 본다 — 확인 작업(VAD 캐시)이 범위보다 먼저 끝나는 경합을 없앤다.
     monkeypatch.setattr(service, "_queue_sync_checks", lambda _root, ids: queued.append(tuple(ids)))
     service.edit_source_transcript(
         root, asset_id, transcript["revision"], action="edit",
@@ -327,8 +357,8 @@ def test_the_digest_moves_with_spans_glossary_and_cross_check(
     assert service.start_sync_checks(root, (asset_id,)) is not None
     wait_sync(service, root)
     moved = _quote(service, root, asset_id)
-    assert moved.transcript_revision != whisper_only.transcript_revision
-    assert moved.digest != whisper_only.digest
+    assert moved.transcript_revision != first.transcript_revision
+    assert moved.pieces == first.pieces and moved.digest != first.digest
 
 
 def test_relisten_pending_blocks_the_refill(gapped: tuple[Any, Path, str]) -> None:
@@ -350,11 +380,69 @@ def test_an_unmeasurable_report_says_so_instead_of_waiting(gapped: tuple[Any, Pa
     assert service.refill_scope(root, asset_id) == raw.REFILL_UNMEASURED
 
 
-# ── 실행 — 규칙 1·6 탐침 · 넣기 · 다음 견적 ────────────────────────────────────
+def test_a_source_heard_by_whisper_is_refused_and_sends_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, whisper_for_new_hearings: None
+) -> None:
+    """whisper로 들은 원본은 빈칸을 새로 묻지 않는다(D163) — 범위도 실행도 같은 이유로 닫힌다."""
+    numpy_or_fake(monkeypatch)
+    monkeypatch.setattr(sync_report, "default_session_factory", energy_factory)
+    service, root, _ = _whisper_heard_workspace(tmp_path)
+    asset_id = service.list_source_assets(root)[0].asset_id
+    workspace = service._workspace(root)
+    assert timing_engine.resolve(workspace, asset_id) == TIMING_ENGINE_WHISPER
+    assert service.refill_scope(root, asset_id) == raw.REFILL_WHISPER_RETIRED
+    _online(monkeypatch)
+    sender = RefillSender()
+    forged = types.SimpleNamespace(digest="0" * 64)
+    with pytest.raises(RawWorkspaceError) as refused:
+        service.refill_source(root, asset_id, forged, transport(sender), context())
+    assert str(refused.value) == raw.REFILL_WHISPER_RETIRED
+    handle = service.refill_start(root, asset_id, forged, transport(sender))
+    job = wait(service, root, handle.job_id)
+    assert job.status == "failed" and raw.REFILL_WHISPER_RETIRED in str(job.error)
+    assert sender.calls == []  # 0송신
+    doc = service.source_transcript(root, asset_id)
+    assert doc["edited"] is False
+    assert not any(row.get(source_transcript.REFILL_FIELD) for row in doc["utterances"])
+    assert speech_refill.latest_record(root, asset_id) is None
 
 
-def _assert_whisper_times(inserted: list[dict[str, Any]], quote: Any) -> None:
-    """규칙 1 — 시각은 whisper 세그먼트 + 조각의 실제 표본 오프셋(+ 확인과 같은 원점)뿐이다."""
+def _whisper_heard_workspace(tmp_path: Path) -> tuple[Any, Path, str]:
+    """덩어리 둘을 뺀 원본 자막을 whisper 모양 재생으로 들은 작업공간(새로 듣는 엔진 = whisper)."""
+    card = tmp_path / "card"
+    make_media(card / "tone.mov")
+    root = tmp_path / "ws"
+    service = raw.RawWorkspaceService()
+    service.create_workspace(root, "whisper 원본")
+    workflow = service.settings(root)
+    models = replace(workflow.models, luna_model=REPLAY_ANALYSIS_MODEL)
+    service.update_settings(root, replace(workflow, models=models))
+    proposal = service.scan_sources(root, card)
+    copied = service.start_ingest_copy(root, service.confirm_ingest(root, proposal))
+    assert wait(service, root, copied.job_id).status == "succeeded"
+    service.confirm_global_source_order(root)
+    asset = service.list_source_assets(root)[0]
+    replay = root / "analysis" / "replay"
+    replay.mkdir(parents=True, exist_ok=True)
+    spoken = [
+        {"start": float(start), "end": float(end), "text": f"말 {index}"}
+        for index, (start, end) in enumerate(bursts())
+        if index not in DROPPED
+    ]
+    sources = {"sources": {asset.content_sha256 or "": spoken}}
+    (replay / "asr-fixtures.json").write_text(json.dumps(sources), "utf-8")
+    luna = {f"window_{i:06d}": _luna(f"window_{i:06d}") for i in range(12)}
+    (replay / "luna-fixtures.json").write_text(json.dumps({"windows": luna}), "utf-8")
+    assert wait(service, root, service.start_analysis(root).job_id).status == "succeeded"
+    wait_sync(service, root)
+    return service, root, asset.asset_id
+
+
+# ── 실행 — 규칙 1·6 탐침 · 넣기 · 다음 범위 ────────────────────────────────────
+
+
+def _assert_engine_times(inserted: list[dict[str, Any]], quote: Any) -> None:
+    """규칙 1 — 시각은 엔진 단어 시각 + 조각의 실제 표본 오프셋(+ 확인과 같은 원점)뿐이다."""
     for row, (piece_start, _end) in zip(inserted, quote.pieces, strict=True):
         offset = Fraction(piece_start, RATE) + quote.audio_start
         assert source_transcript.rational(row["start"]) == offset + Fraction(1, 2)
@@ -362,9 +450,10 @@ def _assert_whisper_times(inserted: list[dict[str, Any]], quote: Any) -> None:
         assert (row["start_sample"], row["end_sample"]) == (piece_start + 8000, piece_start + 20000)
 
 
-def test_refill_inserts_whisper_times_plus_the_slice_offset_and_sends_no_whisper_hints(
+def test_refill_inserts_engine_times_plus_the_slice_offset_and_sends_no_hints(
     gapped: tuple[Any, Path, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """빈칸 재전사의 시간 요청은 Gemini 가짜로 간다 — 오디오·언어 잠금·단어 시각뿐이다(규칙 6)."""
     service, root, asset_id = gapped
     _online(monkeypatch)
     glossary.save(service._workspace(root), "왕방\n백숙")
@@ -372,24 +461,26 @@ def test_refill_inserts_whisper_times_plus_the_slice_offset_and_sends_no_whisper
     quote = _quote(service, root, asset_id)
     sender = RefillSender()
     record = service.refill_source(root, asset_id, quote, transport(sender), context())
-    # 규칙 6 — whisper 요청에는 힌트가 하나도 없다. 온도는 엔진 1차 값(D55).
-    assert len(sender.whisper) == 2
-    for request in sender.whisper:
-        assert (request.prompt, request.keywords, request.languages) == ("", (), ())
-        assert request.temperature == Config().transcribe_temperature
-    # 두 번째 귀에게만 문맥·용어집·언어가 간다.
-    assert len(sender.text) == 2
-    for request in sender.text:
-        assert request.prompt == SOURCE_TEXT_PROMPT
-        assert request.keywords == ("왕방", "백숙") and request.languages == ("ko",)
+    assert len(sender.calls) == 2
+    for body in sender.calls:
+        assert body["model"] == GEMINI_TRANSCRIBE_PROFILE.model
+        assert set(body) == {"model", "store", "input", "generation_config"}
+        config = body["generation_config"]
+        assert set(config) == {"transcription_config"}
+        assert set(config["transcription_config"]) == {"language_codes", "mode"}
+        assert config["transcription_config"]["language_codes"] == ["ko-KR"]  # 언어 잠금뿐
+        text = json.dumps(body, ensure_ascii=False)
+        assert "왕방" not in text and "백숙" not in text  # 용어집은 가지 않는다
+    assert sent_pieces(sender, root, asset_id) == sorted(quote.pieces)
     after = service.source_transcript(root, asset_id)
     inserted = [r for r in after["utterances"] if r.get(source_transcript.REFILL_FIELD)]
     assert [r["utterance_id"] for r in inserted] == record["inserted"]
     assert len(inserted) == 2 and after["edited"] is True
-    _assert_whisper_times(inserted, quote)
+    _assert_engine_times(inserted, quote)
     for row in inserted:
-        assert row["whisper_text"] == WHISPER_TEXT and row["text_origin"] == "live"
-        assert row["text_source"] in (RawModelRoles().text_model, "whisper")
+        assert row["text"] == ENGINE_TEXT
+        assert "text_source" not in row  # 다른 귀가 없다 — 엔진 글자 그대로
+    assert record["asr_text"] is None
     old = [json.dumps(r, ensure_ascii=False) for r in before["utterances"]]
     kept = [
         json.dumps(r, ensure_ascii=False)
@@ -407,7 +498,6 @@ def test_inserted_times_follow_the_measured_audio_origin(
     monkeypatch.setattr(sync_report, "default_session_factory", energy_factory)
     service, root, asset_id = gapped_workspace(tmp_path, audio_delay="0.5")
     _online(monkeypatch)
-    service.set_cross_check(root, False)
     quote = _quote(service, root, asset_id)
     report = service.sync_report(root, asset_id)
     assert quote.audio_start == Fraction(report["pcm"]["audio_start"]) != 0
@@ -415,22 +505,7 @@ def test_inserted_times_follow_the_measured_audio_origin(
     after = service.source_transcript(root, asset_id)
     inserted = [r for r in after["utterances"] if r.get(source_transcript.REFILL_FIELD)]
     assert len(inserted) == 2
-    _assert_whisper_times(inserted, quote)
-
-
-def test_refill_with_cross_check_off_sends_no_text_request(
-    gapped: tuple[Any, Path, str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    service, root, asset_id = gapped
-    _online(monkeypatch)
-    service.set_cross_check(root, False)
-    quote = _quote(service, root, asset_id)
-    sender = RefillSender()
-    service.refill_source(root, asset_id, quote, transport(sender), context())
-    assert len(sender.whisper) == 2 and sender.text == []
-    after = service.source_transcript(root, asset_id)
-    inserted = [r for r in after["utterances"] if r.get(source_transcript.REFILL_FIELD)]
-    assert inserted and all("text_source" not in row for row in inserted)  # 19c 이전 모양
+    _assert_engine_times(inserted, quote)
 
 
 def test_a_stale_approval_sends_nothing(
@@ -439,39 +514,35 @@ def test_a_stale_approval_sends_nothing(
     service, root, asset_id = gapped
     _online(monkeypatch)
     quote = _quote(service, root, asset_id)
-    glossary.save(service._workspace(root), "닭도리탕")  # 다른 탭이 용어집을 바꿨다
     sender = RefillSender()
-    with pytest.raises(RawWorkspaceError, match="빈칸이 바뀌었습니다"):
-        service.refill_source(root, asset_id, quote, transport(sender), context())
-    forged = replace(_quote(service, root, asset_id), digest="0" * 64)  # 본 적 없는 견적
+    forged = replace(quote, digest="0" * 64)  # 본 적 없는 범위
     with pytest.raises(RawWorkspaceError, match="빈칸이 바뀌었습니다"):
         service.refill_source(root, asset_id, forged, transport(sender), context())
-    assert sender.whisper == [] and sender.text == []
+    assert sender.calls == []
     assert service.source_transcript(root, asset_id)["edited"] is False
 
 
 def test_the_run_never_trusts_the_approved_objects_fields_only_its_digest(
     gapped: tuple[Any, Path, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """승인 객체의 조각을 바꿔도 실행은 다시 잰 견적(digest가 같은 것)의 조각만 묻는다."""
+    """승인 객체의 조각을 바꿔도 실행은 다시 잰 범위(digest가 같은 것)의 조각만 묻는다."""
     service, root, asset_id = gapped
     _online(monkeypatch)
     quote = _quote(service, root, asset_id)
     forged = replace(quote, pieces=((0, RATE),), whisper_due=((0, RATE),))
     sender = RefillSender()
     service.refill_source(root, asset_id, forged, transport(sender), context())
-    # 조각은 함께 보낸다(P-5, D159) — 보낸 차례가 아니라 보낸 조각을 본다.
-    sent = sorted(round(request.chunk.offset * RATE) for request in sender.whisper)
-    assert sent == sorted(start for start, _end in quote.pieces) and 0 not in sent
+    sent = sent_pieces(sender, root, asset_id)
+    assert sent == sorted(quote.pieces) and all(start != 0 for start, _end in sent)
 
 
 def test_the_offline_gate_closes_every_send(gapped: tuple[Any, Path, str]) -> None:
-    """환경이 오프라인이면 승인한 견적이어도 0송신이다 — 조각은 실패로 남고 아무것도 넣지 않는다."""
+    """환경이 오프라인이면 승인한 범위여도 0송신이다 — 조각은 실패로 남고 아무것도 넣지 않는다."""
     service, root, asset_id = gapped
     quote = _quote(service, root, asset_id)
     sender = RefillSender()
     record = service.refill_source(root, asset_id, quote, transport(sender), context())
-    assert sender.whisper == [] and sender.text == []
+    assert sender.calls == []
     assert record["inserted"] == [] and len(record["failed"]) == 2
     assert "VLOGSRT_OFFLINE" in record["failed"][0]["failure"]
     assert service.source_transcript(root, asset_id)["edited"] is False
@@ -482,12 +553,12 @@ def test_overlapping_answers_are_warned_and_recorded(
 ) -> None:
     service, root, asset_id = gapped
     _online(monkeypatch)
-    service.set_cross_check(root, False)
     warnings: list[str] = []
     monkeypatch.setattr(log, "warn", warnings.append)
+    # 문장 끝 부호 뒤에서 줄이 끊긴다 — 엔진 단어 시각 그대로라 두 줄이 겹친다(D92 — 순서는 그대로).
     sender = RefillSender(
         [
-            {"start": 0.5, "end": 1.25, "text": "앞 말"},
+            {"start": 0.5, "end": 1.25, "text": "앞 말."},
             {"start": 1.0, "end": 1.5, "text": "겹친 말"},
         ]
     )
@@ -576,7 +647,7 @@ def test_the_job_wiring_runs_the_same_body(
     )
     record = wait(service, root, handle.job_id)
     assert record.status == "succeeded", record.error
-    assert record.kind == raw.REFILL_JOB_KIND and len(sender.whisper) == 2
+    assert record.kind == raw.REFILL_JOB_KIND and len(sender.calls) == 2
     assert not service.refill_running(root, asset_id)
     last = service.refill_last(root, asset_id)
     assert last is not None and len(last["inserted"]) == 2

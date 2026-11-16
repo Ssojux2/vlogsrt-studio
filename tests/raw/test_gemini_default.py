@@ -19,9 +19,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.raw.test_gemini_text_flow import _gemini_payload, _write_gemini
+from tests.raw.replay_helpers import (
+    _gemini_payload,
+    _phase_documents,
+    _replay_workspace,
+    _write_gemini,
+    _write_replay,
+)
 from tests.raw.test_review_workspace import _wait_terminal
-from tests.raw.test_source_text_flow import _phase_documents, _replay_workspace, _write_replay
 from tests.raw.test_timing_engine_resolve import _seed_document
 from vlogsrt.models import Chunk
 from vlogsrt.project.raw import (

@@ -22,13 +22,10 @@ from tests._dotenv_guard import (
 )
 from vlogsrt.env import (
     PACKAGE_ROOT,
-    api_key_source,
     find_env_file,
-    has_api_key,
     is_offline,
     load_env,
     parse_env_text,
-    require_api_key,
     reset_cache,
     resolve_under_root,
 )
@@ -79,33 +76,6 @@ def test_truthy_values(value: str, monkeypatch: pytest.MonkeyPatch) -> None:
 def test_explicit_zero_turns_it_off(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VLOGSRT_OFFLINE", "0")
     assert is_offline() is False
-
-
-def test_api_key_refused_while_offline(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("VLOGSRT_OFFLINE", "1")
-    with pytest.raises(RuntimeError, match="오프라인"):
-        require_api_key()
-
-
-def test_force_lets_the_human_pay_on_purpose(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`record`와 `--online`은 VLOGSRT_OFFLINE 값과 무관하게 동작해야 한다."""
-    monkeypatch.setenv("VLOGSRT_OFFLINE", "1")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    assert require_api_key(force=True) == "sk-test"
-
-
-def test_force_still_requires_a_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("VLOGSRT_OFFLINE", "1")
-    monkeypatch.setenv("OPENAI_API_KEY", "")
-    with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
-        require_api_key(force=True)
-
-
-def test_api_key_missing_message(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("VLOGSRT_OFFLINE", "0")
-    monkeypatch.setenv("OPENAI_API_KEY", "")
-    with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
-        require_api_key()
 
 
 # ─────────────────────────────────────────────────────────────
@@ -160,24 +130,6 @@ def test_relative_config_paths_resolve_under_the_project_root(
         assert resolve_under_root("/absolute/stays").is_absolute()
     finally:
         reset_cache()
-
-
-def test_key_state_helpers_never_expose_the_value(monkeypatch: pytest.MonkeyPatch) -> None:
-    secret = "sk-proj-SECRET-VALUE"
-    monkeypatch.setenv("OPENAI_API_KEY", secret)
-    assert has_api_key() is True
-    assert secret not in api_key_source()
-
-    monkeypatch.setenv("OPENAI_API_KEY", "  ")
-    assert has_api_key() is False
-    assert api_key_source() == "없음"
-
-
-def test_cost_guard_defaults_to_two_hours(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("VLOGSRT_COST_GUARD_SECONDS", raising=False)
-    from vlogsrt.env import cost_guard_seconds
-
-    assert cost_guard_seconds() == 7200.0
 
 
 # ─────────────────────────────────────────────────────────────

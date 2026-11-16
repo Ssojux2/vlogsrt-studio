@@ -416,4 +416,4 @@ def test_close_wiring_matches_the_handler_values(tmp_path: Path, local_socket: N
         for d in by_id.values()
         if d.get("trigger_after") == dep["id"]
     }
-    assert {"analysis_model_controls", "glossary_controls"} <= followers
+    assert {"analysis_model_controls"} <= followers

@@ -31,6 +31,7 @@ from typing import Any
 
 import pytest
 
+from tests.raw.invariant_tree import CLEAN_TIERING, TIER_SERVICE, check_invariants, fake_source_tree
 from tests.raw.test_finalcut_caption_timing import _put_report
 from tests.raw.test_tier_timing_service import (
     _flagged,
@@ -43,7 +44,6 @@ from tests.raw.test_tier_timing_service import (
 from tests.raw.test_tiering_v3 import _random_document, chatter, cue_key, make_document
 from tests.raw.test_visual_workbench_ui import _NODE_HARNESS, needs_node
 from tests.raw.tier_rules import V5_RULES, pin_v5_rules
-from tests.test_invariants import CLEAN_TIERING, TIER_SERVICE, _fake_source_tree, check_invariants
 from ui import ui_facade
 from vlogsrt.project import sync_check
 from vlogsrt.project.raw import sync_report, tiering
@@ -499,7 +499,7 @@ def test_verified_subtitle_fields_are_filled_only_by_the_service_entry(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rel: str, body: str, line: int, fragment: str
 ):
     clean = {TIER_SERVICE: CLEAN_SERVICE, "vlogsrt/project/raw/tiering.py": CLEAN_TIERING}
-    _fake_source_tree(monkeypatch, tmp_path, clean)
+    fake_source_tree(monkeypatch, tmp_path, clean)
     (tmp_path / "ui").mkdir(exist_ok=True)
     assert check_invariants.check_tier_timing_only_from_service() == []
     (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -515,7 +515,7 @@ def test_reading_the_field_elsewhere_is_not_a_producer(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
     clean = {TIER_SERVICE: CLEAN_SERVICE, "vlogsrt/project/raw/tiering.py": CLEAN_TIERING}
-    _fake_source_tree(monkeypatch, tmp_path, clean)
+    fake_source_tree(monkeypatch, tmp_path, clean)
     (tmp_path / "ui").mkdir(exist_ok=True)
     (tmp_path / "ui/view.py").write_text(
         "def shown(timing):\n    return timing.subtitle_verified\n", encoding="utf-8"

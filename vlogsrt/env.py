@@ -122,42 +122,8 @@ def is_offline() -> bool:
     return raw in TRUTHY
 
 
-def fixture_dir() -> Path:
-    return resolve_under_root(get("VLOGSRT_FIXTURE_DIR", "tests/fixtures/api"))
-
-
-def work_dir() -> Path:
-    return resolve_under_root(get("VLOGSRT_WORK_DIR", ".vlogsrt-cache"))
-
-
-def golden_dir() -> Path:
-    return resolve_under_root(get("VLOGSRT_GOLDEN_DIR", "golden"))
-
-
 def max_workers() -> int:
     return max(1, get_int("VLOGSRT_MAX_WORKERS", 8))
-
-
-def cost_guard_seconds() -> float:
-    """이 길이를 넘는 오디오는 확인 없이 전사하지 않는다.
-
-    비용 임계값이지 품질 임계값이 아니다. 쓰는 사람이 정하는 값이라
-    `.env` 에서 자유롭게 올린다. 기본 7200초 = 2시간 ≈ $1.44.
-    """
-    return float(get_int("VLOGSRT_COST_GUARD_SECONDS", 7200))
-
-
-def has_api_key() -> bool:
-    """키가 있는지만 알려준다. **값은 절대 돌려주지 않는다.**"""
-    return bool(get("OPENAI_API_KEY").strip())
-
-
-def api_key_source() -> str:
-    """키를 어디서 읽었는지. 화면과 로그에 쓰며 값은 담지 않는다."""
-    if not has_api_key():
-        return "없음"
-    env_file = find_env_file()
-    return f"{env_file}" if env_file else "셸 환경변수"
 
 
 def has_anthropic_api_key() -> bool:
@@ -168,33 +134,6 @@ def has_anthropic_api_key() -> bool:
 def has_gemini_api_key() -> bool:
     """Gemini 의미 분석 키가 있는지만 알려준다(D83). **값은 절대 돌려주지 않는다.**"""
     return bool(get(ANALYSIS_GEMINI_KEY_ENV).strip())
-
-
-def require_api_key(force: bool = False) -> str:
-    """실제 호출 직전에만 부른다. 오프라인이면 거부한다.
-
-    `force`는 사람이 `record`나 `--online`으로 **명시적으로** 유료 호출을 요청한
-    경우에만 참이다. 그 둘은 `VLOGSRT_OFFLINE` 값과 무관하게 동작해야 한다
-    (.env.example 참조). 나머지 경로는 전부 오프라인 기본값에 막힌다.
-    """
-    if not force and is_offline():
-        raise RuntimeError(
-            "오프라인 모드입니다(VLOGSRT_OFFLINE=1). 실제 API 호출은 차단됩니다.\n"
-            "픽스처가 없다면 사람이 직접 `vlogsrt record <video>`를 실행해야 합니다."
-        )
-    key = get("OPENAI_API_KEY").strip()
-    if not key:
-        raise RuntimeError(
-            "OPENAI_API_KEY가 없습니다.\n"
-            "  cp .env.example .env  후 키를 채우세요. "
-            "이 파일은 .gitignore에 있으며 커밋되지 않습니다."
-        )
-    return key
-
-
-def base_url() -> str | None:
-    raw = get("OPENAI_BASE_URL").strip()
-    return raw or None
 
 
 # ─────────────────────────────────────────────────────────────

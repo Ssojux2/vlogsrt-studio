@@ -8,192 +8,14 @@ from __future__ import annotations
 import importlib.util
 import subprocess
 import sys
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
 
-from vlogsrt import pipeline, refine
-from vlogsrt.config import Config
-from vlogsrt.hangul import strip_for_compare
-from vlogsrt.layout import FORCED_BREAK, TOO_LONG
-from vlogsrt.models import RETEXT_OFF, Cue, RetextRecord, Segment
+from vlogsrt.models import Cue, Segment
 
-SYNTHETIC = Path(__file__).parent / "fixtures" / "synthetic"
 ROOT = Path(__file__).resolve().parent.parent
-VIDEO = Path("golden/demo.mp4")
-
-
-@pytest.fixture(autouse=True)
-def synthetic_fixtures(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("VLOGSRT_FIXTURE_DIR", str(SYNTHETIC))
-
-
-def test_draft_cue_times_come_straight_from_the_spine(tmp_path: Path) -> None:
-    """규칙 1 — 정제 전 큐의 시각은 세그먼트 원본값과 정확히 같다."""
-    result = pipeline.run(VIDEO, Config(), tmp_path, force_offline=True)
-    draft = pipeline.spine_to_cues(list(result.trace.spine))
-    assert [(cue.start, cue.end) for cue in draft] == [
-        (segment.start, segment.end) for segment in result.trace.spine
-    ]
-
-
-def test_refined_cue_times_stay_within_refine_bounds(tmp_path: Path) -> None:
-    """규칙 3 — refine의 이동량은 lead_in/lead_out 한도 안이다."""
-    cfg = Config()
-    result = pipeline.run(VIDEO, cfg, tmp_path, force_offline=True)
-    segments = {segment.id: segment for segment in result.trace.spine}
-    epsilon = 1e-6
-    for cue in result.cues:
-        assert cue.seg_ids, f"큐 {cue.index}가 seg_ids 없이 나왔다 — 역추적 불가(규칙 2)"
-        first = segments[cue.seg_ids[0]]
-        last = segments[cue.seg_ids[-1]]
-        assert cue.start >= first.start - cfg.lead_in - epsilon
-        assert cue.end <= last.end + cfg.lead_out + cfg.min_duration + epsilon
-
-
-def test_srt_text_is_exactly_the_spine_text(tmp_path: Path) -> None:
-    """규칙 1 — 출력 글자 전부가 세그먼트에서 오고, 한 글자도 새지 않는다."""
-    result = pipeline.run(VIDEO, Config(), tmp_path, force_offline=True)
-    body = strip_for_compare(" ".join(cue.text for cue in result.cues))
-    spine_text = strip_for_compare(" ".join(s.text for s in result.trace.spine))
-    assert body == spine_text
-
-
-def test_every_segment_reaches_the_srt(tmp_path: Path) -> None:
-    """규칙 9 — 골격의 세그먼트는 하나도 빠짐없이 어떤 큐엔가 들어간다."""
-    result = pipeline.run(VIDEO, Config(), tmp_path, force_offline=True)
-    covered = {seg_id for cue in result.cues for seg_id in cue.seg_ids}
-    assert covered == {segment.id for segment in result.trace.spine}
-
-
-def test_every_word_the_model_said_reaches_the_srt(tmp_path: Path) -> None:
-    """규칙 9 — 어절은 하나도 버리지 않는다. 배분에서도, 정제에서도(D24)."""
-    from vlogsrt import transcribe as transcribe_module
-
-    responses = transcribe_module.FixtureTranscriber(fixture_dir=SYNTHETIC).transcribe(
-        transcribe_module.TranscriptionJob(stem="demo", chunks=()), Config()
-    )
-    said = [
-        word
-        for response in sorted(responses, key=lambda r: r.offset)
-        for word in transcribe_module.parse_text(response.payload).split()
-    ]
-    result = pipeline.run(VIDEO, Config(), tmp_path, force_offline=True)
-    written = " ".join(cue.text for cue in result.cues).split()
-    # 부호를 뺀 뒤 비교한다 — 조판 정리가 문장부호를 지우기 때문이다(D30).
-    # **어절을 하나도 잃지 않는다는 보장은 그대로다.** 부호까지 같아야 한다는 계약만 놓았다.
-    assert [strip_for_compare(word) for word in written] == [
-        strip_for_compare(word) for word in said
-    ]
-
-
-def test_the_first_and_last_seconds_survive(tmp_path: Path) -> None:
-    """**초반·마지막이 날아간 사고의 회귀 테스트**(D25).
-
-    0.0초에서 시작하는 세그먼트와 영상 끝에서 끝나는 세그먼트가 둘 다 자막으로 선다.
-    구간을 골라내는 코드가 다시 생기면 여기서 걸린다(규칙 4).
-    """
-    cfg = Config()
-    result = pipeline.run(VIDEO, cfg, tmp_path, force_offline=True)
-    assert result.cues[0].start <= cfg.lead_in + 1e-6
-    assert result.cues[-1].end >= result.trace.duration - cfg.lead_out - 1e-6
-
-
-def test_cues_never_overlap_and_never_exceed_capacity(tmp_path: Path) -> None:
-    """0.77초에 900자 같은 큐 부류의 봉쇄. 이제 이걸 잡는 검사 단계는 없다 —
-    정제가 구조적으로 보장하고, 그 보장을 여기서 못 박는다."""
-    cfg = Config()
-    result = pipeline.run(VIDEO, cfg, tmp_path, force_offline=True)
-    for cue in result.cues:
-        assert cue.end > cue.start
-        assert cue.text.strip()
-        assert len(cue.lines) <= cfg.max_lines
-        if len(cue.text) > cfg.max_chars_per_cue:
-            assert cue.flags, f"큐 {cue.index}가 표시 없이 용량을 넘었다"
-    for previous, following in zip(result.cues, result.cues[1:], strict=False):
-        assert following.start >= previous.end
-
-
-def test_the_real_episode_comes_out_without_a_single_period() -> None:
-    """D30 — 영화 자막 관행. 실측 회차(1479 세그먼트)에 온점이 하나도 남지 않는다."""
-    spine, duration = _real_episode()
-    cues = refine.refine(pipeline.spine_to_cues(spine), Config(), duration)
-    assert len(cues) > 1000, "표본이 이만큼은 돼야 의미가 있다"
-    assert [cue.text for cue in cues if "." in cue.text] == []
-
-
-def test_polishing_the_real_episode_deletes_marks_and_nothing_else() -> None:
-    """D30의 안전선 — **글자는 한 자도 못 지운다.**
-
-    실측 회차 전체를 정리한 결과가 정리를 끈 결과와 부호를 뺀 뒤 완전히 같아야 한다.
-    여기가 깨지면 정리 계층이 발화를 먹고 있는 것이다(규칙 9).
-    """
-    spine, duration = _real_episode()
-    polished = refine.refine(pipeline.spine_to_cues(spine), Config(), duration)
-    plain = refine.refine(
-        pipeline.spine_to_cues(spine), replace(Config(), polish_enabled=False), duration
-    )
-    assert strip_for_compare(" ".join(cue.text for cue in polished)) == strip_for_compare(
-        " ".join(cue.text for cue in plain)
-    )
-
-
-def test_every_over_width_line_is_flagged_on_the_real_episode() -> None:
-    """S12·규칙 9 — 폭을 넘긴 줄은 조용히 넘어가지 않는다. 실측 회차 전체로 못 박는다.
-
-    16자는 목표 폭이다. 어절 경계가 안 맞아 넘는 줄은 그대로 두되, 반드시
-    `too_long`·`forced_break` 표시를 달고 나가야 한다.
-    """
-    cfg = Config()
-    spine, duration = _real_episode()
-    cues = refine.refine(pipeline.spine_to_cues(spine), cfg, duration)
-    over_width = [
-        (cue.index, len(line))
-        for cue in cues
-        for line in cue.lines
-        if len(line) > cfg.max_chars_per_line
-    ]
-    # 폭 초과 줄이 아예 없으면 이 검사는 아무것도 안 본다(D32의 교훈).
-    assert over_width, "실측 회차에서 폭 초과 줄이 사라졌다 — 표본을 다시 확인하라"
-    for cue in cues:
-        if any(len(line) > cfg.max_chars_per_line for line in cue.lines):
-            assert {TOO_LONG, FORCED_BREAK} & set(cue.flags), (
-                f"큐 {cue.index}의 폭 초과 줄이 표시 없이 나갔다"
-            )
-
-
-def test_make_cues_warns_once_counting_lines_not_cues(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """S12·규칙 9 — 그래도 폭을 넘긴 줄이 남으면 `WARN` 한 줄로 센다. 큐 수가 아니라 줄 수다."""
-    monkeypatch.setenv("VLOGSRT_LOG_LEVEL", "WARN")
-    cfg = Config()
-    blob = (Segment(id=0, start=0.0, end=1.5, text="가" * 20 + " " + "나" * 19),)
-    cues = pipeline._make_cues(blob, cfg, 2.5, RetextRecord(status=RETEXT_OFF))
-    err = capsys.readouterr().err
-    assert len(cues) == 1  # 짧아서 못 쪼갠 큐 한 장 — 줄은 둘 다 폭을 넘는다
-    assert err.count("WARN") == 1
-    assert "넘는 줄 2줄이" in err
-
-    calm = (Segment(id=0, start=0.0, end=2.0, text="짧은 자막"),)
-    pipeline._make_cues(calm, cfg, 3.0, RetextRecord(status=RETEXT_OFF))
-    assert "WARN" not in capsys.readouterr().err
-
-
-def _real_episode() -> tuple[list[Segment], float]:
-    """실제 회차의 1차 전사 골격과 오디오 길이. **읽기만 한다.**
-
-    길이는 반드시 메타 픽스처에서 온다. 응답 안의 `duration`은 **조각 하나의** 길이라
-    (77분 회차의 조각이 38분이다) 그걸 쓰면 뒤쪽 절반이 영상 끝으로 눌려버린다.
-    """
-    from vlogsrt import transcribe
-
-    fixtures = Path(__file__).parent / "fixtures" / "api"
-    spine = transcribe.build_spine(
-        transcribe.load_fixture_responses(fixtures / "fr_day_1_2_fhd.whisper.json")
-    )
-    return spine, float(transcribe.load_meta(fixtures, "fr_day_1_2_fhd")["duration"])
 
 
 def test_spine_is_immutable() -> None:
@@ -204,46 +26,14 @@ def test_spine_is_immutable() -> None:
         Cue(start=0.0, end=1.0, lines=("가",)).start = 2.0  # type: ignore[misc]
 
 
-def test_offline_run_makes_no_network_call(tmp_path: Path) -> None:
-    """conftest가 소켓을 막아둔다. 여기까지 오면 픽스처만 쓴 것이다."""
-    result = pipeline.run(VIDEO, Config(), tmp_path, force_offline=True)
-    assert result.cues
-
-
 def test_the_layers_that_edited_subtitles_stay_deleted() -> None:
     """규칙 5 — 판정으로 자막을 고치거나 빼던 계층은 되살리지 않는다.
 
-    `verify.py`는 예외다 — 표시만 하고 출력을 못 건드린다. 그 선은
-    `check_invariants.py`가 따로 지킨다.
+    whisper 엔진과 함께 지운 계층(D163)은 `check_invariants.py`의 `DELETED_MODULES`가 지킨다.
     """
     package = ROOT / "vlogsrt"
     for name in ("loops.py", "validate.py", "report.py", "mapping.py", "gapfill.py"):
         assert not (package / name).exists(), f"{name}이 부활했다"
-
-
-def test_verification_cannot_change_the_srt(tmp_path: Path) -> None:
-    """규칙 5 — 검증을 켜든 끄든 SRT 바이트가 같다."""
-    plain = pipeline.run(
-        VIDEO, Config(), tmp_path / "plain", force_offline=True, verify_with_second_model=False
-    )
-    checked = pipeline.run(VIDEO, Config(), tmp_path / "checked", force_offline=True)
-    assert checked.verification is not None  # 기본으로 켜져 있다
-    assert plain.outputs["srt"].read_bytes() == checked.outputs["srt"].read_bytes()
-
-
-def test_a_failed_verification_still_leaves_the_srt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """검증 픽스처가 없어도(= 두 번째 모델이 죽어도) 자막은 나온다."""
-    lonely = tmp_path / "no-gpt"
-    lonely.mkdir()
-    for name in ("demo.whisper.json", "demo.meta.json"):
-        (lonely / name).write_bytes((SYNTHETIC / name).read_bytes())
-    monkeypatch.setenv("VLOGSRT_FIXTURE_DIR", str(lonely))
-
-    result = pipeline.run(VIDEO, Config(), tmp_path / "out", force_offline=True)
-    assert result.outputs["srt"].is_file()
-    assert result.verification is None  # 건너뛰었지만 자막은 나왔다
 
 
 def test_invariant_script_passes() -> None:
@@ -2629,13 +2419,30 @@ def test_pure_layers_cannot_reach_the_claude_transport(
 
 
 @pytest.mark.parametrize("statement", ["import socket", "from urllib import request", "import ssl"])
-def test_the_pure_cut_layer_cannot_import_network_modules(
+def test_the_pure_polish_layer_cannot_import_network_modules(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
 ) -> None:
     files = {f"vlogsrt/{name}": "" for name in check_invariants.PURE_MODULES}
-    files["vlogsrt/cutpoints.py"] = statement + "\n"
     _fake_source_tree(monkeypatch, tmp_path, files)
+    assert check_invariants.check_pure_layer() == []
+    (tmp_path / "vlogsrt" / "polish.py").write_text(statement + "\n", encoding="utf-8")
     assert check_invariants.check_pure_layer()
+
+
+def test_an_audio_transcription_call_is_caught(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """whisper·gpt-transcribe는 은퇴했다(D163) — OpenAI 오디오 전사 호출이 다시 서면 걸린다."""
+    _fake_source_tree(monkeypatch, tmp_path, {"vlogsrt/transcribe.py": "def send(client):\n"})
+    assert check_invariants.check_no_audio_transcription_call() == []
+    planted = "def send(client):\n    return client.audio.transcriptions.create(model='m')\n"
+    (tmp_path / "vlogsrt" / "transcribe.py").write_text(planted, encoding="utf-8")
+    (failure,) = check_invariants.check_no_audio_transcription_call()
+    assert "vlogsrt/transcribe.py:2" in failure
+
+
+def test_the_real_tree_has_no_audio_transcription_call() -> None:
+    assert check_invariants.check_no_audio_transcription_call() == []
 
 
 def test_the_real_tree_passes_the_network_checks() -> None:
@@ -2738,44 +2545,9 @@ def test_ui_network_imports_follow_an_exact_allowlist(
         assert len(failures) == 1 and rel in failures[0], failures
 
 
-# ── D59 19c: 요청 빌더의 칸 — whisper에는 힌트가, 글자에는 시각 입자가 없다 ──────────
+# ── D92: 요청 빌더의 자리 — Gemini 시간 빌더가 사는 파일 ──────────────────────────
 
 CAPTION_PROVIDER = "vlogsrt/project/raw/caption_provider.py"
-CLEAN_BUILDERS = (
-    "def timing_transcription_request(chunk, *, settings, temperature=None):\n"
-    "    return Request(\n"
-    "        chunk=chunk, timestamp_granularities=('segment',), temperature=temperature)\n"
-    "\n"
-    "def text_transcription_request(\n"
-    "        chunk, *, settings, prompt='', keywords=None, languages=None):\n"
-    "    return Request(chunk=chunk, prompt=prompt, keywords=keywords, languages=languages)\n"
-)
-
-
-@pytest.mark.parametrize(
-    ("old", "new"),
-    [
-        ("settings, temperature=None)", "settings, temperature=None, prompt='')"),
-        ("temperature=temperature)", "temperature=temperature, keywords=('왕방',))"),
-        ("temperature=temperature)", "temperature=temperature, languages=('ko',))"),
-        ("languages=languages)\n", "languages=languages, timestamp_granularities=('segment',))\n"),
-        (", languages=None):", ", languages=None, timestamp_granularities=()):"),
-    ],
-)
-def test_request_builders_keep_their_lanes(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, old: str, new: str
-) -> None:
-    _fake_source_tree(monkeypatch, tmp_path, {CAPTION_PROVIDER: CLEAN_BUILDERS})
-    assert check_invariants.check_caption_request_lanes() == []
-    (tmp_path / CAPTION_PROVIDER).write_text(CLEAN_BUILDERS.replace(old, new), encoding="utf-8")
-    failures = check_invariants.check_caption_request_lanes()
-    assert len(failures) == 1, failures
-    (tmp_path / CAPTION_PROVIDER).write_text("def other():\n    pass\n", encoding="utf-8")
-    assert len(check_invariants.check_caption_request_lanes()) == 2  # 빌더가 사라져도 통과 없음
-
-
-def test_the_real_request_builders_keep_their_lanes() -> None:
-    assert check_invariants.check_caption_request_lanes() == []
 
 
 # ── D59 19c: 용어집은 DB만 알고, 설정은 용어집·글자 경로를 모른다 ─────────────────

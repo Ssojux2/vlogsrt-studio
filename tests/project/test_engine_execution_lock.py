@@ -159,7 +159,7 @@ def _spawn_engine(
     cwd: Path | None = None,
     status_file: Path | None = None,
 ) -> subprocess.Popen[bytes]:
-    argv = [sys.executable, str(_ENGINE_SCRIPT), "analyze", job_id, job_dir_text]
+    argv = [sys.executable, str(_ENGINE_SCRIPT), "roughcut", job_id, job_dir_text]
     if status_file is not None:
         argv.append(str(status_file))
     # 자식 cwd의 기본은 통제 뿌리다 — 실제 저장소에서 띄우지 않는다.
@@ -183,7 +183,7 @@ def _run_engine(
     cwd: Path | None = None,
     status_file: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    argv = [sys.executable, str(_ENGINE_SCRIPT), "analyze", job_id, job_dir_text]
+    argv = [sys.executable, str(_ENGINE_SCRIPT), "roughcut", job_id, job_dir_text]
     if status_file is not None:
         argv.append(str(status_file))
     child_cwd = cwd if cwd is not None else control.root
@@ -397,6 +397,18 @@ def test_missing_job_root_is_rejected_without_creating_anything(
     assert control.calls() == []  # 엔진 호출도 없다
 
 
+@pytest.mark.parametrize("operation", ["analyze", "caption-run"])
+def test_retired_operations_exit_two_without_touching_the_job(
+    tmp_path: Path, operation: str
+) -> None:
+    """whisper와 함께 은퇴한 문(D163)은 계약 위반(2)이다 — 잠금·workspace·엔진 호출 없이."""
+    engine = _load_engine_module()
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    assert engine.main([operation, "job-1", str(job_dir)]) == 2
+    assert list(job_dir.iterdir()) == []
+
+
 def test_children_run_guarded_from_a_synthetic_cwd(tmp_path: Path, control: _FakeCli) -> None:
     """자식은 보호가 켜진 채 임시 cwd에서 돈다 — vlogsrt도 통제 뿌리에서 온다.
 
@@ -444,7 +456,7 @@ def test_broken_child_guard_bootstrap_prevents_the_payload(
     job.mkdir()
     broken_proof = tmp_path / "broken-guard-proof.jsonl"
     result = subprocess.run(
-        [sys.executable, str(_ENGINE_SCRIPT), "analyze", "job-1", str(job)],
+        [sys.executable, str(_ENGINE_SCRIPT), "roughcut", "job-1", str(job)],
         cwd=control.root,
         env=control.broken_guard_env(broken_proof),
         capture_output=True,
@@ -468,7 +480,7 @@ def test_broken_bootstrap_still_terminates_when_the_proof_write_fails(
     job.mkdir()
     unreachable_proof = tmp_path / "absent-dir" / "proof.jsonl"
     result = subprocess.run(
-        [sys.executable, str(_ENGINE_SCRIPT), "analyze", "job-1", str(job)],
+        [sys.executable, str(_ENGINE_SCRIPT), "roughcut", "job-1", str(job)],
         cwd=control.root,
         env={
             **control.env,
@@ -698,16 +710,16 @@ def test_installed_wrapper_forwards_the_status_argument(tmp_path: Path) -> None:
     status_file = _status_path(tmp_path, "wrapped-token")
     env = {**os.environ, "VLOGSRT_OFFLINE": "1"}
 
-    subprocess.run([str(wrapper), "analyze", "job-1", str(job)], check=False, env=env)
+    subprocess.run([str(wrapper), "roughcut", "job-1", str(job)], check=False, env=env)
     subprocess.run(
-        [str(wrapper), "analyze", "job-1", str(job), str(status_file)],
+        [str(wrapper), "roughcut", "job-1", str(job), str(status_file)],
         check=False,
         env=env,
     )
     engine_script = str(repo / "macos/scripts/vlogsrt-engine.py")
     assert (repo / "calls.log").read_text(encoding="utf-8").splitlines() == [
-        f"{engine_script} analyze job-1 {job}",
-        f"{engine_script} analyze job-1 {job} {status_file}",
+        f"{engine_script} roughcut job-1 {job}",
+        f"{engine_script} roughcut job-1 {job} {status_file}",
     ]
 
 
@@ -755,7 +767,7 @@ def test_lock_os_errors_are_execution_failures_not_duplicates(
         raise OSError(errno.EIO, "injected lock failure")
 
     monkeypatch.setattr(fcntl, "flock", refuse)
-    assert engine.main(["analyze", "job-1", str(job_dir)]) == 1
+    assert engine.main(["roughcut", "job-1", str(job_dir)]) == 1
     assert not (job_dir / "workspace").exists()  # 소유권 실패 — 아무것도 만들지 않았다
     assert_closed(opened_fds[-1])
 
@@ -766,14 +778,14 @@ def test_lock_os_errors_are_execution_failures_not_duplicates(
     real_set_inheritable = os.set_inheritable
     monkeypatch.setattr(fcntl, "flock", lambda fd, operation: None)
     monkeypatch.setattr(os, "set_inheritable", refuse_inheritable)
-    assert engine.main(["analyze", "job-1", str(job_dir)]) == 1
+    assert engine.main(["roughcut", "job-1", str(job_dir)]) == 1
     assert_closed(opened_fds[-1])
 
     # 두 실패 뒤 **진짜** flock으로 획득은 즉시 된다. 입력 파일이 없어 실행은
     # 실패(1)하지만, workspace가 생겼다는 것이 소유권 획득의 증거다.
     monkeypatch.setattr(os, "set_inheritable", real_set_inheritable)
     monkeypatch.setattr(fcntl, "flock", real_flock)
-    assert engine.main(["analyze", "job-1", str(job_dir)]) == 1
+    assert engine.main(["roughcut", "job-1", str(job_dir)]) == 1
     assert (job_dir / "workspace").is_dir()
 
 
@@ -791,7 +803,7 @@ def test_lock_contention_errno_alone_maps_to_duplicate(
         raise BlockingIOError(errno.EAGAIN, "injected contention")
 
     monkeypatch.setattr(fcntl, "flock", busy)
-    assert engine.main(["analyze", "job-1", str(job_dir)]) == 3
+    assert engine.main(["roughcut", "job-1", str(job_dir)]) == 3
     assert not (job_dir / "workspace").exists()  # 중복은 아무것도 쓰지 않는다
 
 
@@ -813,9 +825,9 @@ def test_release_closes_the_descriptor_even_when_unlock_fails(
 
     monkeypatch.setattr(fcntl, "flock", failing_unlock)
     with pytest.raises(OSError, match="injected unlock failure"):
-        engine.main(["analyze", "job-1", str(job_dir)])
+        engine.main(["roughcut", "job-1", str(job_dir)])
 
     # 닫기는 됐다 — 다음 실행이 중복(3) 없이 소유권을 얻고 실행까지 간다.
     monkeypatch.setattr(fcntl, "flock", real_flock)
-    assert engine.main(["analyze", "job-1", str(job_dir)]) != 3
+    assert engine.main(["roughcut", "job-1", str(job_dir)]) != 3
     assert (job_dir / "workspace").is_dir()

@@ -10,8 +10,9 @@
 3. 운반자가 없는 낡은 직접 호출(번들 3/4-인자 계약)은 상속 환경을 그대로
    둔다 — 레거시 계약을 바꾸지 않는다.
 
-소비 증명도 여기서 한다: 운반된 키는 SDK 공장(`env.require_api_key`)이 실제로
+소비 증명도 여기서 한다: 운반된 키는 환경 읽기(`env.get`, dotenv 적재 포함)가 실제로
 읽는 이름에 도달해야 한다 — 호출 객체 안에만 있는 키는 아무것도 증명하지 않는다.
+whisper STT 공장·분석 문은 D163으로 지웠다 — 그 소비 증명도 함께 지웠다.
 """
 
 from __future__ import annotations
@@ -93,7 +94,7 @@ def test_env_carrier_without_key_does_not_resurrect_a_stale_inherited_key(
 
     _carry_env(engine)
 
-    assert not env.has_api_key()  # 빈 값은 없음이다 — 부활이 아니다
+    assert env.get(_ENGINE_KEY_NAME).strip() == ""  # 빈 값은 없음이다 — 부활이 아니다
     assert _CARRIER_ENV not in os.environ
 
 
@@ -106,47 +107,6 @@ def test_absent_carrier_keeps_the_inherited_environment(
     _carry_env(engine)
 
     assert os.environ[_ENGINE_KEY_NAME] == "inherited-legacy-key"
-
-
-def test_carried_key_reaches_the_sdk_credential_reader(
-    monkeypatch: pytest.MonkeyPatch, engine: ModuleType
-) -> None:
-    """운반된 키는 SDK 공장이 읽는 이름에 도달한다 — 객체 안 머무름이 아니라 사용이다."""
-    monkeypatch.setenv(_CARRIER_ENV, "synthetic-carried-key")
-
-    _carry_env(engine)
-
-    assert env.require_api_key(force=True) == "synthetic-carried-key"
-    # 상태·표시 표면에는 값이 실리지 않는다 — 있는지만 말한다.
-    assert "synthetic-carried-key" not in env.api_key_source()
-
-
-def test_carried_key_reaches_the_stt_sdk_constructor(
-    monkeypatch: pytest.MonkeyPatch, engine: ModuleType
-) -> None:
-    """운반된 키는 실제 STT 공장(LiveTranscriber→openai.OpenAI)까지 간다.
-
-    호출 객체가 키를 **담고만** 있는 것은 증명이 아니다 — SDK 생성자가 받은
-    인자로 증명한다(합성 경계, 네트워크 없음).
-    """
-    import openai
-
-    import vlogsrt.transcribe as transcribe_module
-
-    seen: dict[str, object] = {}
-
-    class _FakeOpenAI:
-        def __init__(self, **kwargs: object) -> None:
-            seen.update(kwargs)
-
-    monkeypatch.setattr(openai, "OpenAI", _FakeOpenAI)
-    monkeypatch.setenv(_CARRIER_ENV, "synthetic-factory-key")
-
-    _carry_env(engine)
-    transcriber = transcribe_module.get_transcriber(online=True)
-    transcriber._client()
-
-    assert seen["api_key"] == "synthetic-factory-key"
 
 
 def test_guard_provenance_rejects_sibling_prefixes() -> None:
@@ -232,7 +192,7 @@ def test_stdin_envelope_length_zero_is_an_explicit_no_key(
     assert version == "1"
     assert payload == ""
     _carry_stt(engine, payload)
-    assert not env.has_api_key()
+    assert env.get(_ENGINE_KEY_NAME).strip() == ""
 
 
 def test_stdin_envelope_framing_counts_bytes_not_characters(
@@ -425,7 +385,7 @@ def test_envelope_key_replaces_a_stale_env_and_dotenv_value(
     """봉투의 키는 상속 환경 **와** dotenv의 낡은 값을 둘 다 이긴다.
 
     dotenv의 적재는 setdefault다 — 봉투가 값을 먼저 얹으면 낡은 dotenv 값은
-    다시 살아날 자리가 없다. 소비 시점(require_api_key)의 값이 곧 봉투의 값이다.
+    다시 살아날 자리가 없다. 소비 시점(`env.get`)의 값이 곧 봉투의 값이다.
     """
     from tests._dotenv_guard import allow_dotenv_under
 
@@ -441,7 +401,7 @@ def test_envelope_key_replaces_a_stale_env_and_dotenv_value(
     _, payload = engine._read_carrier_envelope()
     _carry_stt(engine, payload)
 
-    assert env.require_api_key(force=True) == "synthetic-envelope-wins"
+    assert env.get(_ENGINE_KEY_NAME) == "synthetic-envelope-wins"
 
 
 def test_empty_envelope_suppresses_stale_env_and_dotenv_values(
@@ -466,40 +426,7 @@ def test_empty_envelope_suppresses_stale_env_and_dotenv_values(
     _, payload = engine._read_carrier_envelope()
     _carry_stt(engine, payload)
 
-    assert not env.has_api_key()
     assert env.get(_ENGINE_KEY_NAME) == ""
-    with pytest.raises(RuntimeError):
-        env.require_api_key(force=True)
-
-
-def test_envelope_key_reaches_the_stt_sdk_constructor(
-    monkeypatch: pytest.MonkeyPatch, engine: ModuleType
-) -> None:
-    """봉투의 키는 실제 STT 공장(LiveTranscriber→openai.OpenAI)까지 간다.
-
-    호출 객체가 키를 담고만 있는 것은 증명이 아니다 — SDK 생성자가 받은 인자로
-    증명한다(합성 경계, 네트워크 없음).
-    """
-    import openai
-
-    import vlogsrt.transcribe as transcribe_module
-
-    seen: dict[str, object] = {}
-
-    class _FakeOpenAI:
-        def __init__(self, **kwargs: object) -> None:
-            seen.update(kwargs)
-
-    monkeypatch.setattr(openai, "OpenAI", _FakeOpenAI)
-    monkeypatch.setenv(_ENGINE_KEY_NAME, "stale-inherited-key")
-    monkeypatch.setattr("sys.stdin", _pipe_stdin(_framed("synthetic-factory-key")))
-
-    _, payload = engine._read_carrier_envelope()
-    _carry_stt(engine, payload)
-    transcriber = transcribe_module.get_transcriber(online=True)
-    transcriber._client()
-
-    assert seen["api_key"] == "synthetic-factory-key"
 
 
 def test_envelope_failures_never_echo_the_payload(
@@ -514,7 +441,7 @@ def test_envelope_failures_never_echo_the_payload(
     monkeypatch.chdir(tmp_path)
     frame = b"VLOGSRT-ENGINE-CARRIER 1\n9\nabcEXTRA"
     monkeypatch.setattr("sys.stdin", _pipe_stdin(frame))
-    assert engine.main(["analyze", "job-1", str(job_dir), "--stdin-carrier"]) == 2
+    assert engine.main(["roughcut", "job-1", str(job_dir), "--stdin-carrier"]) == 2
     captured = capsys.readouterr()
     assert "abcEXTRA" not in captured.out + captured.err
     assert "abc" not in captured.out + captured.err
@@ -523,76 +450,6 @@ def test_envelope_failures_never_echo_the_payload(
 # ─────────────────────────────────────────────────────────────
 #  실패 문면의 가림 — SDK 오류가 키를 되뇌어도 기록·stderr에 실리지 않는다
 # ─────────────────────────────────────────────────────────────
-
-
-def test_captured_transcription_failures_redact_the_engine_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """speech·boundary 포획 기록은 값을 지우고 모양만 남긴다(S2A-2)."""
-    from vlogsrt.project import boundary, speech
-
-    monkeypatch.setenv(_ENGINE_KEY_NAME, "synthetic-redact-key")
-    message = RuntimeError("SDK 401 rejected key synthetic-redact-key")
-
-    speech_capture = speech._Capture()
-    speech_capture.record("전사 호출", message)
-    assert "synthetic-redact-key" not in speech_capture.describe()
-    assert env.REDACTED_MARK in speech_capture.describe()
-
-    boundary_capture = boundary._BoundaryCapture()
-    boundary_capture.record("재전사 호출", message)
-    assert "synthetic-redact-key" not in boundary_capture.describe()
-
-
-def test_sdk_400_retry_warning_redacts_the_engine_key_before_stderr(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capfd: pytest.CaptureFixture[str]
-) -> None:
-    """400 재시도 경고는 인쇄 표면 중 가장 앞이다 — 포획 기록보다 먼저 가린다.
-
-    인자 해석(_rejected)은 원문으로 한다(재시도 의미가 가려지 없이 유지) —
-    인쇄만 가린다. 재시도·부가 인자 감축 계약 자체는 그대로 도는 것도 본다.
-    """
-    from vlogsrt import transcribe as transcribe_module
-    from vlogsrt.config import Config
-    from vlogsrt.preprocess import Chunk
-
-    submitted = "synthetic-echoed-key"
-    monkeypatch.setenv(_ENGINE_KEY_NAME, submitted)
-    monkeypatch.setenv("VLOGSRT_LOG_LEVEL", "WARNING")
-
-    class _Echo400(Exception):
-        status_code = 400
-
-        def __str__(self) -> str:
-            return f"invalid request: key {submitted} rejected for param language"
-
-    dropped: list[dict] = []
-
-    class _Transcriptions:
-        def create(self, **kwargs: object) -> object:
-            dropped.append(dict(kwargs))
-            raise _Echo400()
-
-    class _Audio:
-        transcriptions = _Transcriptions()
-
-    class _Client:
-        audio = _Audio()
-
-    audio = tmp_path / "clip.mp3"
-    audio.write_bytes(b"synthetic-audio")
-    transcriber = transcribe_module.LiveTranscriber(api_key=submitted)
-
-    capfd.readouterr()  # 이전 시험 출력과 갈라 놓는다
-    with pytest.raises(_Echo400):
-        transcriber._one_chunk(_Client(), Chunk(audio, 0.0, 1.0, 0), Config(), {"language": "ko"})
-    captured = capfd.readouterr()
-
-    assert submitted not in captured.err  # 첫 인쇄 표면이 이미 가렸다
-    assert env.REDACTED_MARK in captured.err
-    # 계약 보존 — 경고 뒤에도 부가 인자를 떼고 다시 부른다(두 번째 호출).
-    assert len(dropped) == 2
-    assert "language" in dropped[0] and "language" not in dropped[1]
 
 
 def test_project_failure_text_redacts_engine_and_vision_keys(
@@ -620,71 +477,6 @@ def test_project_failure_text_redacts_engine_and_vision_keys(
     assert "synthetic-vision-key" not in text
     # 비밀이 없는 문면은 그대로 — 지움이 진단을 죽이지 않는다.
     assert project_commands._redact_failure_text(args, "ffprobe not found") == "ffprobe not found"
-
-
-def test_paid_attempt_record_never_persists_the_submitted_key(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
-) -> None:
-    """SDK가 키를 되뇌며 실패해도 시도 기록(attempts)과 stderr에 키가 오지 않는다."""
-    import importlib.util
-
-    from tests.project.test_engine_entrypoint import (
-        _patch_paid_gates,
-        _stage_job,
-        _write_authorization,
-    )
-
-    spec = importlib.util.spec_from_file_location("vlogsrt_engine_redaction", _ENGINE_SCRIPT)
-    assert spec is not None and spec.loader is not None
-    engine = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(engine)
-
-    from tests.project.test_engine_entrypoint import _patch_analysis_boundaries
-
-    monkeypatch.chdir(tmp_path)
-    job_dir = _stage_job(tmp_path)
-    _fake_supported_topology(monkeypatch)
-    # 합성 미디어의 준비 경계(ffmpeg/PCM/프레임/VAD)와 유료 게이트의 합성
-    # 엔드포인트는 **첫 inspect부터** 깔린다 — 추정 지문이 엔드포인트를 묶는
-    # 지금(S2B-2b) inspect와 analyze가 다른 값을 보면 승인 전에 거부돼 이
-    # 시험의 실패 지점(SDK 키 반향)에 못 닿는다. 준비 경계 가짜도 이 시험의
-    # 실패 지점이 SDK 경계뿐이게 하는 조건의 일부다.
-    _patch_analysis_boundaries(monkeypatch)
-    _patch_paid_gates(monkeypatch)
-    assert engine.main(["analyze", "job-1", str(job_dir)]) == 0
-    _write_authorization(job_dir)
-
-    # SDK 경계가 키를 되뇌며 죽는다 — 유료 호출은커녕 클라이언트 생성에서 실패한다.
-    submitted = "synthetic-echoed-key"
-    monkeypatch.setenv(_ENGINE_KEY_NAME, submitted)
-
-    import vlogsrt.transcribe as transcribe_module
-
-    # 준비·전사는 위의 _patch_analysis_boundaries가 합성으로 채운다(전사기는
-    # 그 헬퍼의 _Scripted가 담당) — 이 시험의 실패 지점은 SDK 경계뿐이다.
-    reached: list[str] = []
-
-    def echoing_client(**kwargs: object) -> object:
-        reached.append("create_vision_client")
-        raise RuntimeError(f"401 unauthorized: api key {submitted} rejected")
-
-    monkeypatch.setattr(transcribe_module, "create_vision_client", echoing_client)
-
-    capfd.readouterr()  # 이전 시험 출력과 갈라 놓는다
-    assert engine.main(["analyze", "job-1", str(job_dir)]) == 1
-    captured = capfd.readouterr()
-
-    # 파이프라인이 주입된 SDK 예외에 실제로 도달했다 — 앞 단계 실패로 흉내 낸
-    # 부재가 아니다(reached 없이는 아래 주장을 믿지 않는다).
-    assert reached == ["create_vision_client"]
-    attempts = (job_dir / "analysis-attempts.jsonl").read_text(encoding="utf-8")
-    assert submitted not in attempts
-    assert env.REDACTED_MARK in attempts
-    # stderr·stdout·직접 쓴 기록 어디에도 제출값은 없다.
-    assert submitted not in captured.out + captured.err
-    for record in job_dir.iterdir():
-        if record.is_file():
-            assert submitted not in record.read_text(encoding="utf-8"), record.name
 
 
 def _fake_supported_topology(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -980,122 +772,9 @@ def test_role_payload_rejections_never_echo_the_payload(
     payload = '{"stt_key":"SYNTHETIC-PAYLOAD-KEY","extra":"x"}'
     frame = f"VLOGSRT-ENGINE-CARRIER 2\n{len(payload.encode())}\n{payload}\n".encode()
     monkeypatch.setattr("sys.stdin", _pipe_stdin(frame))
-    assert engine.main(["analyze", "job-1", str(job_dir), "--stdin-carrier"]) == 2
+    assert engine.main(["roughcut", "job-1", str(job_dir), "--stdin-carrier"]) == 2
     captured = capsys.readouterr()
     assert "SYNTHETIC-PAYLOAD-KEY" not in captured.out + captured.err
-
-
-def test_role_credentials_reach_the_vision_consumer_and_factory(
-    monkeypatch: pytest.MonkeyPatch, engine: ModuleType
-) -> None:
-    """운반된 비전 값은 실제 소비자까지 간다 — 자격증명 해석과 SDK 공장."""
-    from vlogsrt.project import commands as project_commands
-    from vlogsrt.project.config import ProjectConfig
-
-    _read_roles(
-        engine,
-        monkeypatch,
-        _framed_roles(
-            {
-                "stt_key": "synthetic-stt",
-                "vision_key": "synthetic-vision-key",
-                "vision_base_url": "https://vision.example/v1",
-            }
-        ),
-    )
-
-    api_key, base_url = project_commands._vision_credentials(ProjectConfig())
-    assert api_key == "synthetic-vision-key"
-    assert base_url == "https://vision.example/v1"
-
-    seen: dict[str, object] = {}
-
-    def factory(**kwargs: object) -> object:
-        seen.update(kwargs)
-        return object()
-
-    import vlogsrt.transcribe as transcribe_module
-
-    monkeypatch.setattr(transcribe_module, "create_vision_client", factory)
-    client = project_commands._vision_client(ProjectConfig())
-    assert client is not None
-    assert seen["api_key"] == "synthetic-vision-key"
-    assert seen["base_url"] == "https://vision.example/v1"
-
-
-def test_invalid_vision_base_url_stops_before_the_factory_without_echoing_it(
-    monkeypatch: pytest.MonkeyPatch, engine: ModuleType
-) -> None:
-    """앱 관리(V2) 값은 공장 앞에서 파이썬이 URL을 다시 검증한다 — 문면은 URL을 모른다."""
-    import vlogsrt.transcribe as transcribe_module
-    from vlogsrt.project import commands as project_commands
-    from vlogsrt.project.config import ProjectConfig
-
-    endpoint = "http://synthetic-endpoint.example/v1"
-    monkeypatch.setattr(
-        transcribe_module,
-        "create_vision_client",
-        lambda **kwargs: (_ for _ in ()).throw(AssertionError("공장이 불렸다")),
-    )
-    # V2 운반 적용 — 적용 시점 검증이 먼저 닫는다(배정 전).
-    with pytest.raises(RuntimeError, match="https") as caught:
-        _read_roles(
-            engine,
-            monkeypatch,
-            _framed_roles(
-                {
-                    "stt_key": "synthetic-stt",
-                    "vision_key": "synthetic-vision-key",
-                    "vision_base_url": endpoint,
-                }
-            ),
-        )
-    assert endpoint not in str(caught.value)
-
-    # 적용된 실행에서의 공장 앞 재검증 — 환경에 이미 얹힌 값으로도 닫는다.
-    _read_roles(
-        engine,
-        monkeypatch,
-        _framed_roles(
-            {
-                "stt_key": "synthetic-stt",
-                "vision_key": "synthetic-vision-key",
-                "vision_base_url": "https://vision.example/v1",
-            }
-        ),
-    )
-    monkeypatch.setenv(_VISION_URL_ENV, "https://h.example/v1/synthetic-vision-key")
-    with pytest.raises(RuntimeError, match="자격증명"):
-        project_commands._vision_credentials(ProjectConfig())
-    monkeypatch.setenv(_VISION_URL_ENV, "https://h.example/v1%2Fsynthetic%2Dvision%2Dkey")
-    with pytest.raises(RuntimeError, match="자격증명"):
-        project_commands._vision_credentials(ProjectConfig())
-    # 쿼리·프래그먼트도 저마다의 정해진 글로 닫는다.
-    for rejected in ("https://h.example/v1?q=1", "https://h.example/v1#frag"):
-        monkeypatch.setenv(_VISION_URL_ENV, rejected)
-        with pytest.raises(RuntimeError, match="쿼리·프래그먼트"):
-            project_commands._vision_credentials(ProjectConfig())
-
-
-def test_direct_cli_endpoint_contract_is_unchanged_by_the_new_url_policy(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """직접 CLI의 엔드포인트 계약은 그대로다 — 새 검증은 앱 관리 값에만 붙는다.
-
-    사용자가 명시한 http 호환 엔드포인트는 자격증명 문에서 거부되지 않고 공장
-    인자로 그대로 흘러간다(운반 적용이 없는 실행에서).
-    """
-    from vlogsrt.project import commands as project_commands
-    from vlogsrt.project.config import ProjectConfig
-
-    assert not env.role_credentials_applied()
-    monkeypatch.setenv(_VISION_KEY_ENV, "synthetic-vision-key")
-    monkeypatch.setenv(_VISION_URL_ENV, "http://compatibility.example/v1")
-
-    api_key, base_url = project_commands._vision_credentials(ProjectConfig())
-
-    assert base_url == "http://compatibility.example/v1"
-    assert api_key == "synthetic-vision-key"
 
 
 def test_engine_reports_a_malformed_config_as_a_controlled_failure(
@@ -1106,14 +785,12 @@ def test_engine_reports_a_malformed_config_as_a_controlled_failure(
 ) -> None:
     """V2 + 못 쓰는 프로젝트 설정은 통제된 1이다 — traceback도 제출값 반향도 없다.
 
-    제출값 둘(STT·비전)이 흐르는 길 전체에서 증명한다: 봉투 페이로드와 못 쓰는
-    설정 파일 **안에** 두 값을 실제로 넣고, 어떤 인쇄·기록 표면에도 나오지
-    않음을 본다. 개발 실행기의 상태 기록 계약도 여기서 실측한다 — 전달 성공으로
-    프로세스는 0, 안쪽 실패(1)는 기록 한 줄로 나간다. 같은 job의 재시도는 잠금이
-    풀려 있어 정상 소유권부터 다시 시작한다.
+    제출값 둘(STT·비전)을 봉투 페이로드와 못 쓰는 설정 파일 **안에** 실제로 넣고,
+    어떤 인쇄·기록 표면에도 나오지 않음을 본다. 개발 실행기의 상태 기록 계약도
+    여기서 실측한다 — 전달 성공으로 프로세스는 0, 안쪽 실패(1)는 기록 한 줄로 나간다.
+    같은 job의 재시도는 잠금이 풀려 있어 중복(3)이 아니다. 분석 문(`analyze`)은
+    D163으로 지웠다 — 운반 적용은 러프컷 실행 앞에서 같은 문을 지난다.
     """
-    from tests.project.test_engine_entrypoint import _stage_job
-
     submitted_stt = "SYNTHETIC-CONFIG-FAIL-STT-KEY"
     submitted_vision = "SYNTHETIC-CONFIG-FAIL-VISION-KEY"
     config = tmp_path / "vlogsrt.project.toml"
@@ -1124,8 +801,14 @@ def test_engine_reports_a_malformed_config_as_a_controlled_failure(
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
-    job_dir = _stage_job(tmp_path)
+    job_dir = tmp_path / "config-fail-job"
+    job_dir.mkdir()
     monkeypatch.setenv(_ENGINE_KEY_NAME, "stale-managed-stt")
+    roles = {
+        "stt_key": submitted_stt,
+        "vision_key": submitted_vision,
+        "vision_base_url": "https://vision.example/v1",
+    }
 
     def _status_path(token: str) -> Path:
         directory = tmp_path / f"vlogsrt-status-{token}"
@@ -1133,21 +816,10 @@ def test_engine_reports_a_malformed_config_as_a_controlled_failure(
         return directory / f"{token}.status"
 
     capsys.readouterr()  # 이전 시험 출력과 갈라 놓는다
-    monkeypatch.setattr(
-        "sys.stdin",
-        _pipe_stdin(
-            _framed_roles(
-                {
-                    "stt_key": submitted_stt,
-                    "vision_key": submitted_vision,
-                    "vision_base_url": "https://vision.example/v1",
-                }
-            )
-        ),
-    )
+    monkeypatch.setattr("sys.stdin", _pipe_stdin(_framed_roles(roles)))
     first_status = _status_path("config-fail-first")
     delivered = engine.main(
-        ["analyze", "job-1", str(job_dir), str(first_status), "--stdin-carrier"]
+        ["roughcut", "job-1", str(job_dir), str(first_status), "--stdin-carrier"]
     )
     captured = capsys.readouterr()
 
@@ -1155,36 +827,26 @@ def test_engine_reports_a_malformed_config_as_a_controlled_failure(
     assert delivered == 0
     assert first_status.read_text(encoding="utf-8") == "VLOGSRT-ENGINE-STATUS config-fail-first 1\n"
     # 통제된 실패 문면 — traceback도 제출값 반향도 없다.
+    assert "cannot apply carried credentials" in captured.err
     assert submitted_stt not in captured.out + captured.err
     assert submitted_vision not in captured.out + captured.err
     assert "Traceback" not in captured.out + captured.err
 
-    # 재시도 — 잠금은 이미 풀려 있다. 설정을 고치면 같은 job이 정상 소유권부터
-    # 다시 돈다(0). 상태 경로는 호출마다 새로운 것이다.
+    # 재시도 — 잠금은 이미 풀려 있다. 설정을 고치면 같은 job이 운반 적용을 지나
+    # 다시 소유권을 얻는다(중복 3이 아니다 — 입력이 없어 러프컷 자체는 1로 끝난다).
     config.write_text("schema_version = 1\n", encoding="utf-8")
-    # 재시도는 성공 경로다 — V2 적용 실행의 새 전제(유효한 권한 문서·합성 위상)를
-    # 갖춘다(S2A-2). 첫 시도의 통제된 실패(1)는 그대로 위에서 증명됐다.
-    _stage_valid_grant(job_dir)
-    _fake_supported_topology(monkeypatch)
-    monkeypatch.setattr(
-        "sys.stdin",
-        _pipe_stdin(
-            _framed_roles(
-                {
-                    "stt_key": submitted_stt,
-                    "vision_key": submitted_vision,
-                    "vision_base_url": "https://vision.example/v1",
-                }
-            )
-        ),
-    )
+    monkeypatch.setattr("sys.stdin", _pipe_stdin(_framed_roles(roles)))
     second_status = _status_path("config-fail-retry")
     assert (
-        engine.main(["analyze", "job-1", str(job_dir), str(second_status), "--stdin-carrier"]) == 0
+        engine.main(["roughcut", "job-1", str(job_dir), str(second_status), "--stdin-carrier"]) == 0
     )
-    assert (
-        second_status.read_text(encoding="utf-8") == "VLOGSRT-ENGINE-STATUS config-fail-retry 0\n"
+    retried = capsys.readouterr()
+    assert second_status.read_text(encoding="utf-8").startswith(
+        "VLOGSRT-ENGINE-STATUS config-fail-retry "
     )
+    assert "already running" not in retried.err
+    assert "cannot apply carried credentials" not in retried.err
+    assert (job_dir / "workspace").is_dir()  # 소유권을 얻고 실행까지 갔다
 
     # 지속 표면 어디에도 제출값은 없다 — 상태 기록·job 산물 전부.
     for record in tmp_path.rglob("*"):
@@ -1289,67 +951,6 @@ def test_invalid_role_endpoint_rejects_before_any_assignment(
     assert _VISION_URL_ENV not in os.environ or endpoint not in os.environ[_VISION_URL_ENV]
 
 
-def test_role_credentials_reach_the_stt_sdk_constructor(
-    monkeypatch: pytest.MonkeyPatch, engine: ModuleType
-) -> None:
-    """V2의 STT 키도 실제 STT 공장(LiveTranscriber→openai.OpenAI)까지 간다.
-
-    세글자가 세 역할에 얹히고 그중 STT만 SDK 생성자 인자로 증명된다 — 비전
-    값이 STT 공장에 섞여 들어가지 않는 것도 이 시험의 요점이다.
-    """
-    import openai
-
-    import vlogsrt.transcribe as transcribe_module
-
-    seen: dict[str, object] = {}
-
-    class _FakeOpenAI:
-        def __init__(self, **kwargs: object) -> None:
-            seen.update(kwargs)
-
-    monkeypatch.setattr(openai, "OpenAI", _FakeOpenAI)
-    monkeypatch.setenv(_ENGINE_KEY_NAME, "stale-inherited-key")
-
-    _read_roles(
-        engine,
-        monkeypatch,
-        _framed_roles(
-            {
-                "stt_key": "synthetic-v2-factory-key",
-                "vision_key": "synthetic-vision-key",
-                "vision_base_url": "https://vision.example/v1",
-            }
-        ),
-    )
-    transcriber = transcribe_module.get_transcriber(online=True)
-    transcriber._client()
-
-    assert seen["api_key"] == "synthetic-v2-factory-key"
-    # STT 공장의 엔드포인트는 비전 값으로 바뀌지 않는다
-    assert "base_url" not in seen or seen.get("base_url") in (None, "")
-
-
-def test_blank_roles_still_produce_a_key_free_estimate(
-    monkeypatch: pytest.MonkeyPatch, engine: ModuleType, tmp_path: Path
-) -> None:
-    """세 역할이 전부 비어도 추정은 키 없이 돈다 — 부재가 실패가 아니라는 증명."""
-    from tests.project.test_engine_entrypoint import _stage_job
-
-    monkeypatch.chdir(tmp_path)
-    job_dir = _stage_job(tmp_path)
-    _fake_supported_topology(monkeypatch)
-    _stage_valid_grant(job_dir)
-    monkeypatch.setattr(
-        "sys.stdin",
-        _pipe_stdin(_framed_roles({"stt_key": "", "vision_key": "", "vision_base_url": ""})),
-    )
-
-    assert engine.main(["analyze", "job-1", str(job_dir), "--stdin-carrier"]) == 0
-
-    assert (job_dir / "workspace" / "workflow.jsonl").is_file()  # inspect가 키 없이 통과했다
-    assert not env.has_api_key()
-
-
 def test_redaction_covers_the_effective_trimmed_value_of_each_role(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1410,7 +1011,7 @@ def test_role_payload_escaped_lone_surrogate_fails_closed_before_assignment(
     job_dir = tmp_path / "surrogate-job"
     job_dir.mkdir()
     monkeypatch.setattr("sys.stdin", _pipe_stdin(frame))
-    assert engine.main(["analyze", "job-1", str(job_dir), "--stdin-carrier"]) == 2
+    assert engine.main(["roughcut", "job-1", str(job_dir), "--stdin-carrier"]) == 2
     assert not (job_dir / "workspace").exists()  # 소유권·실행 흔적이 없다
 
 

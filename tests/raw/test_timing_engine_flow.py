@@ -2,14 +2,14 @@
 
 - whisper 원본은 견적·결속·승인이 바이트 그대로다(칸이 붙지 않는다).
 - Gemini로 듣는 원본은 견적에 엔진·금액이 실리고, 결속에 꼬리표가 붙으며, 승인이 그 엔진을 묶는다.
-- Gemini 원본의 다른 귀 글자는 자막을 바꾸지 않고 후보로만 남고, 다시 묻기(D78) 칸이 없다.
+- 다른 귀·다시 묻기(D78)는 whisper와 함께 지웠다(D163) — 견적에 그 칸이 없다.
+- whisper로 듣는 원본의 실제 1단계는 유료 호출 전에 닫힌다(D163 — 「다시 듣기」로 Gemini).
 - 실제 1단계: Gemini 키가 없으면 유료 호출 전에 닫고, 있으면 whisper 전송 없이 Gemini 문으로 듣고
   단어 경계에서 묶은 줄이 원본 자막이 되며, 그 차례가 Gemini로 고정된다.
 """
 
 from __future__ import annotations
 
-from dataclasses import replace
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -27,18 +27,15 @@ from tests.raw.test_analysis_workflow import (
     needs_ffmpeg,
 )
 from tests.raw.test_gemini_timing_provider import _client, _Opener
-from tests.raw.test_source_text import GPT, RecordingSender, _request, _whisper
 from vlogsrt import preprocess
 from vlogsrt.config import Config
 from vlogsrt.project.raw import service as raw
-from vlogsrt.project.raw import source_text, text_ear, timing_engine
+from vlogsrt.project.raw import timing_engine
 from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
-from vlogsrt.project.raw.caption_provider import TransportTextProvider
 from vlogsrt.project.raw.config import (
     TIMING_ENGINE_GEMINI,
     TIMING_ENGINE_WHISPER,
     TIMING_ENGINES,
-    timing_engine_view,
 )
 
 # D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
@@ -53,34 +50,6 @@ TAG = "timing-engine/gemini"
 
 
 # ── 다른 귀는 Gemini 원본에서 후보만 ───────────────────────────────────────
-
-
-def _text_pass(tmp_path: Path, gemini: bool) -> tuple[Any, tuple[Any, ...]]:
-    tmp_path.mkdir()
-    audio, evidence, utterances = _whisper(tmp_path)
-    request = _request(tmp_path)
-    if gemini:
-        request = replace(request, workflow=timing_engine_view(request.workflow, GEMINI))
-    provider = TransportTextProvider(sender=RecordingSender(GPT), cfg=Config())
-    outcomes = source_text.run_text_pass(audio, evidence, request, provider)
-    return source_text.apply_text_pass(utterances, outcomes, request, audio.sample_rate), utterances
-
-
-def test_a_gemini_source_keeps_its_own_text_and_shows_the_other_ear_as_a_candidate(
-    tmp_path: Path,
-) -> None:
-    whisper, _ = _text_pass(tmp_path / "w", gemini=False)
-    gemini, heard = _text_pass(tmp_path / "g", gemini=True)
-    replaced = [i for i in whisper.utterances if i.retext_reason == source_text.REASON_ACCEPTED]
-    assert replaced  # whisper 원본에서는 게이트를 지난 줄이 바뀐다
-    assert [item.text for item in gemini.utterances] == [item.text for item in heard]
-    candidates = {
-        item.utterance_id: item.alt_text
-        for item in gemini.utterances
-        if item.retext_reason == source_text.REASON_CANDIDATE
-    }
-    assert candidates == {item.utterance_id: item.text for item in replaced}
-    assert gemini.record["replaced"] == 0
 
 
 # ── 견적·결속·승인 ────────────────────────────────────────────────────────
@@ -106,13 +75,11 @@ def test_only_a_gemini_quote_names_the_engine_its_price_and_its_binding_tag(
 
     service, root, asset = _project(tmp_path, stereo_offset)
     workspace = service._workspace(root)
-    # 다시 묻기(D78)는 gpt 글자 귀의 whisper 원본에만 있다 — W-35b부터 처음 듣는 영상의 기본 귀는
-    # Gemini라(D95, 그 귀에는 칸이 없다) 여기서는 gpt 귀로 듣는 영상을 견준다.
-    text_ear.set_new_hearing_ear(workspace, text_ear.EAR_GPT)
     (whisper,) = service.analysis_estimate(root, [asset.asset_id])
     assert (whisper.timing_model, whisper.timing_usd) == (None, None)
     (whisper_passes,) = with_text_passes(workspace, [whisper])
-    assert whisper_passes.rescue_chunk_count is not None  # whisper에는 다시 묻기 상한이 있다
+    # 다른 귀·다시 묻기(D78)는 whisper와 함께 지웠다(D163) — 견적에 그 칸이 없다.
+    assert (whisper_passes.rescue_chunk_count, whisper_passes.text_chunk_count) == (None, None)
     assert TAG not in service.source_bindings(root, {asset.asset_id: asset})[asset.asset_id]
 
     service.set_new_hearing_engine(root, TIMING_ENGINE_GEMINI)
@@ -188,7 +155,7 @@ def test_a_live_gemini_hearing_needs_its_key_then_hears_without_whisper(
     assert texts == ["안녕하세요.", "오늘은 한강에 왔어요!", "날씨 진짜 좋다"]
     workspace = service._workspace(root)
     assert timing_engine.pinned(workspace, asset.asset_id, 0) == TIMING_ENGINE_GEMINI
-    service.set_new_hearing_engine(root, TIMING_ENGINE_WHISPER)  # 들은 뒤에 바꿔도
+    workspace.set_meta_value(timing_engine.META_KEY, TIMING_ENGINE_WHISPER)  # 옛 표지가 남아도
     assert timing_engine.resolve(workspace, asset.asset_id) == TIMING_ENGINE_GEMINI
     assert service.source_settings(root, asset.asset_id).models.timing_model == GEMINI.model
 
@@ -219,3 +186,32 @@ def test_an_engine_flip_after_the_quote_is_refused_before_any_send(
 
 
 # ── 빈칸 재전사는 그 원본의 엔진 단가로 ────────────────────────────────────
+
+
+@needs_ffmpeg
+def test_a_live_whisper_hearing_is_refused_before_any_send(
+    tmp_path: Path,
+    stereo_offset: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """whisper는 은퇴했다(D163) — whisper로 듣게 된 원본은 키가 있어도 아무것도 보내지 않는다."""
+    service, root, asset = _project(tmp_path, stereo_offset)
+    _live_online(service, root, monkeypatch)
+    approvals = _gemini_approval(service, root, asset)  # 이 원본은 whisper로 듣게 돼 있다
+    assert approvals[asset.asset_id].timing_model == TIMING_ENGINES[TIMING_ENGINE_WHISPER].model
+    opener = _Opener(b"{}")
+    _handle, record = _analyze(
+        service,
+        root,
+        mode="live",
+        asr_approvals=approvals,
+        sender=_FakeSender(),
+        cfg=Config(),
+        timing_client=_client(opener),
+    )
+    assert opener.sent == []  # 유료 호출 0회
+    summary = service.analysis_overview(root)
+    assert summary is not None
+    (row,) = summary.results
+    assert row.status == "failed"  # 조용한 빈 성공이 아니다 — 까닭을 대고 실패로 남는다
+    assert "TranscriptionRetired" in str(row.error) and "다시 듣기" in str(row.error)

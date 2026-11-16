@@ -31,30 +31,14 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, Literal, ParamSpec, TypeVar
 
-from . import cutpoints, log, oscompat
+from . import log, oscompat
 from .config import Config
-from .models import Chunk, Span
 from .oscompat import publish_exclusive
 from .task_runtime import cancellation_active, check_cancel
-
-REPAIR_DIR = "repair"  # 재전사 조각은 따로 둔다. 1차 조각을 덮어쓰면 안 된다
 
 # 조각 파일 이름은 **여기 한 줄에서만** 나온다. 검증 도구가 다른 이름(`batch*`)을 찾고
 # 있었고, 그 바람에 청크 정렬 검사가 "파일이 없다 → 단일 청크 → 통과"로 조용히
 # 넘어갔다(D32). 쓰는 쪽과 찾는 쪽이 같은 함수를 부르면 다시는 어긋나지 않는다.
-_CHUNK_NAME = "{stem}.chunk{number}.mp3"
-
-
-def chunk_template(stem: str) -> str:
-    """ffmpeg `-f segment`의 출력 패턴. 번호는 ffmpeg가 채운다."""
-    return _CHUNK_NAME.format(stem=stem, number="%04d")
-
-
-def chunk_glob(stem: str) -> str:
-    """이미 잘려 있는 조각을 찾는 glob. `chunk_template`과 같은 자리에서 온다."""
-    return _CHUNK_NAME.format(stem=stem, number="*")
-
-
 _TOOL_PATHS: dict[tuple[str, str | None], str] = {}
 """(도구, PATH) → 찾은 실행 파일 — 프로세스 메모리에만 산다(W-45, D100 §6). 호출 자리가 서른
 곳이 넘어 `shutil.which`가 PATH의 폴더마다 stat을 되풀이했다. PATH가 바뀌면 열쇠가 달라 다시
@@ -713,31 +697,6 @@ def probe_audio_stream_count(source: Path) -> int:
     return sum(1 for entry in streams if _stream_codec_type(entry, source) == "audio")
 
 
-@process_step("오디오 추출")
-def extract_audio(src: Path, dst: Path, cfg: Config) -> Path:
-    """오디오를 손대지 않고 뽑는다 — 필터 없음(D20).
-
-    음질 필터(highpass/eq/loudnorm)는 제거했다. 타임라인 오차는 0.000초로
-    결백했지만(D13), 전처리 최소화가 우선이다.
-    """
-    ffmpeg = require_ffmpeg()
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    _run(
-        [
-            ffmpeg, "-hide_banner", "-nostdin", "-y",
-            "-i", str(src),
-            "-vn",
-            "-ac", str(cfg.channels),
-            "-ar", str(cfg.sample_rate),
-            "-c:a", "libmp3lame",
-            "-b:a", cfg.audio_bitrate,
-            str(dst),
-        ]
-    )  # fmt: skip
-    log.debug(f"오디오 추출 완료: {dst} ({dst.stat().st_size / 1_000_000:.1f}MB)")
-    return dst
-
-
 # ─────────────────────────────────────────────────────────────
 #  원본 PCM — 잰 시계의 원점 (P2-01)
 # ─────────────────────────────────────────────────────────────
@@ -1295,91 +1254,6 @@ def amplitudes(path: Path, start: float, length: float, cfg: Config) -> list[flo
         max(abs(value) for value in samples[index : index + hop]) / 32768
         for index in range(0, len(samples) - hop + 1, hop)
     ]
-
-
-def find_quiet_point(audio: Path, target: float, duration: float, cfg: Config) -> float:
-    """목표 경계 앞뒤 `cut_search_seconds` 안에서 가장 조용한 지점을 찾는다."""
-    window_start = max(0.0, target - cfg.cut_search_seconds)
-    window_end = min(duration, target + cfg.cut_search_seconds)
-    levels = amplitudes(audio, window_start, window_end - window_start, cfg)
-    hop_seconds = cfg.cut_quiet_window_ms / 1000
-    return cutpoints.quietest(levels, hop_seconds, window_start, target)
-
-
-def make_chunks(audio: Path, duration: float, cfg: Config, workdir: Path) -> list[Chunk]:
-    """모델 입력 한도로 조각 수를 정하고, 경계를 가장 조용한 곳으로 옮겨 자른다.
-
-    조각은 언제나 `[0, duration]`을 빈틈없이 덮는다 — 여기서 구간을 고르지 않는다(규칙 4).
-    """
-    cuts = cutpoints.plan_cuts(
-        duration,
-        audio.stat().st_size,
-        cfg,
-        lambda target: find_quiet_point(audio, target, duration, cfg),
-    )
-    if not cuts:
-        return [Chunk(path=audio, offset=0.0, duration=duration, index=0)]
-    log.debug(f"자를 시각: {', '.join(f'{cut:.2f}초' for cut in cuts)}")
-    return split_at(audio, cuts, workdir)
-
-
-@process_step("조각 나누기")
-def split_at(audio: Path, cuts: Sequence[float], workdir: Path) -> list[Chunk]:
-    """ffmpeg 세그먼트 분할 한 번. **오프셋은 ffmpeg가 알려준 실제값을 쓴다.**
-
-    `-ss`로 조각마다 탐색하면 매번 처음부터 디코딩한다. 게다가 요청한 시각과 실제로
-    잘린 시각이 mp3 프레임 경계(~26ms)만큼 다른데, 요청값을 오프셋으로 쓰면 그 차이가
-    자막 전체에 실린다(D13이 그 사고였다). `-c copy`라 재인코딩도 없다.
-    """
-    ffmpeg = require_ffmpeg()
-    workdir.mkdir(parents=True, exist_ok=True)
-    listing = workdir / f"{audio.stem}.segments.csv"
-    _run(
-        [
-            ffmpeg, "-hide_banner", "-nostdin", "-y",
-            "-i", str(audio),
-            "-f", "segment",
-            "-segment_times", ",".join(f"{cut:.6f}" for cut in cuts),
-            "-segment_list", str(listing),
-            "-segment_list_type", "csv",
-            "-c", "copy",
-            str(workdir / chunk_template(audio.stem)),
-        ]
-    )  # fmt: skip
-    rows = cutpoints.parse_segment_list(listing.read_text(encoding="utf-8"))
-    if not rows:
-        raise RuntimeError(f"ffmpeg가 조각 목록을 남기지 않았습니다: {listing}")
-    return [
-        Chunk(path=workdir / name, offset=start, duration=end - start, index=index)
-        for index, (name, start, end) in enumerate(rows)
-    ]
-
-
-def cut_spans(audio: Path, spans: Sequence[Span], duration: float, workdir: Path) -> list[Chunk]:
-    """지목된 구간만 다시 잘라낸다. 되풀이를 다시 물어보기 위한 조각이다(D27).
-
-    **1차 분할과 같은 장치를 쓴다** — 구간 경계를 전부 자를 자리로 넘겨 `split_at`을
-    한 번 돌리고, 원하는 구간에 해당하는 조각만 고른다. `-ss`로 따로 탐색하지 않는
-    이유는 D13과 같다: 요청한 시각과 실제로 잘린 시각이 mp3 프레임 경계만큼 다르고,
-    그 차이를 오프셋으로 쓰면 자막이 통째로 밀린다. 여기서도 오프셋은 ffmpeg가
-    CSV로 알려준 실제값이다.
-
-    **버리는 구간이 아니다.** 여기서 고르지 않은 조각은 1차 전사 결과가 그대로 남는다.
-    """
-    if not spans:
-        return []
-    cuts = sorted({edge for span in spans for edge in span if 0.0 < edge < duration})
-    if not cuts:
-        # 구간이 오디오 전체다. 자를 자리가 없으면 원본이 곧 그 조각이다(`make_chunks`와 같다).
-        # 빈 `-segment_times`를 넘기면 ffmpeg가 "Empty time specification"으로 죽는다.
-        return [Chunk(path=audio, offset=0.0, duration=duration, index=0)]
-    pieces = split_at(audio, cuts, workdir / REPAIR_DIR)
-    wanted = [
-        piece
-        for piece in pieces
-        if any(low <= piece.offset + piece.duration / 2 < high for low, high in spans)
-    ]
-    return [replace(piece, index=index) for index, piece in enumerate(wanted)]
 
 
 # ─────────────────────────────────────────────────────────────
@@ -4426,36 +4300,10 @@ _SOFTWARE_H264 = "libx264"
 
 _CAPTION_PREVIEW_X264_ARGS = ("-preset", "medium", "-crf", "20")
 _CAPTION_PREVIEW_AUDIO_BITRATE = "192k"
-_CAPTION_PREVIEW_ORIGIN_PROBE_SECONDS = "0.2"
-"""원점 측정에 디코드하는 앞머리 길이 — 첫 프레임의 pts만 필요하다."""
 
 
 class CaptionPreviewUnsupported(RuntimeError):
     """자막 미리보기를 만들 수 없는 입력 — 이유를 말하고 죽는다(빈 성공 금지)."""
-
-
-@dataclass(frozen=True, slots=True)
-class CaptionPreviewExtraction:
-    """선택 오디오 미리보기의 실측 — 원점은 자막 시계와 같은 잣대로 잰 값이다.
-
-    `audio_origin`은 미리보기 파일의 선택 오디오를 16 kHz s16le 파이프라인으로
-    디코드했을 때 첫 프레임의 파일 시각(`extract_pcm_s16le`과 같은 측정)이다.
-    정규화 시각 `t`(등록 원점 상대)의 재생 위치는 `audio_origin + t`고, 최종
-    영상 시계의 큐 시각에서는 등록 원점과의 **차이만** 보정하면 된다 — 같은
-    측정 방식이라 보정 항은 정확하다.
-    """
-
-    path: Path
-    remuxed: bool
-    video_codec: str
-    audio_codec: str
-    audio_stream_count: int
-    audio_origin: Fraction
-    duration: Fraction
-    source_video_codec: str
-    source_audio_codec: str
-    ffmpeg_version: str
-    warnings: tuple[str, ...]
 
 
 def _caption_preview_track(probe: RawMediaProbe, audio_stream_index: int) -> RawAudioTrack:
@@ -4466,119 +4314,6 @@ def _caption_preview_track(probe: RawMediaProbe, audio_stream_index: int) -> Raw
     raise CaptionPreviewUnsupported(
         f"오디오 스트림 {audio_stream_index}이(가) 이 파일에 없다: {probe.source}"
         f" (오디오 트랙 {len(probe.audio)}개)"
-    )
-
-
-def _caption_preview_codec_args(
-    probe: RawMediaProbe, track: RawAudioTrack
-) -> tuple[list[str], tuple[str, ...], bool]:
-    """브라우저 재생 가능한 MP4를 위한 인코딩 인자 — 코덱 복사가 가능하면 복사한다.
-
-    복사 판정은 **실제 브라우저가 받아들이는 조합**만 허용한다: 영상 h264 + 8bit
-    4:2:0, 소리 aac. 하나라도 어긋나면 그 다리만 재인코딩한다(ProRes·10bit·PCM은
-    여기서 H264/AAC로 내려간다 — 원본은 그대로다).
-    """
-    video = probe.video
-    video_copy = video.codec_name == "h264" and video.pix_fmt in _CAPTION_PREVIEW_VIDEO_COPY_PIXFMTS
-    audio_copy = track.codec_name == "aac"
-    warnings: list[str] = []
-    args: list[str] = []
-    if video_copy:
-        args += ["-c:v", "copy"]
-    else:
-        args += ["-c:v", "libx264", *_CAPTION_PREVIEW_X264_ARGS, "-pix_fmt", "yuv420p"]
-        warnings.append(
-            f"영상 {video.codec_name}/{video.pix_fmt}을(를) H264 8bit로 변환했다 (원본은 그대로다)"
-        )
-    if audio_copy:
-        args += ["-c:a", "copy"]
-    else:
-        args += ["-c:a", "aac", "-b:a", _CAPTION_PREVIEW_AUDIO_BITRATE]
-        warnings.append(f"소리 {track.codec_name}을(를) AAC로 변환했다 (원본은 그대로다)")
-    return args, tuple(warnings), video_copy and audio_copy
-
-
-@process_step("미리보기 원점 확인")
-def _caption_preview_origin(preview: Path, channels: int) -> Fraction:
-    """미리보기 선택 오디오의 디코드 원점 — 등록 원점과 같은 16 kHz 파이프라인.
-
-    `extract_pcm_s16le`과 같은 필터열로 앞머리만 디코드해 ashowinfo의 첫 프레임
-    pts를 원점으로 쓴다. 싱크는 null이다 — pts 기록에 출력 바이트는 필요 없다.
-    """
-    ffmpeg = require_ffmpeg()
-    rate = _PCM_SAMPLE_RATE
-    filters = f"aresample={rate},aformat=sample_fmts=s16,asettb=1/{rate},ashowinfo"
-    completed = _run(
-        [
-            ffmpeg, "-hide_banner", "-loglevel", "info", "-nostats", "-nostdin", "-y",
-            "-copyts",
-            "-i", str(preview),
-            "-map", "0:a:0",
-            "-vn",
-            "-t", _CAPTION_PREVIEW_ORIGIN_PROBE_SECONDS,
-            "-af", filters,
-            "-f", "null", "-",
-        ]
-    )  # fmt: skip
-    frames = _converted_frames(completed.stderr, preview)
-    return _sample0_file_time(frames, rate, channels, preview)
-
-
-@process_step("자막 미리보기 만들기")
-def extract_caption_preview(
-    source: Path, staging_output: Path, *, audio_stream_index: int
-) -> CaptionPreviewExtraction:
-    """선택 오디오 한 트랙만 담은 브라우저 재생 MP4를 **스테이징에** 만든다(F2).
-
-    매핑은 영상 첫 스트림과 지정한 오디오 스트림 하나뿐이다 — 다른 오디오 트랙은
-    미리보기에 못 들어가므로 검토자는 자막이 묶인 **그 트랙**을 듣는다. `-ss`를
-    쓰지 않아 영상·소리의 상대 싱크가 그대로 흐른다. 스테이징 안전장치(원본 별칭
-    거부·O_EXCL 임시 파일·link 게시)는 `extract_raw_clip`과 같은 것을 쓴다.
-    """
-    _validate_ordinal(audio_stream_index)
-    _assert_safe_staging(source, staging_output)
-    probe = probe_raw_media(source)
-    track = _caption_preview_track(probe, audio_stream_index)
-    codec_args, warnings, remuxed = _caption_preview_codec_args(probe, track)
-    staging_output.parent.mkdir(parents=True, exist_ok=True)
-    staged = _reserve_staging_temp(staging_output)
-    try:
-        _run(
-            [
-                require_ffmpeg(), "-hide_banner", "-nostdin", "-y",
-                "-i", str(source),
-                "-map", f"0:{probe.video.stream_index}",
-                "-map", f"0:{track.stream_index}",
-                "-dn", "-sn",
-                *codec_args,
-                "-movflags", "+faststart",
-                "-f", "mp4",
-                str(staged),
-            ]
-        )  # fmt: skip
-        origin = _caption_preview_origin(staged, track.channels)
-    except BaseException:
-        staged.unlink(missing_ok=True)
-        raise
-    out_probe = probe_raw_media(staged)
-    if len(out_probe.audio) != 1:
-        staged.unlink(missing_ok=True)
-        raise CaptionPreviewUnsupported(
-            f"미리보기에 오디오 트랙이 {len(out_probe.audio)}개다 — 선택 트랙 하나만 담겨야 한다"
-        )
-    _publish_staged_clip(staged, staging_output)
-    return CaptionPreviewExtraction(
-        path=staging_output,
-        remuxed=remuxed,
-        video_codec=out_probe.video.codec_name,
-        audio_codec=out_probe.audio[0].codec_name,
-        audio_stream_count=len(out_probe.audio),
-        audio_origin=origin,
-        duration=out_probe.duration,
-        source_video_codec=probe.video.codec_name,
-        source_audio_codec=track.codec_name,
-        ffmpeg_version=_tool_version("ffmpeg"),
-        warnings=warnings,
     )
 
 

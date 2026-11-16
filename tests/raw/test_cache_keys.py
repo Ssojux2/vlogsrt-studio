@@ -18,23 +18,13 @@ import pytest
 from vlogsrt.project.raw import analysis_workflow as aw
 from vlogsrt.project.raw import media_refs, speech_refill, understanding
 from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
-from vlogsrt.project.raw.caption_provider import (
-    GeminiTranscribeTimingProvider,
-    TransportTimingProvider,
-)
-from vlogsrt.project.raw.caption_workspace import (
-    CachedTimingProvider,
-    TemperedCachedTimingProvider,
-)
+from vlogsrt.project.raw.caption_provider import GeminiTranscribeTimingProvider
 from vlogsrt.project.raw.config import RawWorkflowConfig
 
 PROVIDERS = (
     aw.ReplayAsrProvider,
     aw.ApprovedTimingProvider,
     aw.ApprovedPhaseAsrProvider,
-    CachedTimingProvider,
-    TemperedCachedTimingProvider,
-    TransportTimingProvider,
     GeminiTranscribeTimingProvider,
     speech_refill.ApprovedRefillTimingProvider,
 )
@@ -56,9 +46,13 @@ def test_the_fixed_origin_keeps_the_old_key_bytes(cls: type) -> None:
 
 def test_a_renamed_class_keeps_its_origin_and_a_fake_falls_back_to_its_name() -> None:
     renamed = type(
-        "SomethingElse", (CachedTimingProvider,), {"CACHE_ORIGIN": "CachedTimingProvider"}
+        "SomethingElse",
+        (GeminiTranscribeTimingProvider,),
+        {"CACHE_ORIGIN": "GeminiTranscribeTimingProvider"},
     )
-    assert understanding.provider_origin(object.__new__(renamed)) == "CachedTimingProvider"
+    assert (
+        understanding.provider_origin(object.__new__(renamed)) == "GeminiTranscribeTimingProvider"
+    )
 
     class FakeProvider:
         pass

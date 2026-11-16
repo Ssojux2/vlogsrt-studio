@@ -77,7 +77,6 @@ from vlogsrt.project.raw.browser_runtime import (
     GeminiCredentials,
     asr_estimate_digest,
     browser_network_mode,
-    caption_transport_providers,
     capture_browser_credentials,
     capture_claude_credentials,
     capture_environment_credentials,
@@ -87,11 +86,6 @@ from vlogsrt.project.raw.browser_runtime import (
     mint_luna_approvals,
     production_live_transport,
     semantic_estimate_digest,
-)
-from vlogsrt.project.raw.caption_manual import ms as caption_ms
-from vlogsrt.project.raw.caption_workspace_types import (
-    CaptionWorkspaceError,
-    ManualHeadConflict,
 )
 from vlogsrt.project.raw.config import (
     ANALYSIS_MODEL_CHOICES,
@@ -136,7 +130,6 @@ from vlogsrt.project.raw.fcp import (
 from vlogsrt.project.raw.fcp import (
     scan_fcp_library as fcp_scan_fcp_library,
 )
-from vlogsrt.project.raw.final_video import FinalVideoError
 from vlogsrt.project.raw.ingest import (
     IngestConfirmation,
     IngestProposal,
@@ -418,12 +411,6 @@ __all__ = [
     "gemini_text_per_minute",
     "asr_estimate_digest",
     "validate_analysis_concurrency",
-    "caption_ms",
-    "caption_run_identity",
-    "CaptionPreviewMedia",
-    "CaptionWorkspaceError",
-    "FinalVideoError",
-    "ManualHeadConflict",
     "REVIEW_NOTE_PREFIX",
     "ReviewError",
     "StaleRevisionError",
@@ -436,7 +423,6 @@ __all__ = [
     "gemini_profile",
     "official_price_model",
     "browser_network_mode",
-    "caption_transport_providers",
     "content_type_for",
     "ffprobe_media_inspector",
     "host_header_allowed",
@@ -540,8 +526,8 @@ TIER_SETTINGS_KEY = "tier_settings"
 """작업공간별 추천 기준(W-42, D100 §3) 표지 — 기본값과 다른 칸만의 JSON 덮기. 없거나 비었으면
 기본 기준(`TIER_SETTINGS`)이다. 지문·승인·견적 밖이고, 기준 digest가 등급의 낡음 열쇠에 실린다."""
 
-TIMING_ENGINE_CHOICES: tuple[str, ...] = (TIMING_ENGINE_GEMINI, TIMING_ENGINE_WHISPER)
-"""「새로 듣는 전사 엔진」 칸의 차례(W-31e) — 새 엔진이 앞, 종료될 whisper가 뒤다."""
+TIMING_ENGINE_CHOICES: tuple[str, ...] = timing_engine.NEW_HEARING_ENGINES
+"""새로 들을 수 있는 엔진 — Gemini 하나다(whisper는 은퇴했다, D163)."""
 timing_engine_facts = timing_engine.facts
 DEFAULT_NEW_HEARING_ENGINE = timing_engine.DEFAULT_NEW_HEARING_ENGINE
 """「새로 듣는 엔진」의 기본(D104 — Gemini). 화면이 표지를 읽지 못할 때도 이 값을 보인다."""
@@ -588,6 +574,10 @@ REFILL_UNMEASURED = (
 REFILL_RELISTEN_PENDING = (
     "다시 듣기를 기다리는 영상입니다 — 다시 듣기를 먼저 끝낸 뒤에 빈칸을 채우세요. 빈칸을 먼저"
     " 채우면 다시 들은 전사가 이 자막을 덮지 못해 다시 듣기에 낸 돈이 헛됩니다."
+)
+REFILL_WHISPER_RETIRED = (
+    "whisper로 들은 영상입니다 — whisper는 은퇴해(D163) 빈칸을 새로 묻지 않습니다. 「다시 듣기」로"
+    " Gemini에 다시 들은 뒤에 빈칸을 채우세요."
 )
 REFILL_CHANGED = (
     "빈칸이 바뀌었습니다 — 바뀐 빈칸을 확인하고 다시 승인하세요. 유료 호출은 시작하지 않았습니다."
@@ -1633,25 +1623,6 @@ class RawWorkspaceService:
             lambda: request_usage.format_usage_line(self.analysis_usage_summary(root, revision_id)),
         )
 
-    def with_request_receipts(self, root: Path, body: Any, timing: object, text: object) -> Any:
-        """Open the receipt scope around a final-caption run when its providers are live."""
-        from vlogsrt.project.raw import request_log
-        from vlogsrt.project.raw.caption_provider import (
-            TransportTextProvider,
-            TransportTimingProvider,
-        )
-
-        live = isinstance(timing, TransportTimingProvider) or isinstance(
-            text, TransportTextProvider
-        )
-        workspace = self._workspace(root)
-
-        def scoped(context: JobContext) -> None:
-            with request_log.scope(workspace, context.job_id, live=live):
-                body(context)
-
-        return scoped
-
     def selection_quote(
         self, root: Path, asset_ids: tuple[str, ...], mode: str = SELECTION_MODE_FULL
     ) -> Any:
@@ -1692,12 +1663,6 @@ class RawWorkspaceService:
         from vlogsrt.project.raw import cross_check
 
         return cross_check.enabled(self._workspace(root))
-
-    def set_cross_check(self, root: Path, on: bool) -> bool:
-        """교차 확인 켬·끔을 저장한다(무료) — 견적·승인이 그 값으로 다시 묶인다(호출 0회)."""
-        from vlogsrt.project.raw import cross_check
-
-        return cross_check.set_enabled(self._workspace(root), on)
 
     def workspace_mode(self, root: Path) -> Any:
         """작업공간 모드(D97) — 사람이 고른 값(표지)이 없으면 불러온 영상 개수 다수다(읽기만)."""
@@ -2074,6 +2039,8 @@ class RawWorkspaceService:
             return REFILL_UNTRANSCRIBED
         if asr_epoch.state(workspace, asset_id).pending:
             return REFILL_RELISTEN_PENDING
+        if timing_engine.resolve(workspace, asset_id) not in timing_engine.NEW_HEARING_ENGINES:
+            return REFILL_WHISPER_RETIRED
         measured = sync_report.measured_speech(workspace, asset_id)
         if measured is None:
             report = sync_report.current_report(workspace, asset_id)
@@ -5364,158 +5331,12 @@ class RawWorkspaceService:
         registration = self.register_media(root, target, "preview")
         return ReviewVttRegistration(registration, result.provenance)
 
-    def caption_preview(self, root: Path, registration: Any) -> CaptionPreviewMedia:
-        """선택 오디오 미리보기 — 같은 (렌더, 서수, 도구)면 ffmpeg 없이 등록만 돌려준다.
-
-        브라우저는 컨테이너의 오디오 트랙을 못 고르므로(Chromium `audioTracks=null`),
-        자막이 묶인 **그 트랙만** 담은 MP4를 `previews/captions/`에 만들어 등록한다.
-        원본(검증 사본)은 읽기만 한다. 캐시 키는 렌더 해시·오디오 서수·도구 판·조리법
-        판이고, 잰 원점은 짝지은 기록 파일에 남아 재사용 때 ffmpeg이 다시 돌지
-        않는다 — 미디어·트랙이 바뀐 경우에만 만든다(표시 갱신은 만들지 않는다).
-        """
-        workspace = self._workspace(root)
-        if not registration.ready:
-            raise RawWorkspaceError(
-                f"등록이 {registration.status!r}다 — 오디오 선택이 확정된 등록만 미리보기를 만든다"
-            )
-        if registration.verified_copy_rel is None or registration.audio_stream_index is None:
-            raise RawWorkspaceError(
-                "준비된 등록에 검증 사본·오디오 스트림 번호가 없다 — 손상된 행이다"
-            )
-        if registration.audio_ordinal is None:
-            raise RawWorkspaceError("준비된 등록에 오디오 서수가 없다 — 손상된 행이다")
-        ordinal = int(registration.audio_ordinal)
-        tool = self._preview_tool_line()
-        recipe_key = "|".join(
-            (
-                registration.final_video_revision,
-                f"o{ordinal}",
-                tool,
-                CAPTION_PREVIEW_RECIPE,
-            )
-        )
-        media_key = hashlib.sha256(recipe_key.encode("utf-8")).hexdigest()[:24]
-        relative = f"{CAPTION_PREVIEW_REL}/{media_key}.mp4"
-        record_relative = f"{CAPTION_PREVIEW_REL}/{media_key}.json"
-        target = workspace.root / relative
-        record = workspace.root / record_relative
-        reused = self._reused_caption_preview(target, record, media_key)
-        built = False
-        if reused is None:
-            # 깨진 짝(영상만 있거나 기록이 못 믿을 때)은 이 이름공간의 캐시다 —
-            # 버리고 다시 만든다. 원본·확정본은 이 디렉터리에 없다.
-            target.unlink(missing_ok=True)
-            record.unlink(missing_ok=True)
-            extraction = preprocess.extract_caption_preview(
-                workspace.root / registration.verified_copy_rel,
-                target,
-                audio_stream_index=registration.audio_stream_index,
-            )
-            payload = {
-                "schema": CAPTION_PREVIEW_RECIPE,
-                "key": media_key,
-                "source_revision": registration.final_video_revision,
-                "audio_ordinal": ordinal,
-                "audio_origin": str(extraction.audio_origin),
-                "duration": str(extraction.duration),
-                "remuxed": extraction.remuxed,
-                "video_codec": extraction.video_codec,
-                "audio_codec": extraction.audio_codec,
-                "ffmpeg_version": extraction.ffmpeg_version,
-                "warnings": list(extraction.warnings),
-            }
-            record.parent.mkdir(parents=True, exist_ok=True)
-            temp = record.with_name(record.name + ".partial")
-            temp.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
-            oscompat.replace(temp, record)
-            reused = (
-                Fraction(str(payload["audio_origin"])),
-                Fraction(str(payload["duration"])),
-                bool(payload["remuxed"]),
-                str(payload["video_codec"]),
-                str(payload["audio_codec"]),
-                str(payload["ffmpeg_version"]),
-                tuple(str(item) for item in payload["warnings"]),
-            )
-            built = True
-        origin, duration, remuxed, video_codec, audio_codec, ffmpeg_version, warnings = reused
-        media_registration = self._caption_preview_registration(
-            workspace, root, target, relative, built
-        )
-        return CaptionPreviewMedia(
-            registration=media_registration,
-            media_key=media_key,
-            source_revision=registration.final_video_revision,
-            audio_ordinal=ordinal,
-            audio_origin=origin,
-            duration=duration,
-            remuxed=remuxed,
-            video_codec=video_codec,
-            audio_codec=audio_codec,
-            built=built,
-            ffmpeg_version=ffmpeg_version,
-            warnings=warnings,
-        )
-
     @staticmethod
     def _preview_tool_line() -> str:
         """미리보기 키에 쓰는 도구 판 — 한 번 재고 가둔다."""
         if "ffmpeg" not in _FFMPEG_VERSION_LINE:
             _FFMPEG_VERSION_LINE["ffmpeg"] = preprocess.ffmpeg_provenance().splitlines()[0]
         return _FFMPEG_VERSION_LINE["ffmpeg"]
-
-    @staticmethod
-    def _reused_caption_preview(
-        target: Path, record: Path, media_key: str
-    ) -> tuple[Fraction, Fraction, bool, str, str, str, tuple[str, ...]] | None:
-        """재사용 가능한 미리보기 — 영상·기록이 온전히 짝지어 있을 때만 그 값을 믿는다."""
-        if not target.is_file() or not record.is_file():
-            return None
-        try:
-            payload = json.loads(record.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None
-        if not isinstance(payload, dict) or payload.get("key") != media_key:
-            return None
-        try:
-            origin = Fraction(str(payload["audio_origin"]))
-            duration = Fraction(str(payload["duration"]))
-            remuxed = bool(payload["remuxed"])
-            video_codec = str(payload["video_codec"])
-            audio_codec = str(payload["audio_codec"])
-            ffmpeg_version = str(payload["ffmpeg_version"])
-            warnings = tuple(str(item) for item in payload["warnings"])
-        except (KeyError, TypeError, ZeroDivisionError, ValueError):
-            return None
-        return origin, duration, remuxed, video_codec, audio_codec, ffmpeg_version, warnings
-
-    def _caption_preview_registration(
-        self, workspace: RawWorkspace, root: Path, target: Path, relative: str, rebuilt: bool
-    ) -> MediaRegistration:
-        """미리보기의 등록 행 — 재사용은 그대로, 다시 만들었으면 지문을 다시 박는다.
-
-        정리(purge)는 파일만 지우고 행은 남긴다. 다시 만든 파일은 지문이 어긋나므로
-        같은 경로의 행에 `refresh_media_fingerprint`로 새 지문을 박는다 — 낡은
-        file_id는 그대로 다시 쓰고(제공 안전망은 그대로), 어긋난 지문의 문은 닫힌다.
-        """
-        for registered in self.list_media(root, kind="preview"):
-            if registered.relative_path == relative:
-                if rebuilt:
-                    workspace.refresh_media_fingerprint(registered.file_id)
-                    probed = target.lstat()
-                    return MediaRegistration(
-                        file_id=registered.file_id,
-                        kind=registered.kind,
-                        relative_path=registered.relative_path,
-                        status=registered.status,
-                        size_bytes=probed.st_size,
-                        registered_at=registered.registered_at,
-                    )
-                return registered
-        return self.register_media(root, target, "preview")
 
     # ── V1 — 영상 우선 검토(질의·미리보기 준비·리비전 묶음 편집) ──
 
@@ -5952,22 +5773,6 @@ class RawWorkspaceService:
         return read_scope.memo(
             ("review_workspace_facade", str(resolved)), lambda: ReviewWorkspaceFacade(resolved)
         )
-
-    def caption_workspace(self, root: Path) -> Any:
-        """자막 작업공간(W2) — 등록→추정→승인→실행→검토→확정의 정본 handle.
-
-        검토 파사드와 같은 규칙: 화면은 이 handle만 쓰고, 모듈이 없으면 정직하게
-        닫는다. 유료 호출 재료는 사람이 주입하는 제공자뿐이다(이 handle은
-        제공자를 스스로 만들지 않는다).
-        """
-        try:
-            from vlogsrt.project.raw.caption_workspace import open_caption_workspace
-        except ImportError as error:
-            raise WorkspaceModuleUnavailableError(
-                "자막 작업공간 백엔드(caption_workspace)가 이 빌드에 없다 — 병합 뒤"
-                " 활성화된다. 그 전까지 자막 화면은 안내만 보인다."
-            ) from error
-        return open_caption_workspace(self._workspace(root))
 
     # ── A4 내부 — 선택·지문·공급자·구간 조립 ────────────────────
 
@@ -7350,21 +7155,6 @@ def _plan_bound_material(snapshot: SegmentPlanSnapshot) -> str:
     )
 
 
-def caption_run_identity(revision: str, run_id: str, fingerprint: str) -> Any:
-    """자막 실행 신원 값 — 백엔드(W2)의 정의를 그대로 쓴다(여기서 다시 만들지 않는다).
-
-    화면은 이 공개 경로로만 신원을 만든다(계약: UI 임포트 경로 예외). 백엔드
-    모듈이 없는 빌드에서는 정직한 오류로 닫는다.
-    """
-    try:
-        from vlogsrt.project.raw.caption_workspace_types import RunIdentity
-    except ImportError as error:
-        raise WorkspaceModuleUnavailableError(
-            "자막 작업공간 백엔드(caption_workspace)가 이 빌드에 없다 — 병합 뒤 활성화된다."
-        ) from error
-    return RunIdentity(final_video_revision=revision, run_id=run_id, fingerprint=fingerprint)
-
-
 @dataclass(frozen=True)
 class ReviewVttRegistration:
     """검토 VTT 등록 결과 — 등록 미디어와 출처(원본 대 추출)를 함께 돌려준다.
@@ -7385,31 +7175,6 @@ CAPTION_PREVIEW_RECIPE = "caption-preview/v1"
 
 _FFMPEG_VERSION_LINE: dict[str, str] = {}
 """미리보기 키에 쓰는 도구 판 — 프로세스에서 한 번만 재고 가둔다(조회마다 재생 없음)."""
-
-
-@dataclass(frozen=True)
-class CaptionPreviewMedia:
-    """선택 오디오 미리보기의 등록 결과 — 표시 갱신 판정 키와 잰 원점까지.
-
-    `audio_origin`은 미리보기 파일의 선택 오디오를 자막 시계와 같은 16 kHz
-    파이프라인으로 잰 원점이다. 큐 시각은 최종 영상 시계(등록 원점 포함)이므로,
-    미리보기 재생 위치는 `audio_origin − 등록 원점 + 큐 시각`이다. `built`는 이
-    호출에서 ffmpeg을 실제로 돌렸는지를 가린다(미디어·트랙이 바뀐 경우에만 참이어야
-    한다 — 표시 갱신은 거짓).
-    """
-
-    registration: MediaRegistration
-    media_key: str
-    source_revision: str
-    audio_ordinal: int
-    audio_origin: Fraction
-    duration: Fraction
-    remuxed: bool
-    video_codec: str
-    audio_codec: str
-    built: bool
-    ffmpeg_version: str
-    warnings: tuple[str, ...]
 
 
 def _plan_timestamp() -> str:

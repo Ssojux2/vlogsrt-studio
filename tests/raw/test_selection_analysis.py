@@ -16,7 +16,7 @@ from tests.raw.test_browser_runtime import _CountingSender, _make_media
 from ui.workspace_service import RawWorkspaceUi
 from vlogsrt.config import Config
 from vlogsrt.project.raw.analysis_approval import LiveAnalysisTransport
-from vlogsrt.project.raw.config import OPENAI_LUNA_MODEL
+from vlogsrt.project.raw.config import OPENAI_LUNA_MODEL, TIMING_ENGINE_GEMINI
 from vlogsrt.project.raw.segment_review import unreviewed_auto_exclusions
 from vlogsrt.project.raw.service import RawWorkspaceError
 
@@ -86,17 +86,21 @@ def keep_luna(server: RawWorkspaceUi) -> None:
 
 
 def keep_whisper_only(server: RawWorkspaceUi) -> None:
-    """D59 19d 이전에 쓰인 흐름 시험 — 「다른 귀로 교차 확인」을 끈 작업공간에서 출발한다.
+    """실제(가짜) 호출 흐름 시험 — 처음 듣는 영상을 Gemini 시간 엔진으로 듣는 작업공간(D163).
 
-    새 작업공간의 기본은 켜짐이다. 켜져 있으면 승인한 1단계가 두 번째 귀에도 묻고(가짜 전송이 그
-    요청까지 센다) 견적 문구·digest에 글자 분량이 실린다. 이 흐름 시험들은 whisper·Luna 호출 수와
-    19d 이전 문구·digest를 재므로 끈 채 돈다 — 켠 흐름은 `test_cross_check.py`가 본다.
+    whisper는 은퇴해 실제 1단계는 Gemini 문으로만 듣는다. 이 파일의 재생 시험은 whisper 모양
+    선언을 쓰므로(`whisper_for_new_hearings`) 실제 호출 흐름의 작업공간만 Gemini로 둔다.
     """
-    server.raw.set_cross_check(server.workspace_root(), False)
+    server.raw.set_new_hearing_engine(server.workspace_root(), TIMING_ENGINE_GEMINI)
 
 
 def make_server(
-    tmp_path: Path, monkeypatch, source: Path, client=None, parallel_analysis_limit=None
+    tmp_path: Path,
+    monkeypatch,
+    source: Path,
+    client=None,
+    parallel_analysis_limit=None,
+    gemini: bool = True,
 ):
     monkeypatch.setattr("vlogsrt.env.is_offline", lambda: False)
     sender = _CountingSender([{"start": 0.5, "end": 1.5, "text": "합성 영상입니다."}])
@@ -110,12 +114,19 @@ def make_server(
             client=client,
             asr_approvals=lambda *a: {},
             luna_approvals=lambda *a: {},
+            timing_client=sender.client(),
         ),
         parallel_analysis_limit=parallel_analysis_limit,
     )
     server.create_workspace_view("선택 자동 분석", str(tmp_path / "workspace"))
     keep_luna(server)
-    keep_whisper_only(server)
+    if gemini:
+        keep_whisper_only(server)
+    else:  # 옛 whisper 작업공간(교차 확인을 끈 19d 이전) — 이미 들은 작업공간의 바이트 시험
+        from vlogsrt.project.raw import cross_check
+
+        workspace = server.raw._workspace(server.workspace_root())
+        workspace.set_meta_value(cross_check.META_KEY, cross_check.SETTING_OFF)
     server._selection_auto_approval = lambda quote: True
     return server, sender, client
 

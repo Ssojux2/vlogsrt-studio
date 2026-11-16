@@ -211,11 +211,8 @@ def test_the_untagged_ffmpeg_entry_points_now_carry_a_step_name() -> None:
     names = {
         preprocess.extract_visual_review_preview: "미리보기 만들기",
         preprocess.extract_frame_index: "프레임 추출",
-        preprocess.extract_audio: "오디오 추출",
         preprocess.extract_pcm_s16le: "PCM 추출",
         preprocess.extract_raw_clip: "클립 추출",
-        preprocess.extract_caption_preview: "자막 미리보기 만들기",
-        preprocess.split_at: "조각 나누기",
         preprocess.probe_duration: "길이 확인",
     }
     for function, label in names.items():

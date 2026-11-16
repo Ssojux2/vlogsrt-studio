@@ -280,14 +280,6 @@ def load_config(
     return replace(Config(), **merged)
 
 
-def format_config(cfg: Config) -> str:
-    lines = []
-    for key, value in cfg.to_dict().items():
-        rendered = ", ".join(str(v) for v in value) if isinstance(value, list) else value
-        lines.append(f"{key} = {rendered}")
-    return "\n".join(lines)
-
-
 @dataclass(frozen=True, slots=True)
 class ProviderRateRetrySettings:
     """공급자가 대기 시간을 말한 429만 기다렸다 다시 보내는 한도(D141).

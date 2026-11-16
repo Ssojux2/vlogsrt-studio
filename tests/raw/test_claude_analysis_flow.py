@@ -196,10 +196,11 @@ def make_server(
             luna_approvals=lambda *a: {},
             claude_clients=claude_clients(opener),
             gemini_clients=gemini_clients or {},
+            timing_client=sender.client(),  # 시간 엔진은 Gemini 문 하나다(D163)
         ),
     )
     server.create_workspace_view("Claude 분석 흐름", str(tmp_path / "workspace"))
-    keep_whisper_only(server)  # 19d 이전 흐름 — 교차 확인을 끈 채 Claude 호출·상한을 잰다
+    keep_whisper_only(server)  # 실제(가짜) 호출 흐름 — 처음 듣는 영상을 Gemini 시간 엔진으로(D163)
     if model is not None:
         root = server.workspace_root()
         workflow = server.raw.settings(root)

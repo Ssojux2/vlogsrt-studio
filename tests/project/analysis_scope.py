@@ -5,13 +5,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from vlogsrt.config import load_config
 from vlogsrt.project import commands as project_commands
-from vlogsrt.project.final_caption import build_caption_estimate, caption_settings_sha256
 from vlogsrt.project.workflow_protocol import (
     AnalysisAuthorization,
     AnalysisEstimate,
-    CaptionEstimate,
     WorkflowJournal,
 )
 
@@ -41,14 +38,4 @@ def authorization_for(
         settings_sha256=scope.settings_sha256,
         media_grant_revision=scope.media_grant_revision,
         authorized_at=authorized_at,
-    )
-
-
-def caption_scope_of(job_dir: Path) -> CaptionEstimate:
-    """`caption-run`이 다시 잴 자막 범위를 지금 잰다(파일은 쓰지 않는다)."""
-    request, validated = project_commands._caption_job_facts(job_dir)
-    return build_caption_estimate(
-        request,
-        audio_seconds=validated.audio_seconds,
-        settings_sha256=caption_settings_sha256(load_config()),
     )

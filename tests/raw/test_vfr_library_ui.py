@@ -63,15 +63,17 @@ class _Context:
 def _server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> workspace_service.RawWorkspaceUi:
     """`make_server`와 같은 가짜 전송 서버 — 원본은 아직 없다."""
     monkeypatch.setattr("vlogsrt.env.is_offline", lambda: False)
+    sender = _CountingSender([{"start": 0.5, "end": 1.5, "text": "합성 영상입니다."}])
     server = workspace_service.RawWorkspaceUi(
         port=7993,
         state_path=tmp_path / "ui-state.json",
         live=LiveAnalysisTransport(
-            sender=_CountingSender([{"start": 0.5, "end": 1.5, "text": "합성 영상입니다."}]),
+            sender=sender,
             cfg=Config(),
             client=SuitabilityClient(),
             asr_approvals=lambda *a: {},
             luna_approvals=lambda *a: {},
+            timing_client=sender.client(),  # 시간 엔진은 Gemini 문 하나다(D163)
         ),
     )
     server.create_workspace_view("VFR 섞임", str(tmp_path / "workspace"))

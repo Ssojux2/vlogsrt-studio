@@ -64,7 +64,8 @@ POLITE_END = re.compile(r"(니다|세요|까요)[.)]*$")
 def test_the_mode_is_folded_into_the_digest_and_the_full_digest_is_pinned(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ui, _sender, client, root, ids = setup_library(tmp_path, monkeypatch)
+    # 견적만 재는 시험 — whisper 작업공간의 digest 바이트가 그대로인지 본다(D163 읽기 그대로).
+    ui, _sender, client, root, ids = setup_library(tmp_path, monkeypatch, gemini=False)
     client.resume.set()
     measured = ui.raw.selection_quote(root, ui._library_ids(root))
     every = tuple(measured.asset_ids)

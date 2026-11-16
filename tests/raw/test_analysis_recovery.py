@@ -189,16 +189,16 @@ def test_failed_asr_retry_fills_captions_and_keeps_uncertain_receipt(tmp_path, m
     source = tmp_path / "asr_retry.mov"
     _make_media(source, audio=True, seconds="3")
     server, sender, client = make_server(tmp_path, monkeypatch, source)
-    real = sender.send_request
+    real = type(sender).__call__
     attempts = []
 
-    def send(*args, **kwargs):
+    def send(self, *args, **kwargs):  # Gemini 시간 엔진 가짜의 opener(D163)
         attempts.append(1)
         if len(attempts) == 1:
             raise TimeoutError("synthetic")
-        return real(*args, **kwargs)
+        return real(self, *args, **kwargs)
 
-    monkeypatch.setattr(sender, "send_request", send)
+    monkeypatch.setattr(type(sender), "__call__", send)
     server.capcut_choose_view(server.current_signature())
     wait_until(lambda: server._quick.get("stage") in ("부분 완료 · 확인 필요", "분석 확인 필요"))
     root = server.workspace_root()

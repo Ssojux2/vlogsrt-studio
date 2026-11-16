@@ -30,6 +30,7 @@ pytest.importorskip(
 
 import gradio as gr  # noqa: E402
 
+from tests.raw.gemini_echo import GeminiEcho
 from tests.raw.test_selection_analysis import keep_luna  # noqa: E402
 from ui import workspace_service  # noqa: E402
 from vlogsrt.config import Config  # noqa: E402
@@ -106,7 +107,7 @@ def test_startup_environment_key_opens_production_transport(tmp_path, monkeypatc
     boot = workspace_service.RawWorkspaceUi(port=7860, state_path=tmp_path / "state.json")
     assert boot._startup_credentials is not None
     transport = boot._live_transport_for_action()
-    assert type(transport.sender).__name__ == "LiveTranscriber"
+    assert type(transport.sender).__name__ == "LiveRequestCarrier"  # 오디오 전송 없음(D163)
     assert transport.asr_approvals == boot._production_asr_approvals
     assert transport.luna_approvals == boot._production_luna_approvals
 
@@ -239,16 +240,8 @@ def test_browser_replay_analysis_flow_to_segment_plan(server, tmp_path: Path) ->
 # ── 실제 호출 두 단계 — 주입된 전송 경계로 화면이 끝까지 흐른다(A4-F1) ──────────
 
 
-class _CountingSender:
-    """전사 전송 경계 가짜 — 화면 흐름 시험용(유료 호출 없음)."""
-
-    def __init__(self, segments: list[dict[str, object]]) -> None:
-        self.calls = 0
-        self._segments = segments
-
-    def send_request(self, request, cfg, *, kind, stem, source):
-        self.calls += 1
-        return {"segments": list(self._segments)}
+class _CountingSender(GeminiEcho):
+    """시간 엔진 가짜(Gemini, D163) — 화면 흐름 시험용(유료 호출 없음)."""
 
 
 class _CountingClient:
@@ -311,7 +304,8 @@ def test_browser_two_phase_live_flow_with_injected_transport(tmp_path, monkeypat
     config = server.raw.settings(root)
     server.raw.update_settings(root, _replace(config, network_mode="online"))
     asset = server.raw.list_source_assets(root)[0]
-    workflow = server.raw.settings(root)
+    server.raw.set_new_hearing_engine(root, "gemini")  # 시간 엔진은 Gemini 하나다(D163)
+    workflow = server.raw.source_settings(root, asset.asset_id)
     probe = _preprocess.probe_raw_media(root / asset.relative_path)
 
     sender = _CountingSender([{"start": 0.5, "end": 2.0, "text": "도착해서 일정 설명"}])
@@ -364,6 +358,7 @@ def test_browser_two_phase_live_flow_with_injected_transport(tmp_path, monkeypat
             client=client,
             asr_approvals=asr_approvals,
             luna_approvals=luna_approvals,
+            timing_client=sender.client(),
         ),
     )
     live_server.open_workspace_view(str(root))  # 같은 작업공간을 공개 경로로 연다
@@ -378,7 +373,7 @@ def test_browser_two_phase_live_flow_with_injected_transport(tmp_path, monkeypat
             break
         time.sleep(0.05)
     assert live_server.raw.get_job(root, job_id).status == "succeeded"
-    assert sender.calls == 1 and client.calls == 0
+    assert len(sender.calls) == 1 and client.calls == 0
 
     waiting = live_server._analysis_state_markdown(root)
     assert "의미 승인 대기" in waiting
@@ -396,7 +391,7 @@ def test_browser_two_phase_live_flow_with_injected_transport(tmp_path, monkeypat
             break
         time.sleep(0.05)
     assert live_server.raw.get_job(root, semantic_job).status == "succeeded"
-    assert sender.calls == 1  # 전사 재호출 없음
+    assert len(sender.calls) == 1  # 전사 재호출 없음
     assert client.calls == 1  # 실제(가짜) Luna 호출 1회
 
     done_md, _jobs, _sources = live_server.analysis_refresh_view(signature)

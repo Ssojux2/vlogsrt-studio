@@ -25,7 +25,7 @@ from vlogsrt.project.raw.caption_provider import (
     AudioChunkBinding,
     GeminiTranscribeTimingProvider,
     MalformedCaptionResponse,
-    TransportTimingProvider,
+    TranscriptionRetired,
     timing_provider_for,
 )
 from vlogsrt.project.raw.config import (
@@ -158,11 +158,12 @@ def test_the_gemini_provider_takes_no_temperature() -> None:
     )
 
 
-def test_the_factory_follows_the_configured_timing_model() -> None:
+def test_the_factory_hears_only_with_gemini() -> None:
     sender = SimpleNamespace(observer=None, cancellation=None)
     cfg = object()
-    whisper = timing_provider_for(RawWorkflowConfig(), sender=sender, cfg=cfg, gemini_client=None)
-    assert isinstance(whisper, TransportTimingProvider)
+    # whisper는 은퇴했다(D163) — 키가 있어도 유료 호출 전에 닫는다.
+    with pytest.raises(TranscriptionRetired, match="다시 듣기"):
+        timing_provider_for(RawWorkflowConfig(), sender=sender, cfg=cfg, gemini_client=object())
     with pytest.raises(capabilities.TimingProviderUnavailable, match="GEMINI_API_KEY"):
         timing_provider_for(GEMINI_VIEW, sender=sender, cfg=cfg, gemini_client=None)
     client = _client(_Opener(b"{}"))

@@ -547,7 +547,7 @@ def test_export_confirmed_binds_expected_revision_backend(
 
 
 def test_db_v6_schema_and_v5_upgrade(tmp_path: Path) -> None:
-    """중앙 마이그레이션이 W2·W3 표를 만들고 v5 작업공간을 v6으로 올린다(출처 열 포함)."""
+    """중앙 마이그레이션이 W3 표를 만들고 v5 작업공간을 v6으로 올린다(W2 표는 D163에 지웠다)."""
     service = raw_service.RawWorkspaceService()
     root = tmp_path / "ws"
     service.create_workspace(root, "스키마확인")
@@ -556,10 +556,6 @@ def test_db_v6_schema_and_v5_upgrade(tmp_path: Path) -> None:
         "review_workspace_heads",
         "review_workspace_remappings",
         "confirmed_export_revisions",
-        "caption_registrations",
-        "caption_approvals",
-        "caption_runs",
-        "caption_responses",
     }
     with sqlite3.connect(root / DB_NAME) as connection:
         tables = {
@@ -567,10 +563,7 @@ def test_db_v6_schema_and_v5_upgrade(tmp_path: Path) -> None:
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
         assert expected_tables <= tables
-        origin_columns = {
-            row[1] for row in connection.execute("PRAGMA table_info(caption_responses)")
-        }
-        assert "origin" in origin_columns  # 응답 출처(live/injected) 열이 스키마에 있다
+        assert "caption_responses" not in tables  # W2 자막 저장소는 지웠다(D163)
         connection.execute(
             "UPDATE meta SET value = 'raw-workspace-db/5' WHERE key = 'db_schema_version'"
         )
@@ -595,8 +588,8 @@ def test_db_v6_schema_and_v5_upgrade(tmp_path: Path) -> None:
 # ── CLI 진단 — 로컬만, 계약 위반은 정직하게 ─────────────────────────────────
 
 
-def test_cli_review_and_caption_close_honestly(tmp_path: Path) -> None:
-    """`media review`·`media caption` — 계획·파일이 없으면 오류 안내로 끝난다."""
+def test_cli_review_closes_honestly(tmp_path: Path) -> None:
+    """`media review` — 계획이 없으면 오류 안내로 끝난다(`media caption`은 D163에 지웠다)."""
     import argparse as argparse_module
 
     from vlogsrt.project.raw import commands as raw_commands
@@ -605,11 +598,3 @@ def test_cli_review_and_caption_close_honestly(tmp_path: Path) -> None:
     raw_service.RawWorkspaceService().create_workspace(root, "제주")
     review_ns = argparse_module.Namespace(workspace=str(root), init=True)
     assert raw_commands.cmd_review(review_ns) == 1
-    caption_ns = argparse_module.Namespace(
-        workspace=str(root),
-        path=str(tmp_path / "final.mp4"),
-        source_id="final_1",
-        audio_ordinal=None,
-        run="run-1",
-    )
-    assert raw_commands.cmd_caption(caption_ns) == 1

@@ -11580,3 +11580,41 @@ D152가 나눠 둔 영어 열이다. **읽기만 한다** — 번역을 사지 �
   덜었다. 출력 자리 번호를 쓰던 시험은 새 모양으로 옮겼다. 선택 소리 미리보기(`caption_preview`)의 끝까지 시험은 함께 사라졌다 — 서비스는 남는다.
 - **남은 W-91**: W-32(whisper 종료 앞 옛 CLI 거부), 🧑 실제 라이브러리 인수.
 
+
+## D163 — whisper·gpt-transcribe 은퇴 — 쓰는 곳을 모두 지운다 (2026-11-16, 사용자 지시)
+
+사용자 지시(2026-11-16): 「whisper 쓰는건 그냥 다 삭제해」. 범위는 사용자가 골랐다 — 「작업대 + 옛 CLI 전부」 · 「읽기는
+그대로」 · 옛 Final Cut 계층의 whisper 길도 「같이 지우기」. W-32(whisper 종료일 앞 옛 CLI 거부)는 옛 CLI를 통째로 지우므로
+하지 않는다.
+
+- **새 whisper·gpt 호출은 없다.** `transcribe.py`의 whisper 절반(`LiveTranscriber`·픽스처 전사기·오디오 전송 요청 모델과 검증·
+  세그먼트 해석·골격 조립·비전 응답기)을 지웠다 — OpenAI는 Luna(`request_luna_vision`)만 남는다. 불변식
+  `check_no_audio_transcription_call`이 오디오 전사 호출을 막고, 지운 모듈은 「삭제된 계층」 목록이 되살아나지 않게 막는다.
+- **작업대**: 새로 듣는 엔진은 Gemini 하나다(`TIMING_ENGINE_CHOICES` · `NEW_HEARING_ENGINES`) — 엔진 고르는 칸·「다른 귀로 교차
+  확인」 칸·용어집 칸을 지웠고, 저장된 「whisper」 표지는 무시한다. `timing_provider_for`는 whisper 모델을 `TranscriptionRetired`로
+  거부한다(유료 호출 0회 · 그 원본은 까닭을 단 실패로 남는다). 기다리는 다시 듣기가 whisper로 고정돼 있으면 그 차례를 Gemini로
+  바꿔 듣는다(끝난 차례의 고정은 그대로). 빈칸 재전사는 whisper 원본을 `REFILL_WHISPER_RETIRED`로 거부하고, Gemini 원본만 그
+  엔진으로 다시 묻는다(두 번째 귀 없음). 지운 것: gpt 다른 귀의 실제·재생 제공자, 다시 묻기(D78 — `ear_rescue`·이해 계층의
+  다시 묻기 묶음·승인의 다시 묻기 예산 문), D95 단어 배정의 실제·재생 제공자, 견적의 교차 확인 분량, 옛 최종 영상 자막(W2 —
+  `final_caption`·`caption_workspace*`·`caption_review`·`caption_artifacts`·`caption_manual`·`caption_store`·`caption_config`·
+  `final_video`와 `media caption`·서비스 이음).
+- **Gemini 경로의 영수증·취소 운반**: whisper 전송이 실어 나르던 관찰자·취소를 `browser_runtime.LiveRequestCarrier`가 싣는다 —
+  `timing_provider_for`가 그대로 옮긴다(영수증 시험을 Gemini 문으로 옮겼다).
+- **읽기는 그대로**: 이미 whisper로 들은 원본 자막은 표시·편집·공유·번인에 쓴다. 저장 신원(설정의 `whisper-1`·`gpt-transcribe`
+  기본값 · whisper 계약 · `cross-check/`·`gemini-text/` 꼬리표 · `CACHE_ORIGIN` · 빈칸 재전사의 `whisper` 캐시 이름)은 **바이트
+  그대로** 남긴다 — 결속·청크 캐시 열쇠·분석 지문이 바뀌면 이미 산 결과가 낡는다. 캐시만 읽는 글자 적용(`source_text`·
+  `gemini_text`·`retext`의 적용 경로)과 whisper 모양 재생 선언(`ReplayAsrProvider` · `whisper_for_new_hearings`)은 남겼다 —
+  새로 묻지 않는다.
+- **옛 CLI·옛 엔진**: `vlogsrt run/redo/eval/evalset/probe/record/config/keywords`, `pipeline`·`repair`·`repetition`·`verify`·
+  `evaluate`·`refine`·`layout`·`cutpoints`, `make eval/verify/fixtures`, `scripts/verify_timing.py`·`speech_onsets.py`·
+  `smoke_project.py`, `ui/service.py`의 옛 단일 영상 화면(포트 고르기·`UiError`만 남는다)을 지웠다.
+- **옛 Final Cut 계층**: `project analyze/caption/caption-run/run`과 그것만 쓰던 `speech`·`boundary`·`captions`·`edit`·`export`·
+  `runner`·`final_caption`·`vad/guard`·`vision/`을 지웠다 — `receive/inspect/review/roughcut/sync-check`는 남는다. macOS
+  FinalCutAgent 엔진은 `analyze`·`caption-run`을 은퇴로 거부한다(종료 2) — 그 앱의 분석·자막 작업은 끝났다(사용자 승인).
+- **함께 고친 버그**: 소리 없는 원본은 1단계에서 시간 엔진을 고정하지 않아, 자막 문서가 생긴 뒤 2단계에서 「이미 들은 영상」
+  (whisper)으로 읽혀 입력 지문이 어긋났다(D104부터 Gemini 기본에서 「분석 확인 필요」로 끝날 수 있었다) — 글자 귀처럼 1단계
+  시작에서 엔진도 고정한다.
+- **CLAUDE.md**: 머리말·불변 규칙 1·2·3·5·6·7·9·10·흐름·픽스처·임계값 표·명령어·용어·금지 목록을 다시 썼다.
+- **남은 것**: whisper 모양 재생 선언을 쓰는 시험 묶음(약 60개 파일)은 그대로다 — Gemini 선언으로 옮기면 기대 큐 수·시각이
+  바뀌어 따로 한다. `OPENAI_API_KEY`가 없으면 실제 분석을 시작하지 않는 문은 그대로다(Luna가 쓴다 — Gemini만 쓰는 사람에게는
+  걸림돌일 수 있다). `tests/fixtures/api/`의 whisper 녹화는 쓰는 곳이 사라졌지만 고치지 않는다.

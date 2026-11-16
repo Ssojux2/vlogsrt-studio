@@ -632,6 +632,19 @@ DELETED_MODULES = {
     "loops.py": "D25 — 되풀이 강등. 검출은 repetition.py, 처리는 repair.py로 갈렸다(D27)",
     "validate.py": "D21 — 정제 결과 검사",
     "report.py": "D21 — 검토 리포트",
+    # whisper 은퇴(D163) — whisper로 자막을 만들던 옛 엔진과 그 판정 계층.
+    "pipeline.py": "D163 — whisper 옛 파이프라인",
+    "repair.py": "D163 — whisper 되풀이 재전사",
+    "repetition.py": "D163 — whisper 되풀이 검출",
+    "verify.py": "D163 — gpt-transcribe 교차 검증",
+    "evaluate.py": "D163 — 옛 골든셋 평가",
+    "refine.py": "D163 — 옛 엔진 정제",
+    "layout.py": "D163 — 옛 엔진 줄 나누기",
+    "cutpoints.py": "D163 — whisper 조각 경계",
+    "project/raw/ear_rescue.py": "D163 — 다른 귀 기준 재전사(D78)",
+    "project/raw/final_caption.py": "D163 — whisper 최종 영상 자막(W2)",
+    "project/speech.py": "D163 — 옛 Final Cut 계층의 whisper 전사",
+    "project/boundary.py": "D163 — 옛 Final Cut 계층의 whisper 경계 전사",
 }
 
 # 검증은 표시만 한다. 출력을 만드는 모듈을 알면 그 선이 무너진다(규칙 5).
@@ -725,26 +738,6 @@ def check_inspection_stays_dead() -> list[str]:
     return failures
 
 
-def check_verify_cannot_touch_output() -> list[str]:
-    """규칙 5 — `verify.py`는 큐를 만들지도 고치지도 못한다.
-
-    검증 on/off에 SRT 바이트가 같아야 한다. 출력 계층을 import하는 순간 그 보장이
-    사람의 주의력에 달리게 된다.
-    """
-    path = PACKAGE / "verify.py"
-    if not path.exists():
-        return []
-    failures = []
-    body = path.read_text(encoding="utf-8")
-    failures += [
-        f"verify.py: {name}을 import한다 — 검증이 출력을 건드릴 수 있다"
-        for name in _imports(body, VERIFY_MUST_NOT_IMPORT)
-    ]
-    if re.search(r"^\s*def (save|write)_", body, re.MULTILINE):
-        failures.append("verify.py: 파일을 쓰는 함수가 생겼다 — 검증은 표시만 한다")
-    return failures
-
-
 def _imported_names(body: str) -> set[str]:
     """실제로 import된 모듈 이름. **정규식으로 세지 않는다.**
 
@@ -765,31 +758,6 @@ def _imported_names(body: str) -> set[str]:
 def _imports(body: str, names: tuple[str, ...]) -> list[str]:
     imported = _imported_names(body)
     return [name for name in names if name in imported]
-
-
-def check_repair_stays_upstream() -> list[str]:
-    """D27 — 되풀이 재전사는 전사 단계 안에서 끝난다.
-
-    조판(`refine`·`layout`·`output`)을 알면 "판정으로 자막을 고치는" 옛 계층과 같아진다.
-    반대로 조판 쪽이 재전사를 알면 판정이 파이프라인 아래로 샌다.
-    """
-    failures = []
-    path = PACKAGE / "repair.py"
-    if path.exists():
-        body = path.read_text(encoding="utf-8")
-        failures += [
-            f"repair.py: {name}을 import한다 — 재전사가 조판까지 내려왔다"
-            for name in _imports(body, REPAIR_MUST_NOT_IMPORT)
-        ]
-    for name, forbidden in DOWNSTREAM_MUST_NOT_IMPORT.items():
-        target = PACKAGE / name
-        if not target.exists():
-            continue
-        failures += [
-            f"{name}: {leaked}를 import한다 — 되풀이 판정이 조판까지 샜다"
-            for leaked in _imports(target.read_text(encoding="utf-8"), forbidden)
-        ]
-    return failures
 
 
 def check_retext_stays_pure() -> list[str]:
@@ -813,24 +781,6 @@ EAR_RESCUE_MUST_NOT_IMPORT = (
     *RETEXT_MUST_NOT_IMPORT, "understanding", "source_text", "service", "sqlite3",
     "caption_provider",
 )  # fmt: skip
-
-
-def check_ear_rescue_stays_pure() -> list[str]:
-    """D78 — `ear_rescue.py`는 whisper 세그먼트·다른 귀 글자를 **값으로** 받아 판정만 돌려준다."""
-    path = PROJECT_PACKAGE / "raw" / "ear_rescue.py"
-    if not path.exists():
-        return ["vlogsrt/project/raw/ear_rescue.py: 다시 묻기 판정 계층이 사라졌다 (D78)"]
-    body = path.read_text(encoding="utf-8")
-    failures = [
-        f"ear_rescue.py: {name}을 import한다 — 다시 묻기 판정이 순수 함수가 아니게 된다 (D78)"
-        for name in _imports(body, EAR_RESCUE_MUST_NOT_IMPORT)
-    ]
-    failures += [
-        f"ear_rescue.py:{number}: 파일을 직접 읽거나 쓴다 — 판정은 값만 다룬다 (D78)"
-        for number, line in enumerate(body.splitlines(), start=1)
-        if TIERING_FILE_IO.search(line)
-    ]
-    return failures
 
 
 # Gemini 시간 엔진의 응답 해석과 단어 → 자막 줄 묶기(W-31b, D92)는 값만 받아 값만 돌려준다 — 큐
@@ -1042,32 +992,6 @@ CONFIG_PINNED_FIELDS = {
         "allow_silent_model_fallback", "allow_guessed_timestamps",
     ),
 }  # fmt: skip
-
-
-def check_caption_request_lanes() -> list[str]:
-    """규칙 1·6 — 시간 요청 빌더에는 힌트 칸이, 글자 요청 빌더에는 시각 입자 칸이 없다.
-
-    매개변수와 빌더 안의 키워드 인자를 함께 본다. 빌더가 사라지면 조용히 통과하지 않는다.
-    """
-    path = PROJECT_PACKAGE / "raw" / "caption_provider.py"
-    if not path.exists():
-        return ["vlogsrt/project/raw/caption_provider.py: 요청 빌더가 사라졌다 (규칙 6)"]
-    functions = {
-        node.name: node
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
-        if isinstance(node, ast.FunctionDef)
-    }
-    failures: list[str] = []
-    for name, banned, why in REQUEST_LANES:
-        node = functions.get(name)
-        if node is None:
-            failures.append(f"caption_provider.py: {name}을 찾지 못했다 — 검사가 무력해졌다")
-            continue
-        used = _lane_fields(node)
-        failures += [
-            f"caption_provider.py:{name}: {field} — {why}" for field in banned if field in used
-        ]
-    return failures
 
 
 # 시간 엔진 Gemini 3.5 Transcribe의 요청(W-31a, D92)에도 힌트가 실리지 않는다(규칙 6) — 요청 값의
@@ -2860,27 +2784,7 @@ def _edit_import_failures(rel: str, lineno: int, module: str, names: tuple[str, 
     return failures
 
 
-def check_confidence_meta_survives() -> list[str]:
-    """D27 — whisper가 준 되풀이 신호를 버리지 않는다.
-
-    `compression_ratio`가 되풀이를 짚는 유일한 공짜 신호다. 예전에는 응답에서 읽지도
-    않고 버렸고, 그래서 되풀이를 사람 눈으로만 찾을 수 있었다.
-    """
-    body = (PACKAGE / "transcribe.py").read_text(encoding="utf-8")
-    match = re.search(r"def parse_segments\(.*?\n(?=\ndef |\n# )", body, re.DOTALL)
-    if not match:
-        return ["transcribe.py: parse_segments를 찾지 못했다 — 메타 검사가 무력해졌다"]
-    missing = [
-        field
-        for field in ("compression_ratio", "avg_logprob", "no_speech_prob")
-        if field not in match.group(0)
-    ]
-    if missing:
-        return [f"transcribe.py: parse_segments가 {missing}를 버린다 (D27)"]
-    return []
-
-
-PURE_MODULES = ("cutpoints.py", "repetition.py", "polish.py")
+PURE_MODULES = ("polish.py",)
 
 # D24의 시각 유도 계층. 되살아나면 초반·마지막이 다시 날아간다(D25).
 BURIED_MODULES = {
@@ -2890,10 +2794,7 @@ BURIED_MODULES = {
 
 
 def check_pure_layer() -> list[str]:
-    """규칙 7 — 자를 자리를 고르는 계층은 순수해야 한다.
-
-    `cutpoints.py`가 ffmpeg를 직접 부르기 시작하면 진폭을 지어내며 시험할 수 없게 된다.
-    """
+    """규칙 7 — 조판 정리(`polish.py`)는 순수해야 한다(옛 순수 계층 둘은 지웠다, D163)."""
     failures = []
     forbidden = re.compile(
         r"^\s*(?:import|from)\s+(openai|subprocess|shutil|urllib|http|socket|ssl)\b"
@@ -3291,30 +3192,19 @@ def check_ffmpeg_boundary() -> list[str]:
     return check_subprocess_boundaries()
 
 
-def check_no_prompt_to_whisper() -> list[str]:
-    """규칙 6 — whisper에 `prompt`를 보내지 마라(D13, D16).
+def check_no_audio_transcription_call() -> list[str]:
+    """whisper·gpt-transcribe는 은퇴했다(D163) — OpenAI 오디오 전사 호출은 어디에도 없다.
 
-    whisper는 `prompt`를 지시가 아니라 직전 자막 텍스트로 읽는다. 한 줄이
-    `'한국 여행 브이로그'` 138회·564초를 낳았다. 힌트는 검증 모델로만 간다.
+    시간 엔진은 Gemini 문(`request_gemini_transcription`) 하나다. `audio.transcriptions`가 다시
+    나타나면 은퇴한 엔진에 돈을 내는 길이 열린 것이다.
     """
-    body = (PACKAGE / "transcribe.py").read_text(encoding="utf-8")
-    match = re.search(r"def _extras\(.*?\n(?=\ndef |\n# )", body, re.DOTALL)
-    if not match:
-        return ["transcribe.py: _extras를 찾지 못했다 — 인자 검사가 무력해졌다"]
-    sent = re.findall(r'extras\[["\'](\w+)["\']\]', match.group(0))
-    leaked = sorted({name for name in sent if name in {"prompt", "keywords"}})
-    if leaked:
-        return [f"transcribe.py: 자막을 만드는 호출에 {leaked}가 실린다 (규칙 6, D16)"]
-    return []
-
-
-def check_one_transcription_call() -> list[str]:
-    """규칙 1 — 모델은 하나다. 호출 지점이 둘이면 출처가 둘이라는 뜻이다."""
-    body = (PACKAGE / "transcribe.py").read_text(encoding="utf-8")
-    calls = re.findall(r"transcriptions\.create\(", body)
-    if len(calls) != 1:
-        return [f"transcribe.py: transcriptions.create 호출이 {len(calls)}개다 (1개여야 한다)"]
-    return []
+    failures = []
+    pattern = re.compile(r"transcriptions\.create\(|\.audio\.transcriptions\b")
+    for path in _sources() + sorted(UI_DIR.rglob("*.py")):
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if pattern.search(line):
+                failures.append(f"{_rel(path)}:{number} OpenAI 오디오 전사 호출 (D163)")
+    return failures
 
 
 def check_no_hardcoded_model() -> list[str]:
@@ -3356,8 +3246,7 @@ CHECKS = (
     ("ffmpeg 경계", check_ffmpeg_boundary),
     ("순수 계층", check_pure_layer),
     ("시각 유도 계층 부활 금지", check_time_deriving_layers_stay_buried),
-    ("whisper에 prompt 금지", check_no_prompt_to_whisper),
-    ("요청 빌더의 칸은 갈라져 있다", check_caption_request_lanes),
+    ("OpenAI 오디오 전사 호출 없음", check_no_audio_transcription_call),
     ("Gemini 시간 요청에 힌트가 없다", check_gemini_timing_request_lane),
     ("Gemini 시간 요청 빌더에 힌트가 없다", check_gemini_timing_builder_lane),
     ("용어집은 설정 밖, DB만 안다", check_glossary_stays_local),
@@ -3368,10 +3257,7 @@ CHECKS = (
     ("파생 frozen 모델", check_project_models_frozen),
     (".env 보호", check_env_untouched),
     ("판정 계층 부활 금지", check_inspection_stays_dead),
-    ("검증은 출력을 못 건드린다", check_verify_cannot_touch_output),
-    ("재전사는 전사 단계에 머문다", check_repair_stays_upstream),
     ("글자 교정은 순수하다", check_retext_stays_pure),
-    ("다른 귀 기준 재전사 판정은 순수하다", check_ear_rescue_stays_pure),
     ("Gemini 단어 해석·묶기는 순수하다", check_word_cues_stays_pure),
     ("Gemini 단어 → whisper 줄 글자 배정은 순수하고 글자만 낸다", check_word_text_stays_pure),
     ("작업공간 모드는 순수하고 문서 밖이다", check_workspace_mode_stays_pure),
@@ -3415,8 +3301,6 @@ CHECKS = (
     ("Final Cut 보내기는 원본을 복사·재해시하지 않는다", check_finalcut_export_never_copies),
     ("초안 내보내기는 작업공간 export/에만 쓴다", check_render_export_writes_only_export),
     ("옛 선택한 컷 Final Cut 출력은 되살리지 않는다", check_old_finalcut_path_stays_dead),
-    ("신뢰도 메타 보존", check_confidence_meta_survives),
-    ("전사 호출 1개", check_one_transcription_call),
     ("모델 이름 비하드코딩", check_no_hardcoded_model),
     ("레거시는 project를 import하지 않는다", check_source_does_not_import_project),
     ("선택 의존성 범위", check_project_dependency_scope),

@@ -15,7 +15,7 @@ from vlogsrt.config import (
     load_config,
     read_toml,
 )
-from vlogsrt.keywords import dedupe, load_keywords, parse_keywords, split_inline
+from vlogsrt.keywords import dedupe, parse_keywords
 
 NO_PROJECT_TOML = Path("does-not-exist.toml")
 
@@ -116,23 +116,6 @@ def test_list_values_become_tuples() -> None:
     assert cfg.keywords == ("ko", "en")
 
 
-def test_keywords(tmp_path: Path) -> None:
-    base = tmp_path / "base.txt"
-    base.write_text("# 주석\n블루펭귄\n\n망원동\n", encoding="utf-8")
-    episode = tmp_path / "ep01.txt"
-    episode.write_text("망원동\n연남동  # 회차\n", encoding="utf-8")
-
-    entries = load_keywords(episode_file=episode, inline=["압구정"], base_file=base)
-    assert entries == ["블루펭귄", "망원동", "연남동", "압구정"]
-
-
-def test_keywords_missing_episode_file_is_loud(tmp_path: Path) -> None:
-    with pytest.raises(RuntimeError, match="회차 사전"):
-        load_keywords(episode_file=tmp_path / "nope.txt", base_file=tmp_path / "none.txt")
-
-
 def test_keywords_parsing_details() -> None:
     assert parse_keywords("가\n# 주석\n\n  나  \n다 # 꼬리\n") == ["가", "나", "다"]
     assert dedupe(["가", "가", " 나 ", ""]) == ["가", "나"]
-    assert split_inline("가, 나 ,") == ["가", "나"]
-    assert split_inline(None) == []

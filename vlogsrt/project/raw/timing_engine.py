@@ -47,15 +47,21 @@ DEFAULT_NEW_HEARING_ENGINE = TIMING_ENGINE_GEMINI
 않는다). whisper는 종료일까지 고를 수 있는 이전 엔진이다 — 이미 들은 영상은 고정 그대로다."""
 
 
+NEW_HEARING_ENGINES: tuple[str, ...] = (TIMING_ENGINE_GEMINI,)
+"""새로 들을 수 있는 엔진 — whisper는 은퇴했다(D163). 저장된 「whisper」 표지는 무시한다."""
+
+
 def new_hearing_engine(workspace: Any) -> str:
-    """처음 듣거나 다시 듣는 영상이 쓸 엔진 — 표지가 없거나 모르는 값이면 기본이다."""
+    """처음 듣거나 다시 듣는 영상이 쓸 엔진 — 표지가 없거나 고를 수 없는 값이면 기본이다."""
     value = _state(workspace)[1]
-    return value if value is not None and value in TIMING_ENGINES else DEFAULT_NEW_HEARING_ENGINE
+    return value if value in NEW_HEARING_ENGINES else DEFAULT_NEW_HEARING_ENGINE
 
 
 def set_new_hearing_engine(workspace: Any, key: str) -> None:
     """「새로 듣는 엔진」을 바꾼다 — 이미 들은 영상은 그대로다(바꾸려면 다시 듣기)."""
     _require_engine(key)
+    if key not in NEW_HEARING_ENGINES:
+        raise RawWorkspaceError(f"{key}로는 새로 듣지 않는다 — whisper는 은퇴했다(D163)")
     workspace.set_meta_value(META_KEY, key)
 
 
@@ -75,26 +81,35 @@ def pin(workspace: Any, asset_id: str, epoch: int, key: str) -> None:
         row = db.execute(
             f"SELECT engine FROM {TABLE} WHERE asset_id=? AND epoch=?", (asset_id, epoch)
         ).fetchone()
-        if row is not None and str(row[0]) != key:
+        stale = row is not None and _retired_pending(workspace, asset_id, epoch, str(row[0]))
+        if row is not None and str(row[0]) != key and not stale:
             db.rollback()
             raise RawWorkspaceError(
                 f"원본 {asset_id}의 차례 {epoch}는 이미 {row[0]} 엔진으로 고정됐다 — 엔진을"
                 " 바꾸려면 「다시 듣기」를 고르세요"
             )
-        if row is None:
+        if row is None or str(row[0]) != key:
             db.execute(
-                f"INSERT INTO {TABLE}(asset_id, epoch, engine) VALUES(?,?,?)",
+                f"INSERT OR REPLACE INTO {TABLE}(asset_id, epoch, engine) VALUES(?,?,?)",
                 (asset_id, epoch, key),
             )
         db.commit()
+
+
+def _retired_pending(workspace: Any, asset_id: str, epoch: int, engine: str) -> bool:
+    """기다리는 다시 듣기가 은퇴한 whisper로 고정됐다 — 새 엔진으로 바꾼다(D163)."""
+    if engine in NEW_HEARING_ENGINES:
+        return False
+    state = asr_epoch.state(workspace, asset_id)
+    return state.pending and state.epoch == epoch
 
 
 def resolve(workspace: Any, asset_id: str) -> str:
     """그 원본이 지금 쓰는 엔진의 열쇠 — 정하는 순서는 모듈 설명 그대로다."""
     state = asr_epoch.state(workspace, asset_id)
     found = pinned(workspace, asset_id, state.epoch)
-    if state.pending:
-        return found or new_hearing_engine(workspace)
+    if state.pending:  # 은퇴한 whisper로 고정된 다시 듣기는 새 엔진으로 듣는다(D163)
+        return found if found in NEW_HEARING_ENGINES else new_hearing_engine(workspace)
     if found is not None:
         return found
     if source_transcript.load(workspace, asset_id) is not None:

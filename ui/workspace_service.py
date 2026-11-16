@@ -114,15 +114,6 @@ APPROVAL_MODE_CHOICES = [
 """승인 단추가 무엇을 승인하는지(D59 19b) — 단추의 이름·범위는 그대로다(D57 결정 4). 「전사만」은
 1단계(전사·원본 자막·장면·프레임)만 돌고 영상 분석 앞에서 멈춘다. 고른 값은 견적 문구에 실리고
 그 문구가 승인 클릭과 함께 간다 — 보이는 범위만 승인된다."""
-CROSS_CHECK_ID = "vl-cross-check"
-CROSS_CHECK_LABEL = "다른 귀로 교차 확인"
-CROSS_CHECK_INFO = (
-    "켜 두면 이전 전사 엔진으로 듣는 영상을 다른 귀로 한 번 더 듣고, 두 귀가 맞춰 본 줄만 글자를"
-    " 고칩니다. 지금 기본 전사 엔진으로 듣는 영상에는 다른 귀가 없습니다."
-)
-"""「다른 귀로 교차 확인」(D59 19d) — 승인 범위 바로 아래의 켬·끔. 칸에는 모델 이름·금액이 없다
-(D57 결정 7 · D110 — 견적은 없다). 다음 승인이 이 값으로 돈다.
-D104부터 기본(Gemini) 엔진 원본에는 다른 귀가 없어 그 사실을 이름 없이 말한다(W-52b1)."""
 CONTEXT_PANEL_ID = "vl-context-review"
 CONTEXT_PANEL_LABEL = "맥락 평가 (Gemini)"
 CONTEXT_RUN_LABEL = "맥락 평가 실행"
@@ -178,14 +169,6 @@ FINALCUT_DROP_OFF_TEXT = "꺼짐 — 다음 보내기부터 꺼진 클립까지 
 TIMING_ENGINE_ID = "vl-timing-engine"
 ANALYSIS_MODEL_PANEL_ID = "analysis-model-panel"
 """설정 서랍 「분석 모델」 — 모델·전사 엔진 칸과 키 상태 줄. 키 입력 칸은 없다(D102)."""
-TIMING_ENGINE_LABEL = "새로 듣는 전사 엔진"
-TIMING_ENGINE_RETIRED_MARK = " · 이전 엔진({date} 종료)"
-"""「새로 듣는 전사 엔진」(W-31e, D92) — 처음 듣거나 다시 듣는 영상이 쓸 시간 엔진. 이미 들은 영상은
-그대로다(엔진을 바꾸는 길은 그 영상의 「다시 듣기」뿐). 칸에는 금액이 없다(D57 결정 7 · D110)."""
-TIMING_ENGINE_BUSY_TEXT = (
-    "**바꾸지 않았습니다** · 분석이나 승인 확인이 진행 중입니다 — 끝나거나 취소한 뒤에 새로 듣는"
-    " 전사 엔진을 바꾸세요."
-)
 GEMINI_TRANSCRIBE_PAID_KEY_NOTE = (
     "결제를 연결한 키만 쓰세요 — 무료 등급 키는 입력(오디오)을 Google 제품 개선에 씁니다."
 )
@@ -200,32 +183,18 @@ GEMINI_CONTRACT_UNCONFIRMED_NOTE = (
 알린다(사용자 결정: 코드는 지금 바꾸고 H1을 먼저 한다)."""
 TIMING_KEY_MISSING_TEXT = (
     "{label}로 들을 영상이 있어 `{env}`가 필요합니다. `.env`에 결제를 연결한 키를 넣고 앱을 다시"
-    " 띄우거나, 설정 서랍 「분석 모델」에서 새로 듣는 전사 엔진을 바꾼 뒤 다시"
-    " 승인하세요. 유료 호출은 시작하지 않았습니다."
+    " 띄운 뒤 다시 승인하세요. 유료 호출은 시작하지 않았습니다."
 )
 TIMING_PRICE_UNKNOWN_TEXT = (
     "{label}의 공식 단가는 {date}까지 다시 확인하기로 한 값입니다 — **가격 미정**이라 이 엔진으로는"
-    " 승인할 수 없습니다. 단가를 확인해 고치거나 새로 듣는 전사 엔진을 바꾸세요. 유료 호출은"
+    " 승인할 수 없습니다. 단가를 확인해 고치세요. 유료 호출은"
     " 시작하지 않았습니다."
 )
 """Gemini 전사 엔진의 1단계 시작 문(W-31e) — 키 이름만 말하고 값은 어디에도 싣지 않는다."""
 STATUS_SENT_CELLS = ("button", "progress", "usage")
 """1초 상태 틱(D63 세션 C)이 세션마다 「마지막으로 보낸 값」을 기억하는 칸 — 승인 단추 · 상태 줄 ·
 실사용 원천. 칸마다 `gr.State` 하나다: 다른 사건이 칸을 잊게 할 때 틱이 쓰는
-다른 칸의 기억과 엇갈려 덮지 않는다. 범위·교차 확인·용어집 칸은 그 탭의 칸 값과 견주어 건너뛴다."""
-GLOSSARY_PANEL_ID = "vl-glossary-panel"
-GLOSSARY_ID = "vl-glossary"
-GLOSSARY_SAVE_ID = "vl-glossary-save"
-GLOSSARY_STATUS_ID = "vl-glossary-status"
-GLOSSARY_LABEL = "용어집(고유명사, 한 줄에 하나)"
-GLOSSARY_SAVE_LABEL = "용어집 저장"
-GLOSSARY_INFO = (
-    "다른 귀에게만 알려 주는 말입니다 — 처음 듣는 귀에는 보내지 않습니다. 용어집을 바꾸면"
-    " 다음 승인부터 다른 귀에게 새 용어집으로 다시 묻습니다."
-)
-"""설정 서랍의 용어집 칸(D59 19c·19e) — 저장은 무료이고, 다음 승인이 새 용어집으로 돈다.
-모델 이름·금액이 없다
-(D57 결정 7). `#` 뒤는 메모로 버리고 같은 말은 한 번만 남는다(`glossary.parse`)."""
+다른 칸의 기억과 엇갈려 덮지 않는다. 범위 칸은 그 탭의 칸 값과 견주어 건너뛴다."""
 GLOSSARY_BUSY_TEXT = (
     "분석이나 승인 확인이 진행 중이라 용어집을 저장하지 않았습니다 — 끝나거나 취소한 뒤에 저장해"
     " 주세요."
@@ -250,9 +219,9 @@ REFILL_EXPLANATION = (
 )
 REFILL_ORDER_WARNING = (
     "빈칸을 채우면 이 영상의 원본 자막은 직접 고친 자막이 됩니다 — 그 뒤로는 다시 듣기·실패 구간"
-    " 재시도·다른 귀 교차 확인이 이 자막을 덮지 않습니다. 그 셋을 먼저 끝낸 뒤에 채우세요."
+    " 재시도가 이 자막을 덮지 않습니다. 그 둘을 먼저 끝낸 뒤에 채우세요."
 )
-"""계획의 「비용을 한 번만 내기 위한 순서」(D59) — 빈칸 넣기는 재시도·다시 듣기·교차 확인 뒤다."""
+"""계획의 「비용을 한 번만 내기 위한 순서」(D59) — 빈칸 넣기는 재시도·다시 듣기 뒤다."""
 REFILL_APPROVE_LABEL = "빈칸 재전사 승인"
 REFILL_STARTED_TEXT = "빈칸 재전사를 시작했습니다 — 끝나면 넣은 자막이 원본 자막 목록에 보입니다."
 REFILL_CHANGED_TEXT = (
@@ -277,10 +246,6 @@ REFILL_NOTE_FAILED = (
 REFILL_NOTE_RED = (
     "자막 시각이 말소리와 어긋나 있습니다(빨강) — 빈칸으로 보이는 말이 실은 기존 자막의 말일 수"
     " 있습니다. 먼저 다시 듣기로 시각을 바로잡으세요."
-)
-REFILL_NOTE_UNCHECKED = (
-    "다른 귀 교차 확인을 아직 하지 않은 자막입니다 — 빈칸을 채운 뒤에는 기존 줄에 다른 귀의 글자가"
-    " 제안으로만 남습니다."
 )
 REFILL_NOTE_UNRECORDED = (
     "전사가 실패한 구간이 있었는지 이 화면은 알 수 없습니다 — 「전사만」 승인으로 다시 전사하면"
@@ -336,8 +301,8 @@ SNAP_LISTEN_NOTE = (
     " 다른 신호로는 맞춤이 확인되지 않았으니 「옛 시각」과 「제안」을 차례로 들어 보세요."
 )
 SNAP_ORDER_WARNING = (
-    "적용하면 이 영상의 원본 자막은 직접 고친 자막이 됩니다 — 그 뒤로는 다시 듣기·실패 구간 재시도·"
-    "다른 귀 교차 확인이 이 자막을 덮지 않습니다. 그 셋과 말소리 빈칸 재전사를 먼저 끝낸 뒤에"
+    "적용하면 이 영상의 원본 자막은 직접 고친 자막이 됩니다 — 그 뒤로는 다시 듣기·실패 구간"
+    " 재시도가 이 자막을 덮지 않습니다. 그 둘과 말소리 빈칸 재전사를 먼저 끝낸 뒤에"
     " 적용하세요. 다음 영상 분석은 자막이 바뀐 이 영상을 다시 판정합니다."
 )
 SNAP_UNDO_RULE = (
@@ -434,7 +399,7 @@ RELISTEN_ENGINE_SAME_TEXT = (
 )
 RELISTEN_ENGINE_CHANGE_TEXT = (
     "이 영상의 원본 자막은 {engine}로 들었습니다. 다시 들으면 {new}로 듣습니다"
-    f" (「{TIMING_ENGINE_LABEL}」 설정)."
+    " (whisper는 은퇴했습니다)."
 )
 """「다시 듣기」 칸의 전사 엔진 문구(W-31e, D92) — 엔진을 바꾸는 길은 다시 듣기뿐이라, 누르기 전에
 어느 엔진으로 듣는지 말한다. 금액은 말하지 않는다(D57 결정 7 · D110)."""
@@ -1277,13 +1242,8 @@ def _refill_spans(scope: Any) -> dict[str, object]:
     return {"summary": summary, "spans": shown, "more": max(0, len(scope.spans) - len(shown))}
 
 
-def _refill_notes(
-    scope: Any,
-    transcript: Mapping[str, Any],
-    sync_view: Mapping[str, Any] | None,
-    cross_check_on: bool,
-) -> list[str]:
-    """순서 경고에 더하는 이 영상의 사정 — 실패 구간·기록 없음·빨강 시각·교차 확인 전(D59 순서)."""
+def _refill_notes(scope: Any, sync_view: Mapping[str, Any] | None) -> list[str]:
+    """순서 경고에 더하는 이 영상의 사정 — 실패 구간·기록 없음·빨강 시각(D59 순서)."""
     notes: list[str] = []
     if any(span.failed_speech for span in scope.spans):
         notes.append(REFILL_NOTE_FAILED)
@@ -1291,10 +1251,6 @@ def _refill_notes(
         notes.append(REFILL_NOTE_UNRECORDED)
     if sync_view is not None and sync_view.get("level") == "red":
         notes.append(REFILL_NOTE_RED)
-    rows = transcript.get("utterances", [])
-    edited = raw_service.RawWorkspaceService.transcript_human_edited(transcript)
-    if cross_check_on and not edited and not any("text_source" in row for row in rows):
-        notes.append(REFILL_NOTE_UNCHECKED)
     return notes
 
 
@@ -1483,37 +1439,6 @@ def _ear_minutes(asked: Sequence[Any]) -> int:
     return max(1, -(-seconds // 60))
 
 
-def _glossary_now(glossary: Any) -> str:
-    """용어집 칸 아래 한 줄 — 지금 저장된 용어 수(D59 19e)."""
-    count = len(glossary.terms)
-    return (
-        f"지금 용어집에는 용어가 {count}개 있습니다." if count else "지금 용어집은 비어 있습니다."
-    )
-
-
-def _glossary_saved(glossary: Any) -> str:
-    """저장한 뒤 한 줄 — 다음 승인부터(두 범위 모두) 새 용어집으로 묻는다(금액·모델 이름 없음)."""
-    count = len(glossary.terms)
-    head = f"용어집을 저장했습니다 — 용어 {count}개." if count else "용어집을 비웠습니다."
-    return f"{head} 다음 승인부터 다른 귀에게 이 용어집으로 묻습니다."
-
-
-GLOSSARY_MOVED_SHOWN_TERMS = 5
-"""다른 탭이 바꾼 용어집을 알릴 때 이름 대는 용어 수 — 문구 길이일 뿐 판정이 아니다."""
-
-
-def _glossary_moved(glossary: Any) -> str:
-    """다른 탭이 먼저 저장했다 — 지금 용어집을 보이고 쓴 글은 그대로 둔다(덮어쓰지 않는다)."""
-    terms = list(glossary.terms)
-    shown = " · ".join(terms[:GLOSSARY_MOVED_SHOWN_TERMS])
-    more = len(terms) - GLOSSARY_MOVED_SHOWN_TERMS
-    now = (f"{shown} 외 {more}개" if more > 0 else shown) if terms else "비어 있음"
-    return (
-        f"다른 탭에서 용어집이 바뀌었습니다 — 지금 용어집: {now}. 쓴 글은 그대로 두었습니다."
-        " 확인한 뒤 다시 누르면 쓴 글로 저장합니다."
-    )
-
-
 def _sent_form(update: Any) -> Any:
     """보낸 값의 비교 모양 — 구성요소 갱신이면 그 인자(값·보임·누를 수 있음), 글이면 글.
 
@@ -1558,14 +1483,6 @@ def _engine_label_for_key(key: str) -> str:
 def _engine_label(model: str) -> str:
     """시간 모델의 화면 이름(D92) — 견적 줄·다시 듣기 칸이 쓴다."""
     return _engine_label_for_key(raw_service.timing_engine_key(model))
-
-
-def _timing_engine_choice_label(key: str) -> str:
-    """「새로 듣는 전사 엔진」 선택지 이름 — 종료일이 있는 엔진(whisper)에는 그 날짜를 붙인다."""
-    facts = raw_service.timing_engine_facts(key, date.today())
-    if facts.retires_on is None:
-        return str(facts.label)
-    return facts.label + TIMING_ENGINE_RETIRED_MARK.format(date=facts.retires_on.isoformat())
 
 
 def _timing_price_unknown(facts: Any) -> str:
@@ -1965,9 +1882,6 @@ class RawWorkspaceUi:
         self._analysis_model_dd: gr.Dropdown | None = None
         self._analysis_model_md: gr.Markdown | None = None
         # 「용어집」 칸과 상태 줄(D59 19e) — 같은 사건들이 그 작업공간의 용어집으로 맞춘다.
-        self._glossary_box: gr.Textbox | None = None
-        self._glossary_status_md: gr.Markdown | None = None
-        self._glossary_loaded_state: gr.State | None = None
         self._glossary_warned: set[str] = set()
         # 화면 틱 하나(W-83, D143)와 거기 실리는 처리기들 — 알림은 맨 앞이다
         # (던지면 그 틱의 다른 처리기가 돌지 않아 아무것도 쓰이지 않는다).
@@ -3199,33 +3113,6 @@ class RawWorkspaceUi:
 
     # ── 「다른 귀로 교차 확인」(D59 19d) — 작업공간 meta에 산다(기본 켜짐) ─────────────
 
-    def cross_check_value(self) -> bool:
-        """칸의 처음 값 — 화면을 열 때마다 지금 작업공간의 값으로 다시 잰다(없으면 켜짐)."""
-        root = self._snapshot_root()
-        return bool(self.raw.cross_check_enabled(root)) if root else True
-
-    def cross_check_view(self, signature: str | None, on: bool | None) -> Any:
-        """사람이 교차 확인을 켜거나 껐다 — 저장한다(호출 0회). 다음 승인이 이 값으로 돈다.
-
-        저장 결과(재사용) 셈도 결속이 바뀌므로 백그라운드에서 다시 센다(유료 호출 없음)."""
-        root = self._require_current_selection(signature)
-        self.raw.set_cross_check(root, bool(on))
-        self._scan_library(root)
-        self._drop_settled_notice(root)
-        return self._quick_status()
-
-    def cross_check_tick(self, signature: str | None, shown: bool | None) -> Any:
-        """1초 틱 — 그 탭의 칸 값이 저장값과 다르면 칸을 맞춘다.
-
-        다른 탭이 바꿔도 칸이 승인되는 값과 어긋난 채 남지 않는다."""
-        root = self._snapshot_root()
-        if not self._signature_current(signature) or root is None:
-            return gr.skip()
-        on = bool(self.raw.cross_check_enabled(root))
-        return gr.skip() if shown is not None and bool(shown) == on else gr.Checkbox(value=on)
-
-    # ── 용어집(D59 19c·19e) — 작업공간 DB에 산다. 저장은 무료다 ─────────────
-
     def _read_glossary(self, root: Path) -> tuple[Any | None, str]:
         """지금 용어집과 읽기 실패 사유 — 저장된 모양이 깨졌으면 (None, 사유)와 WARN.
 
@@ -3244,78 +3131,6 @@ class RawWorkspaceUi:
         """견적 재기 작업의 열쇠 재료 — 저장된 용어집이 깨졌으면 빈 값(재기는 그대로 돈다)."""
         current, _reason = self._read_glossary(root)
         return "" if current is None else str(current.sha)
-
-    def glossary_value(self) -> str:
-        """용어집 칸의 처음 값 — 화면을 열 때마다 지금 작업공간의 용어집(한 줄에 하나)."""
-        loaded = self.glossary_loaded_value()
-        return loaded[1] if loaded else ""
-
-    def glossary_loaded_value(self) -> list[str] | None:
-        """이 탭이 불러온 용어집 `[sha, 글]` — 저장은 이 sha에 묶인다(다른 탭의 저장을 덮지
-        않게)."""
-        root = self._snapshot_root()
-        current = None if root is None else self._read_glossary(root)[0]
-        return None if current is None else [str(current.sha), str(current.text())]
-
-    def glossary_controls(self) -> tuple[Any, str, Any]:
-        """작업공간을 열거나 바꾸면 칸·상태 줄·불러온 용어집을 그 작업공간의 것으로 맞춘다.
-
-        값을 맞출 뿐 저장하지 않는다 — 저장은 사람의 「용어집 저장」뿐이다.
-        """
-        root = self._snapshot_root()
-        if root is None:
-            return gr.Textbox(value=""), "", None
-        current, reason = self._read_glossary(root)
-        if current is None:
-            return gr.Textbox(value=""), ui_facade.literal_markdown(reason), None
-        status = ui_facade.literal_markdown(_glossary_now(current))
-        return gr.Textbox(value=current.text()), status, [current.sha, current.text()]
-
-    def glossary_tick(
-        self, signature: str | None, shown: str | None, loaded: list[str] | None
-    ) -> tuple[Any, Any, Any]:
-        """1초 틱 — 다른 탭이 용어집을 바꿨고 이 탭의 칸이 불러온 그대로일 때만 칸을 맞춘다.
-
-        사람이 칸에 쓰는 중이면(불러온 글과 다르면) 건드리지 않는다 — 저장이 그 차이를 알린다.
-        """
-        skip = (gr.skip(), gr.skip(), gr.skip())
-        root = self._snapshot_root()
-        if not self._signature_current(signature) or root is None or not loaded:
-            return skip
-        current, _reason = self._read_glossary(root)
-        if current is None or current.sha == loaded[0] or (shown or "") != loaded[1]:
-            return skip
-        status = ui_facade.literal_markdown(_glossary_now(current))
-        return gr.Textbox(value=current.text()), status, [current.sha, current.text()]
-
-    def glossary_save_view(
-        self, signature: str | None, text: str | None, loaded: list[str] | None
-    ) -> tuple[Any, Any, Any, Any]:
-        """「용어집 저장」 — 저장한다(유료 호출 0회). 다음 승인이 새 용어집으로 돈다.
-
-        두 번째 귀의 요청 신원과 글자 캐시 열쇠가 용어집 sha를 묶는다(19d) — 저장 결과 셈도 다시
-        센다. 저장은 이 탭이 불러온 용어집(`loaded`)에 묶인다 — 그사이 다른 탭이 저장했으면
-        한 번 거절하고 지금 용어집을 보인다(쓴 글은 그대로, 다시 누르면 저장한다). 쓸 수 없는 글자가
-        있거나 분석·승인 확인이 도는 동안에는 저장하지 않는다(칸은 사람이 쓴 그대로).
-        """
-        root = self._require_current_selection(signature)
-        if self._analysis_busy(root):
-            return ui_facade.literal_markdown(GLOSSARY_BUSY_TEXT), *(gr.skip(),) * 3
-        try:
-            before = self.raw.glossary(root)
-            if not loaded or loaded[0] != before.sha:
-                moved = ui_facade.literal_markdown(_glossary_moved(before))
-                return moved, gr.skip(), gr.skip(), [before.sha, before.text()]
-            saved = self.raw.save_glossary(root, text or "")
-        except raw_service.RawWorkspaceError as error:
-            return ui_facade.literal_markdown(str(error)), *(gr.skip(),) * 3
-        box, now = gr.Textbox(value=saved.text()), [saved.sha, saved.text()]
-        if saved.terms == before.terms:
-            return ui_facade.literal_markdown(_glossary_now(saved)), box, gr.skip(), now
-        self._scan_library(root)
-        self._drop_settled_notice(root)
-        status = ui_facade.literal_markdown(_glossary_saved(saved))
-        return status, box, self._quick_status(), now
 
     def approval_mode_tick(self, signature: str | None, shown: str | None) -> Any:
         """1초 틱 — 그 탭의 칸이 보이는 값(`shown`)이 저장된 범위와 다르면 칸을 맞춘다.
@@ -4458,7 +4273,7 @@ class RawWorkspaceUi:
         self._startup_gemini = raw_service.capture_gemini_credentials()
 
     def _analysis_model_panel(self) -> None:
-        """「분석 모델」 — 영상 분석 모델(D54) · 새로 듣는 전사 엔진(D92)과 키 상태 줄.
+        """「분석 모델」 — 영상 분석 모델(D54)과 전사 엔진(Gemini, D92·D163)의 키 상태 줄.
 
         키 입력 칸은 없다(D102) — 키는 사람이 `.env`에 넣고, 서버가 띄워질 때 한 번 찍는다.
         """
@@ -4475,13 +4290,6 @@ class RawWorkspaceUi:
             analysis_model_md = gr.Markdown(
                 self.analysis_model_status(), elem_id="analysis-model-status"
             )
-            timing_engine = gr.Dropdown(
-                choices=self.timing_engine_choices(),
-                value=self._current_timing_engine(),
-                label=TIMING_ENGINE_LABEL,
-                interactive=True,
-                elem_id=TIMING_ENGINE_ID,
-            )
             timing_engine_md = gr.Markdown(
                 self.timing_engine_status(), elem_id=f"{TIMING_ENGINE_ID}-status"
             )
@@ -4495,14 +4303,7 @@ class RawWorkspaceUi:
         analysis_model_panel.expand(
             self.analysis_model_controls, None, [analysis_model, analysis_model_md]
         )
-        timing_engine.input(
-            self.settings_timing_engine_view,
-            [self._signature_state, timing_engine],
-            [timing_engine_md, timing_engine],
-        )
-        analysis_model_panel.expand(
-            self.timing_engine_controls, None, [timing_engine, timing_engine_md]
-        )
+        analysis_model_panel.expand(self.timing_engine_status, None, [timing_engine_md])
 
     def _review_tab(self) -> None:
         """정리 탭 — 명령 줄(단추 + 활동 칸) · 무대. 서랍에 든 도구는 `_settings_drawer`가 짓는다.
@@ -4601,7 +4402,6 @@ class RawWorkspaceUi:
             )
             with gr.Column(elem_id="vl-quote", min_width=0):
                 self._approval_mode_radio = self._approval_mode_cell()
-                self._cross_check_box = self._cross_check_cell()
                 # 초안 결과 카드(W-46a, D100 §7a) — 내보낸 적이 없으면 빈 글이다(자리 없음).
                 self._export_card_html = gr.HTML(
                     "", elem_id=RENDER_EXPORT_CARD_ID, apply_default_css=False
@@ -4648,19 +4448,6 @@ class RawWorkspaceUi:
             elem_id=APPROVAL_MODE_ID,
         )
 
-    def _cross_check_cell(self) -> gr.Checkbox:
-        """「다른 귀로 교차 확인」(D59 19d) — 승인 범위 바로 아래, 견적 문구 바로 위의 켬·끔.
-
-        켜면 견적 문구에 두 번째 귀로 들을 분량·금액이 실리고, 그 문구가 승인 클릭과 함께 간다 —
-        보이는 견적만 승인된다. 처음 값은 화면을 열 때마다 그 작업공간의 저장값이다(기본 켜짐)."""
-        return gr.Checkbox(
-            value=self.cross_check_value,
-            label=CROSS_CHECK_LABEL,
-            info=CROSS_CHECK_INFO,
-            interactive=True,
-            elem_id=CROSS_CHECK_ID,
-        )
-
     def usage_line_markdown(self) -> str:
         """실사용 줄만 — 기록 판 고정 줄의 원천(유료 실행 전에는 비어 있다, D46).
 
@@ -4677,29 +4464,25 @@ class RawWorkspaceUi:
         self,
         signature: str | None,
         mode_shown: str | None,
-        cross_shown: bool | None,
-        glossary_shown: str | None,
-        glossary_loaded: list[str] | None,
         *sent: Any,
     ) -> tuple[Any, ...]:
         """상태 틱(W-23 세션 C, D63) — 옛 1초 타이머 일곱의 처리기를 틱마다 모두 부른다.
 
         W-83(D143)부터는 2초 화면 틱 하나에 실린다.
 
-        부수 효과(끝난 승인 작업·지난 알림 걷기, 용어집 경고 한 번)와 주기는 예전 그대로다. 쓰지
-        않는 틱이라 읽기는 한 범위 안에서 한 번이다. 범위·교차 확인·용어집 칸은 옛 처리기가 그 탭의
-        칸 값과 견주어 건너뛰고, 나머지 다섯은 이 세션이 마지막으로 보낸 값(`sent`, 칸마다
-        `gr.State`)과 같으면 보내지 않는다 — 다른 사건이 그 칸에 쓰면 `forget_sent_view`가 잊는다.
+        부수 효과(끝난 승인 작업·지난 알림 걷기)와 주기는 예전 그대로다. 쓰지 않는 틱이라 읽기는 한
+        범위 안에서 한 번이다. 범위 칸은 옛 처리기가 그 탭의 칸 값과 견주어 건너뛰고(교차 확인·
+        용어집 칸은 whisper와 함께 걷었다, D163), 나머지 셋은 이 세션이 마지막으로 보낸 값(`sent`,
+        칸마다 `gr.State`)과 같으면 보내지 않는다 — 다른 사건이 그 칸에 쓰면 `forget_sent_view`가
+        잊는다.
         """
         with raw_service.read_scope.open():
             button = self.library_analysis_button()
             progress = self.capcut_status_view(signature)
             usage = self.usage_line_markdown() if self._signature_current(signature) else gr.skip()
             mode = self.approval_mode_tick(signature, mode_shown)
-            cross = self.cross_check_tick(signature, cross_shown)
-            glossary = self.glossary_tick(signature, glossary_shown, glossary_loaded)
         cells, memory = _unsent((button, progress, usage), sent)
-        return (mode, cross, *glossary, *cells, *memory)
+        return (mode, *cells, *memory)
 
     def forget_sent_view(self) -> None:
         """다른 사건이 상태 줄에 쓴 뒤 — 그 칸의 「마지막으로 보낸 값」을 잊는다."""
@@ -4710,16 +4493,14 @@ class RawWorkspaceUi:
         event.then(self.forget_sent_view, None, targets, queue=False, show_progress="hidden")
 
     def _wire_status_tick(self) -> None:
-        """상태 틱의 입출력 — 칸이 모두 지어진 뒤(용어집은 서랍에 산다) 화면 틱에 싣는다(D143)."""
-        assert self._review_timer is not None and self._glossary_box is not None
-        assert self._glossary_status_md is not None and self._glossary_loaded_state is not None
-        shown = [self._approval_mode_radio, self._cross_check_box, self._glossary_box]
-        glossary = [self._glossary_status_md, self._glossary_loaded_state]
+        """상태 틱의 입출력 — 칸이 모두 지어진 뒤 화면 틱에 싣는다(D143)."""
+        assert self._review_timer is not None
+        shown = [self._approval_mode_radio]
         cells = [self._library_approve_button, self._capcut_progress_md, self._usage_md]
         self._add_tick_part(
             self.status_tick,
-            [self._signature_state, *shown, self._glossary_loaded_state, *self._status_sent],
-            [*shown, *glossary, *cells, *self._status_sent],
+            [self._signature_state, *shown, *self._status_sent],
+            [*shown, *cells, *self._status_sent],
         )
 
     def _report_activity(self, event: Any, reply: Any) -> None:
@@ -4986,20 +4767,6 @@ class RawWorkspaceUi:
             show_progress="hidden",
         )
         self._forget_sent_after(chosen, "progress")
-        self._wire_cross_check()
-
-    def _wire_cross_check(self) -> None:
-        """「다른 귀로 교차 확인」 — 「승인 범위」와 같은 배선: 누르면(`input`) 저장하고 상태 줄을
-        바로 다시 그리고, 1초 틱이 그 탭의 칸 값을 저장값과 견줘 다를 때만 칸을 맞춘다(D59 19d)."""
-        box = self._cross_check_box  # 무대(`_review_stage`)가 먼저 만든다
-        chosen = box.input(
-            self.cross_check_view,
-            [self._signature_state, box],
-            self._capcut_progress_md,
-            queue=False,
-            show_progress="hidden",
-        )
-        self._forget_sent_after(chosen, "progress")
 
     def _wire_review_timers(self, outputs: list[Any]) -> None:
         """화면 틱 하나(W-83, D143) — 처리기는 그대로이고 한 타이머의 한 의존에 차례로 실린다.
@@ -5054,7 +4821,6 @@ class RawWorkspaceUi:
             self._drawer_head("설정 · 고급 도구", "settings-drawer")
             self._analysis_model_panel()
             self._tier_criteria_panel()
-            self._glossary_panel()
             self._finalcut_panel()
             self._context_review_panel()
             with gr.Accordion("분석 실행 설정", open=False, visible=False):
@@ -5373,41 +5139,6 @@ class RawWorkspaceUi:
         root = self._require_current_selection(signature)
         saved = bool(self.raw.set_finalcut_drop_disabled(root, bool(on)))
         return FINALCUT_DROP_ON_TEXT if saved else FINALCUT_DROP_OFF_TEXT
-
-    def _glossary_panel(self) -> None:
-        """「용어집」(D59 19e) — 고유명사 칸과 저장 단추. 저장하면 견적 문구를 바로 다시 그린다.
-
-        저장은 사람의 단추뿐이다(칸을 고치는 것만으로는 저장하지 않는다). 견적 칸·전문 칸은 무대
-        (`_review_stage`)가 먼저 만든다 — 서랍은 탭 뒤에 짓는다.
-        """
-        with gr.Accordion("용어집", open=True, elem_id=GLOSSARY_PANEL_ID):
-            box = gr.Textbox(
-                value=self.glossary_value,
-                label=GLOSSARY_LABEL,
-                info=GLOSSARY_INFO,
-                lines=4,
-                max_lines=12,
-                interactive=True,
-                elem_id=GLOSSARY_ID,
-            )
-            save = gr.Button(GLOSSARY_SAVE_LABEL, elem_id=GLOSSARY_SAVE_ID)
-            status = gr.Markdown("", elem_id=GLOSSARY_STATUS_ID, latex_delimiters=[])
-        # 탭마다 불러온 용어집 — 함수(메서드가 아니다)라 deepcopy가 서버 객체를 복사하지 않는다.
-        loaded = gr.State(lambda: self.glossary_loaded_value())
-        self._glossary_box, self._glossary_status_md = box, status
-        self._glossary_loaded_state = loaded
-        self._wire_glossary(save, box, status, loaded)
-
-    def _wire_glossary(self, save: gr.Button, box: Any, status: Any, loaded: gr.State) -> None:
-        """저장(그 탭이 불러온 용어집에 묶임) → 상태 줄. 쓰지 않은 칸만 맞추는 것은
-        1초 상태 틱의 `glossary_tick`이다(D59 19e 검증 뒤 고침 6, D63 세션 C)."""
-        saved = save.click(
-            self.glossary_save_view,
-            [self._signature_state, box, loaded],
-            [status, box, self._capcut_progress_md, loaded],
-            show_progress="hidden",
-        )
-        self._forget_sent_after(saved, "progress")
 
     def _restore_tools(self) -> None:
         """「복원 · 전달 · 고급 조작」 — 서랍 안에서는 펼친 채 둔다(열면 바로 단추가 보인다)."""
@@ -7820,7 +7551,7 @@ class RawWorkspaceUi:
         scope = self.raw.refill_scope(root, source_id)
         if isinstance(scope, str):
             return {**view, "state": "blocked", "reason": scope}
-        notes = _refill_notes(scope, transcript, sync_view, self.raw.cross_check_enabled(root))
+        notes = _refill_notes(scope, sync_view)
         view.update(_refill_spans(scope), notes=notes)
         if not scope.spans:
             return {**view, "state": "none", "reason": REFILL_NONE_TEXT}
@@ -8911,12 +8642,6 @@ class RawWorkspaceUi:
 
     # ── 새로 듣는 전사 엔진(W-31e, D92) — 작업공간 meta에 산다(기본 Gemini, D104) ─────────
 
-    def timing_engine_choices(self) -> list[tuple[str, str]]:
-        """「새로 듣는 전사 엔진」 칸의 선택지 — 새 엔진이 앞이다. 금액은 싣지 않는다(D57)."""
-        return [
-            (_timing_engine_choice_label(key), key) for key in raw_service.TIMING_ENGINE_CHOICES
-        ]
-
     def _current_timing_engine(self) -> str:
         root = self._snapshot_root()
         if root is None:
@@ -8925,9 +8650,6 @@ class RawWorkspaceUi:
             return str(self.raw.new_hearing_engine(root))
         except raw_service.RawWorkspaceError:
             return raw_service.DEFAULT_NEW_HEARING_ENGINE
-
-    def _timing_engine_dropdown(self, key: str) -> Any:
-        return gr.Dropdown(choices=self.timing_engine_choices(), value=key)
 
     def timing_engine_status(self, root: Path | None = None) -> str:
         """엔진·단가·키 상태 — 이미 들은 영상은 그대로라는 말과 함께. 키는 이름만 말한다."""
@@ -8963,35 +8685,6 @@ class RawWorkspaceUi:
             f"Gemini 키(`{env}`) 없음 — 이 엔진으로 들으려면 `.env`에 넣고 앱을 다시 띄우세요."
             f" {GEMINI_TRANSCRIBE_PAID_KEY_NOTE}"
         )
-
-    def timing_engine_controls(self) -> tuple[Any, str]:
-        """패널을 열 때 칸과 상태를 지금 작업공간 값으로 맞춘다."""
-        return self._timing_engine_dropdown(
-            self._current_timing_engine()
-        ), self.timing_engine_status()
-
-    def settings_timing_engine_view(
-        self, signature: str | None, key: str | None
-    ) -> tuple[str, Any]:
-        """새로 듣는 전사 엔진 바꾸기(W-31e) — 로컬 표지만. 분석·승인 확인 중에는 바꾸지 않는다.
-
-        이미 들은 영상의 엔진은 고정이라 바뀌지 않는다(D92). 처음 듣거나 다시 듣기를 기다리는 영상의
-        견적이 바뀌므로 라이브러리 캐시를 비우고 견적을 다시 낸다(읽기만, 유료 호출 0회)."""
-        root = self._require_current_selection(signature)
-        if key not in raw_service.TIMING_ENGINE_CHOICES:
-            raise gr.Error(f"고를 수 없는 전사 엔진입니다: {key!r}")
-        current = str(self.raw.new_hearing_engine(root))
-        if key == current:
-            return self.timing_engine_status(root), self._timing_engine_dropdown(key)
-        if self._analysis_busy(root):
-            status = f"{TIMING_ENGINE_BUSY_TEXT}\n\n{self.timing_engine_status(root)}"
-            return status, self._timing_engine_dropdown(current)
-        try:
-            self.raw.set_new_hearing_engine(root, key)
-        except raw_service.RawWorkspaceError as error:
-            raise gr.Error(str(error)) from error
-        self._after_model_change(root)
-        return self.timing_engine_status(root), self._timing_engine_dropdown(key)
 
     def _analysis_busy(self, root: Path) -> bool:
         """분석·승인 확인이 도는가 — 이 동안 모델이 바뀌면 견적이 본 모델과 실행이 갈린다."""
@@ -10238,10 +9931,7 @@ class RawWorkspaceUi:
         뿐이다.
         """
         assert self._analysis_model_dd is not None and self._analysis_model_md is not None
-        assert self._glossary_box is not None and self._glossary_status_md is not None
-        assert self._glossary_loaded_state is not None
         targets = [self._analysis_model_dd, self._analysis_model_md]
-        glossary = [self._glossary_box, self._glossary_status_md, self._glossary_loaded_state]
         assert self._tier_status_md is not None
         criteria = [self._tier_status_md, *self._tier_fields]
         for event in events:
@@ -10249,8 +9939,6 @@ class RawWorkspaceUi:
             event.then(self.analysis_model_controls, None, targets)
             # 추천 기준 칸도 같은 이유(W-46a) — 다른 작업공간의 기준이 칸에 남지 않는다.
             event.then(self.tier_criteria_controls, None, criteria, show_progress="hidden")
-            # 용어집 칸도 같은 이유(D59 19e) — 상태 줄에 진행 표시가 깜박이지 않게 숨긴다.
-            event.then(self.glossary_controls, None, glossary, show_progress="hidden")
 
     def _ws_path_display(self) -> str:
         """읽기전용 경로 표시 칸의 값 — 지금 열린 작업공간 자리(선택기로만 정해진다)."""

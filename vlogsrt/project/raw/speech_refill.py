@@ -36,11 +36,10 @@ from vlogsrt.project.raw import understanding as stage1
 from vlogsrt.project.raw.analysis_approval import (
     AsrPhaseApproval,
     asr_settings_fingerprint,
-    require_text_approval,
 )
 from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
 from vlogsrt.project.raw.analysis_workflow import ApprovedPhaseAsrProvider, CountingAsrGate
-from vlogsrt.project.raw.caption_provider import TransportTextProvider, timing_provider_for
+from vlogsrt.project.raw.caption_provider import timing_provider_for
 from vlogsrt.project.raw.config import (
     SOURCE_TEXT_SETTINGS,
     RawWorkflowConfig,
@@ -607,63 +606,14 @@ def _ears(
     on: date,
     workdir: Path,
 ) -> tuple[tuple[UtteranceEvidence, ...], dict[str, object] | None]:
-    """whisper 발화와, 켜져 있으면 같은 WAV로 두 번째 귀에 물어 D37 게이트로 얹은 글자(D59 19c).
+    """시간 엔진이 들은 발화 — 아이디만 넣을 줄의 아이디로 바꾼다(시각·순서는 그대로).
 
-    발화 아이디는 글자 경로 **앞에서** 넣을 줄의 아이디로 바꾼다 — 사이 글자 기록(`unplaced`)의 앞뒤
-    줄이 원본 자막의 그 줄을 가리킨다(검증 지적 8c). 시각·순서는 그대로다."""
+    같은 WAV를 두 번째 귀(gpt)에 묻던 글자 경로(D59 19c)는 whisper와 함께 지웠다(D163)."""
     utterances = tuple(
         replace(item, utterance_id=f"refill_{scope.refill_id}_{ordinal:04d}")
         for ordinal, item in enumerate(stage1.utterance_evidence(audio, evidence))
     )
-    if scope.text_identity is None:
-        return utterances, None
-    request = source_text.TextPassRequest(
-        settings=SOURCE_TEXT_SETTINGS,
-        glossary=plan.glossary,
-        workflow=plan.workflow,
-        on=on,
-        request_id=f"refill:{scope.refill_id}:{plan.asset_id}",
-        workdir=workdir,
-        cache_dir=plan.folder / "text",
-        origin=ORIGIN_LIVE,
-    )
-    provider = _text_provider(plan, scope, audio, approval, transport, request)
-    outcomes = source_text.run_text_pass(audio, evidence, request, provider)
-    result = source_text.apply_text_pass(utterances, outcomes, request, audio.sample_rate)
-    return result.utterances, result.record
-
-
-def _text_provider(
-    plan: RefillPlan,
-    scope: RefillScope,
-    audio: SelectedAudio,
-    approval: AsrPhaseApproval,
-    transport: Any,
-    request: source_text.TextPassRequest,
-) -> source_text.ApprovedPhaseTextProvider | None:
-    """두 번째 귀의 경계 — 승인이 글자를 묶었을 때만(새로 살 글자 조각이 없으면 캐시만 쓴다)."""
-    if approval.text_model is None or scope.text_identity is None:
-        return None
-    try:
-        require_text_approval(
-            approval, workflow=plan.workflow, identity=scope.text_identity, on=request.on
-        )
-    except AnalysisApprovalError as error:
-        log.warn(f"빈칸 재전사: 글자 요청을 보내지 않습니다 — whisper 글자 그대로 둡니다: {error}")
-        return None
-    sender, cfg = _transport_pair(transport)
-    keys = approval.text_chunk_keys
-    return source_text.ApprovedPhaseTextProvider(
-        inner=TransportTextProvider(sender=sender, cfg=cfg),
-        workflow=plan.workflow,
-        understanding=RawUnderstandingSettings(),
-        audio=audio,
-        approval=approval,
-        approved_model=str(approval.text_model),
-        approved_identity=scope.text_identity,
-        gate=CountingAsrGate(limit=approval.text_chunk_budget),
-        approved_keys=None if keys is None else frozenset(keys),
-    )
+    return utterances, None  # 두 번째 귀(gpt)는 whisper와 함께 지웠다(D163)
 
 
 def _rows(
