@@ -70,6 +70,58 @@ CAPTION_LANE_JS = r"""
     if (high < low) { return 0; }
     return Math.round(Math.max(low, Math.min(high, delta)));
   };
+  // ⌥ 가장자리 끌기(W-87c, D152) — 맞닿은 이웃의 마주 보는 가장자리도 둘 사이 간격 그대로
+  // 함께 간다(Subtitle Edit). 두 줄 모두 최소 길이 안. 이웃이 없으면 null — 보통 끌기로.
+  L.edgePair = function (cues, index, part, ticks, minLength) {
+    var cue = cues[index];
+    if (part === "end") {
+      var next = cues[index + 1];
+      if (!next) { return null; }
+      var gap = next[2] - cue[3];
+      var lo = cue[2] + minLength;
+      var hi = next[3] - minLength - gap;
+      var end = Math.round(Math.min(Math.max(ticks, lo), Math.max(hi, lo)));
+      return { value: end, neighbor: index + 1, neighborValue: end + gap };
+    }
+    var prev = cues[index - 1];
+    if (!prev) { return null; }
+    var gapBefore = cue[2] - prev[3];
+    var low = prev[2] + minLength + gapBefore;
+    var high = cue[3] - minLength;
+    var start = Math.round(Math.max(Math.min(ticks, high), Math.min(low, high)));
+    return { value: start, neighbor: index - 1, neighborValue: start - gapBefore };
+  };
+  // 여러 줄 몸통 끌기 — 고른 줄을 같은 틱만큼, 고르지 않은 이웃(최소 간격)·타임라인 끝 안으로.
+  L.bodyMany = function (cues, indices, delta, minGap, total) {
+    var picked = {};
+    indices.forEach(function (i) { picked[i] = true; });
+    var low = -Infinity;
+    var high = Infinity;
+    indices.forEach(function (i) {
+      var cue = cues[i];
+      var prev = cues[i - 1];
+      var next = cues[i + 1];
+      if (!picked[i - 1]) { low = Math.max(low, (prev ? prev[3] + minGap : 0) - cue[2]); }
+      if (!picked[i + 1]) { high = Math.min(high, (next ? next[2] - minGap : total) - cue[3]); }
+    });
+    if (!indices.length || high < low) { return 0; }
+    return Math.round(Math.max(low, Math.min(high, delta)));
+  };
+  // 목록 고르기 — "one"(그 줄만) · "toggle"(Mod 누름, 넣고 빼기) · "range"(⇧ 누름, 기준부터 그
+  // 줄까지). ids는 보이는 차례이고 고른 줄도 그 차례로 돌려준다.
+  L.pick = function (ids, picked, anchor, id, how) {
+    if (how === "toggle") {
+      var had = picked.indexOf(id) >= 0;
+      var kept = had ? picked.filter(function (p) { return p !== id; }) : picked.concat([id]);
+      return { picked: ids.filter(function (p) { return kept.indexOf(p) >= 0; }), anchor: id };
+    }
+    if (how === "range" && anchor !== null && ids.indexOf(anchor) >= 0) {
+      var a = ids.indexOf(anchor);
+      var b = ids.indexOf(id);
+      return { picked: ids.slice(Math.min(a, b), Math.max(a, b) + 1), anchor: anchor };
+    }
+    return { picked: [id], anchor: id };
+  };
   // 새 선택 — 두 끝을 차례대로, 타임라인 안으로.
   L.range = function (a, b, total) {
     var lo = Math.max(0, Math.min(a, b));

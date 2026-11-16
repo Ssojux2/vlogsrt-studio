@@ -179,3 +179,42 @@ def test_the_index_stands_left_of_the_timeline_on_wide_screens() -> None:
     assert '"index strip" "index range"' in wide
     assert "minmax(0, var(--vl-index-w))" in wide
     assert "contain: size" in wide
+
+
+def test_the_captions_workspace_moves_the_caption_panes_not_copies_them() -> None:
+    """W-87c(D152) — 「자막」 작업공간은 재생기의 자막 목록 · 입력칸을 노드째 브라우저 열로 옮기고
+    「기본」이면 제자리로 돌린다(지우거나 새로 짓지 않는다). 고른 작업공간은 이 브라우저에만."""
+    js = window_js.window_bind_js()
+    config = json.loads(js[js.index("var CFG = ") + 10 : js.index(";\n  if (WIN.bound")])
+    assert config["workspaces"] == [["basic", "기본"], ["captions", "자막"]]
+    assert config["captions"] == window_js.CAPTIONS_ID
+    assert "holder.appendChild(deckBody)" in js and "home.appendChild(moved)" in js
+    assert ".remove()" not in js and "cloneNode" not in js
+    assert 'holder.setAttribute("data-vl-own-keys", "")' in js
+    css = window_js.window_css()
+    assert '#visual-stage[data-vl-workspace="captions"] .tl-lane' in css
+    assert "var(--vl-caption-lane-h)" in css
+    from ui import design_tokens
+
+    assert design_tokens.SCALAR_TOKENS["caption-lane-h"] == "192px"
+
+
+def test_moved_caption_panes_still_reach_the_player_keys_once() -> None:
+    """옮긴 칸의 키·누름은 뿌리까지 오지 않으니 밖에 있을 때만 같은 처리로 넘긴다."""
+    bind = PLAYER_APP_JS[PLAYER_APP_JS.index("function bindDom() {") :]
+    assert 'var body = rootEl.querySelector(".tl-cues-body");' in bind
+    assert "if (S.rootEl && !S.rootEl.contains(body)) { onKey(ev); }" in bind
+    assert "if (S.rootEl && !S.rootEl.contains(body)) { onClick(ev); }" in bind
+
+
+def test_many_picked_cues_move_and_delete_as_one_change() -> None:
+    """여러 줄 고름(W-87c) — 몸통 끌기는 `LN.bodyMany`, ⌫는 한 번의 변경(실행 취소 한 번)."""
+    assert "LN.bodyMany(cues, drag.indices" in PLAYER_APP_JS
+    assert "LN.edgePair(cues, drag.index" in PLAYER_APP_JS
+    assert 'pickFromList(row.getAttribute("data-cue"), ev)' in PLAYER_APP_JS
+    for label in (
+        '"자막 경계 함께 옮기기(⌥)"',
+        '"자막 " + ids.length + "개 옮기기"',
+        '"자막 " + ids.length + "개 지우기"',
+    ):
+        assert label in PLAYER_APP_JS

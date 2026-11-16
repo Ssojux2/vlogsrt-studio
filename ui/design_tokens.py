@@ -120,6 +120,8 @@ SCALAR_TOKENS: dict[str, str] = {
     "deck-min": "160px",
     # 타임라인 인덱스 칸의 폭 — Final Cut `timelineIndexContents` 318.
     "index-w": "318px",
+    # 「자막」 작업공간의 파형 레인 높이(W-87c) — 기본 96px의 두 배. 외부 근거 없는 조정 대상.
+    "caption-lane-h": "192px",
     "browser-card-min": "240px",
     # 아래 덱이 차 있으면 무대는 내용 높이다 — 위 덱 뷰어의 영상 높이(W-85, 좁은 화면 규칙과 같은
     # 값). 위·아래 0.5/0.5는 덱이 둘째 영상을 내려놓는 W-86에서 맞춘다(지금 덱의 재생기는 제 영상을

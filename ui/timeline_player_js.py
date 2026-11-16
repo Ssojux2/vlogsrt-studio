@@ -79,7 +79,7 @@ PLAYER_APP_JS = r"""
     S.deck = 0;
     if (!same) {
       S.playhead = 0; S.sel = 0; S.cursor = null; S.status = ""; S.statusError = false;
-      S.cue = null;
+      S.cue = null; S.picked = []; S.anchor = null;
     }
     bindDom();
     // 뷰어 하나(W-86b) — 화면(.tl-stage)을 위 덱 뷰어 칸으로 옮긴다(노드째, 청취자 그대로).
@@ -349,6 +349,9 @@ PLAYER_APP_JS = r"""
       (S.warns[row[0]] = S.warns[row[0]] || []).push(row[1]);
     });
     if (S.cue && !S.proj.cues.some(function (cue) { return cue[0] === S.cue; })) { S.cue = null; }
+    // 여러 줄 고름(W-87c) — 보이는 줄만 남긴다(컷에 가려지면 빠진다, 문서에서는 남는다).
+    var visible = S.proj.cues.map(function (cue) { return cue[0]; });
+    S.picked = (S.picked || []).filter(function (id) { return visible.indexOf(id) >= 0; });
   }
   function paintTransport() {
     var button = $("tl-toggle");
@@ -840,9 +843,14 @@ PLAYER_APP_JS = r"""
       count.textContent = "보이는 " + S.proj.cues.length + "개" + (S.proj.hidden.length
         ? " · 컷에 가려진 " + S.proj.hidden.length + "개(클립을 늘리면 돌아온다)" : "");
     }
-    if (list.__tlProj === S.proj && list.__tlCue === S.cue) { paintCueFollow(); return; }
+    var pickedKey = S.picked.join("\n");
+    if (list.__tlProj === S.proj && list.__tlCue === S.cue && list.__tlPicked === pickedKey) {
+      paintCueFollow();
+      return;
+    }
     list.__tlProj = S.proj;
     list.__tlCue = S.cue;
+    list.__tlPicked = pickedKey;
     list.__tlCurrent = undefined;
     if (!S.proj.cues.length) {
       list.innerHTML = '<div class="tl-cue-empty">보이는 자막이 없습니다 — 「새 자막」(⌥C)으로' +
@@ -855,7 +863,7 @@ PLAYER_APP_JS = r"""
       "<span>시작</span><span>끝</span><span>길이</span><span>텍스트</span><span>간격</span>" +
       "<span>문자/초</span></div>" + captionRows().map(function (row) {
         var warn = warnText(row.id);
-        return '<div class="tl-cue-row' + (row.id === S.cue ? " is-selected" : "") +
+        return '<div class="tl-cue-row' + (isPicked(row.id) ? " is-selected" : "") +
           '" role="option" data-cue="' + esc(row.id) + '"' +
           (warn ? ' title="' + esc(warn) + '"' : "") + ">" +
           '<span class="tl-cue-n">' + row.n + "</span>" +
@@ -868,6 +876,27 @@ PLAYER_APP_JS = r"""
           cell("tl-cue-num", row.bad.cps, row.cps === null ? "" : row.cps.toFixed(1)) + "</div>";
       }).join("");
     paintCueFollow();
+  }
+  // 고른 줄 — 여러 줄 고름이 있으면 그것, 없으면 고른 자막 하나.
+  function clearPicked() { S.cue = null; S.picked = []; S.anchor = null; }
+  function isPicked(id) { return id === S.cue || S.picked.indexOf(id) >= 0; }
+  function pickedIds() {
+    if (S.picked.length > 1) { return S.picked.slice(); }
+    return S.cue ? [S.cue] : [];
+  }
+  function visibleIds() { return S.proj.cues.map(function (cue) { return cue[0]; }); }
+  // 목록 누름 — 그냥은 그 줄로 가고, Mod는 넣고 빼기 · ⇧는 기준부터 범위(가지 않는다, SE와 같다).
+  function pickFromList(id, ev) {
+    var how = (ev.metaKey || ev.ctrlKey) ? "toggle" : (ev.shiftKey ? "range" : "one");
+    var base = S.picked.length ? S.picked : (S.cue ? [S.cue] : []);
+    var out = LN.pick(visibleIds(), base, S.anchor === null ? S.cue : S.anchor, id, how);
+    S.picked = out.picked;
+    S.anchor = out.anchor;
+    if (how === "one") { pickCue(id); return; }
+    commitText();
+    S.cue = out.picked.indexOf(id) >= 0 ? id : (out.picked[out.picked.length - 1] || null);
+    paintCues();
+    requestLane();
   }
   function captionRows() {
     return CG.rows(S.proj.cues, S.warns, seqTicks(), TL.tickRate(S.doc.facts), TL.textChars);
@@ -1180,11 +1209,17 @@ PLAYER_APP_JS = r"""
         else if (drag.part === "end") { end = drag.value; }
         else if (drag.part === "body") { start += drag.value; end += drag.value; }
       }
+      if (drag && drag.moved && drag.part === "many" && drag.indices.indexOf(index) >= 0) {
+        start += drag.value; end += drag.value;
+      }
+      if (drag && drag.moved && drag.neighbor === index) {
+        if (drag.part === "end") { start = drag.neighborValue; } else { end = drag.neighborValue; }
+      }
       var xs = LN.x(view, start);
       var xe = LN.x(view, end);
       var row = rows[index];
       ctx.globalAlpha = 0.55;
-      ctx.fillStyle = cssVar(cue[0] === S.cue ? "--vl-accent" : "--vl-caption-chip");
+      ctx.fillStyle = cssVar(isPicked(cue[0]) ? "--vl-accent" : "--vl-caption-chip");
       ctx.fillRect(xs, 2, Math.max(1, xe - xs), height - 4);
       ctx.globalAlpha = 1;
       ctx.fillStyle = cssVar("--vl-tier-green-ink");
@@ -1221,14 +1256,27 @@ PLAYER_APP_JS = r"""
       cueOp("end", target, undefined, frameAtTicks(ticks));
       return;
     }
-    if (ev.altKey && target) { laneShiftTo(target, ticks); return; }
     var hit = LN.hit(S.proj.cues, view, x, S.settings.snapPx);
+    // ⌥ + 가장자리 = 이웃 가장자리도 함께 끈다(W-87c) · ⌥ + 그 밖 = 길이째 그 자리로 옮기기.
+    var pair = ev.altKey && hit && hit.part !== "body";
+    if (ev.altKey && !pair && target) { laneShiftTo(target, ticks); return; }
     if (S.playing) { stopPlayback(); }
     S.laneSel = null;
+    var part = hit ? hit.part : "new";
+    var indices = [];
+    if (hit && part === "body" && S.picked.length > 1 && S.picked.indexOf(hit.id) >= 0) {
+      part = "many";
+      indices = S.proj.cues.map(function (cue, i) { return isPicked(cue[0]) ? i : -1; })
+        .filter(function (i) { return i >= 0; });
+    } else {
+      S.picked = hit ? [hit.id] : [];
+      S.anchor = hit ? hit.id : null;
+    }
     if (hit) { S.cue = hit.id; }
     seek(frameAtTicks(ticks));
-    S.laneDrag = { index: hit ? hit.index : -1, id: hit ? hit.id : null,
-      part: hit ? hit.part : "new", origin: ticks, x: x, moved: false, value: null };
+    S.laneDrag = { index: hit ? hit.index : -1, id: hit ? hit.id : null, part: part,
+      pair: !!pair, indices: indices, neighbor: -1, neighborValue: null,
+      origin: ticks, x: x, moved: false, value: null };
     laneCanvas().setPointerCapture(ev.pointerId);
     paintCues();
     requestLane();
@@ -1249,8 +1297,13 @@ PLAYER_APP_JS = r"""
     var cues = S.proj.cues;
     if (drag.part === "start" || drag.part === "end") {
       var snapped = ev.shiftKey ? ticks : LN.snap(ticks, laneSnaps(), S.settings.snapPx * view.tpp);
-      drag.value = LN.edge(cues, drag.index, drag.part, snapped, laneMinGap(), seqTicks(),
-        laneTotal());
+      var paired = drag.pair ? LN.edgePair(cues, drag.index, drag.part, snapped, seqTicks()) : null;
+      drag.neighbor = paired ? paired.neighbor : -1;
+      drag.neighborValue = paired ? paired.neighborValue : null;
+      drag.value = paired ? paired.value : LN.edge(cues, drag.index, drag.part, snapped,
+        laneMinGap(), seqTicks(), laneTotal());
+    } else if (drag.part === "many") {
+      drag.value = LN.bodyMany(cues, drag.indices, ticks - drag.origin, laneMinGap(), laneTotal());
     } else if (drag.part === "body") {
       drag.value = LN.body(cues, drag.index, ticks - drag.origin, laneMinGap(), laneTotal());
     } else {
@@ -1269,6 +1322,12 @@ PLAYER_APP_JS = r"""
       return;
     }
     if (drag.part === "body") { laneShift(drag.id, drag.value, "자막 옮기기"); return; }
+    if (drag.part === "many") { laneShiftMany(drag.indices, drag.value); return; }
+    if (drag.neighbor >= 0) {
+      laneSetPair(drag.id, drag.part, drag.value, S.proj.cues[drag.neighbor][0],
+        drag.neighborValue);
+      return;
+    }
     laneSetEdge(drag.id, drag.part, drag.value);
   }
   function laneEdit(label, build) {
@@ -1292,6 +1351,39 @@ PLAYER_APP_JS = r"""
       return TL.cueSetTimes(S.doc, id, part === "start" ? at[1] : cue[2],
         part === "start" ? cue[3] : at[1]);
     });
+  }
+  // ⌥ 가장자리 — 두 줄을 한 번의 변경으로(실행 취소 한 번). 각 자리는 제 원본이어야 한다.
+  function laneSetPair(id, part, ticks, neighborId, neighborTicks) {
+    laneEdit("자막 경계 함께 옮기기(⌥)", function () {
+      var doc = S.doc;
+      [[id, part, ticks], [neighborId, part === "end" ? "start" : "end", neighborTicks]]
+        .forEach(function (move) {
+          var cue = rawCue(move[0]);
+          var at = TL.sourceMsAt(doc, move[2], move[1] === "start" ? TL.SIDE_START : TL.SIDE_END);
+          if (at[0] !== cue[1]) {
+            throw { tlError: true, message: "그 자리는 그 자막의 원본이 아니다" };
+          }
+          doc = TL.cueSetTimes(doc, move[0], move[1] === "start" ? at[1] : cue[2],
+            move[1] === "start" ? cue[3] : at[1]);
+        });
+      return doc;
+    });
+  }
+  function laneShiftMany(indices, deltaTicks) {
+    var ids = indices.map(function (i) { return S.proj.cues[i][0]; });
+    laneEdit("자막 " + ids.length + "개 옮기기", function () {
+      var ms = Math.round(deltaTicks / TL.msTicks(S.doc.facts));
+      return ids.reduce(function (doc, id) { return TL.cueShift(doc, id, ms); }, S.doc);
+    });
+  }
+  // ⌫ — 여러 줄을 한 번의 변경으로 지운다(실행 취소 한 번, 문서 연산 그대로).
+  function deletePicked() {
+    var ids = S.picked.slice();
+    laneEdit("자막 " + ids.length + "개 지우기", function () {
+      return ids.reduce(function (doc, id) { return TL.cueDelete(doc, id); }, S.doc);
+    });
+    clearPicked();
+    paintCues();
   }
   function laneShift(id, deltaTicks, label) {
     laneEdit(label, function () {
@@ -1544,8 +1636,11 @@ PLAYER_APP_JS = r"""
         focusCueText();
       };
     }
-    if (plain && ev.code === "Escape" && S.cue) {
-      return function () { S.cue = null; paintCues(); };
+    if (plain && ev.code === "Escape" && (S.cue || S.picked.length)) {
+      return function () { clearPicked(); paintCues(); requestLane(); };
+    }
+    if (plain && S.picked.length > 1 && (ev.code === "Delete" || ev.code === "Backspace")) {
+      return deletePicked;
     }
     if (plain && S.cue && (ev.code === "Delete" || ev.code === "Backspace")) {
       return function () { cueOp("delete", S.cue); };
@@ -1590,7 +1685,7 @@ PLAYER_APP_JS = r"""
     if (S.spans.length) { S.sel = TL.sourcePoint(S.doc, Math.min(frame, S.total - 1))[0]; }
     S.cursor = null;
     commitText();
-    S.cue = null;
+    clearPicked();
     seek(frame);
     if (playing) { play(); }
     if (S.rootEl) { S.rootEl.focus(); }
@@ -1606,6 +1701,18 @@ PLAYER_APP_JS = r"""
       rootEl.__tlBound = true;
       rootEl.addEventListener("keydown", onKey);
       rootEl.addEventListener("click", onClick);
+    }
+    // 「자막」 작업공간(W-87c, D152)이 자막 목록 · 입력칸을 재생기 밖(브라우저 열)으로 옮기면
+    // 키·누름이 뿌리까지 오지 않는다 — 밖에 있을 때만 같은 처리로 넘긴다(두 번 돌지 않게).
+    var body = rootEl.querySelector(".tl-cues-body");
+    if (body && !body.__tlBound) {
+      body.__tlBound = true;
+      body.addEventListener("keydown", function (ev) {
+        if (S.rootEl && !S.rootEl.contains(body)) { onKey(ev); }
+      });
+      body.addEventListener("click", function (ev) {
+        if (S.rootEl && !S.rootEl.contains(body)) { onClick(ev); }
+      });
     }
     decks().forEach(function (v) {
       if (v && !v.__tlBound) {
@@ -1651,7 +1758,7 @@ PLAYER_APP_JS = r"""
         var row = ev.target.closest ? ev.target.closest(".tl-cue-row") : null;
         if (!row) { return; }
         ev.preventDefault();
-        pickCue(row.getAttribute("data-cue"));
+        pickFromList(row.getAttribute("data-cue"), ev);
         // 누름 기본 동작을 막았으니 키(화살표·Enter·[ ])가 재생기로 오게 초점을 직접 둔다.
         if (S.rootEl) { S.rootEl.focus({ preventScroll: true }); }
       });

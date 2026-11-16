@@ -44,6 +44,10 @@ STORAGE_KEY = "vlogsrt.inspectorTab"
 FIT_STORAGE_KEY = "vlogsrt.fitWindow"
 FIT_ON = "on"
 SPLIT_STORAGE_KEY = "vlogsrt.trackSplit"
+CAPTIONS_ID = "vl-captions"
+WORKSPACE_STORAGE_KEY = "vlogsrt.workspace"
+BASIC, CAPTIONS = "basic", "captions"
+WORKSPACES: tuple[tuple[str, str], ...] = ((BASIC, "기본"), (CAPTIONS, "자막"))
 
 WINDOW_CORE_JS = r"""
 (function (root) {
@@ -120,6 +124,7 @@ _BIND_JS = r"""
     WIN.rootEl = rootEl;
     if (stage) { WIN.stageNode = stage; }
     ensureProgram();
+    placeCaptions();
   };
   // 타임라인이 없어지면(라이브러리 닫기 · 빈 모델) 뷰어 칸을 비우고 원본으로 돌아간다.
   WIN.releaseProgram = function () {
@@ -228,14 +233,25 @@ _BIND_JS = r"""
     });
   }
   var SPLITS = [
-    { key: "left", a: "browser", b: "viewer", elA: "vl-thumbs", elB: CFG.viewer, axis: "x",
+    { key: "left", a: "browser", b: "viewer", elA: ["vl-thumbs", CFG.captions], elB: CFG.viewer,
+      axis: "x",
       minA: "browser-min", minB: "viewer-min" },
     { key: "right", a: "viewer", b: "inspector", elA: CFG.viewer, elB: CFG.inspector, axis: "x",
       minA: "viewer-min", minB: "inspector-min" },
     // 위 덱의 높이는 브라우저 열이 잰다 — 그 열만 위 덱의 두 줄(뷰어 · 원본 레일)을 다 덮는다.
-    { key: "deck", a: "upper-deck", b: "lower-deck", elA: "vl-thumbs", elB: CFG.deck, axis: "y",
+    { key: "deck", a: "upper-deck", b: "lower-deck", elA: ["vl-thumbs", CFG.captions],
+      elB: CFG.deck, axis: "y",
       minA: "deck-min", minB: "deck-min" }
   ];
+  // 칸 이름 하나 또는 여럿(보이는 첫 칸 — 「자막」 작업공간이면 브라우저 열이 자막 칸이다).
+  function paneOf(ids) {
+    var list = typeof ids === "string" ? [ids] : ids;
+    for (var i = 0; i < list.length; i++) {
+      var el = $(list[i]);
+      if (el && el.offsetParent) { return el; }
+    }
+    return $(list[0]);
+  }
   function placeHandles() {
     var stage = $(CFG.stage);
     if (!stage) { return; }
@@ -251,8 +267,8 @@ _BIND_JS = r"""
         handle.addEventListener("pointerdown", function (ev) { startSplit(ev, split, handle); });
         stage.appendChild(handle);
       }
-      var a = $(split.elA);
-      var b = $(split.elB);
+      var a = paneOf(split.elA);
+      var b = paneOf(split.elB);
       var fit = stage.getAttribute("data-vl-fit") === CFG.fitOn;
       var show = a && b && a.offsetParent && b.offsetParent && (split.axis === "x" || fit);
       var ra = show ? a.getBoundingClientRect() : null;
@@ -274,8 +290,8 @@ _BIND_JS = r"""
   }
   function startSplit(ev, split, handle) {
     var stage = $(CFG.stage);
-    var a = $(split.elA);
-    var b = $(split.elB);
+    var a = paneOf(split.elA);
+    var b = paneOf(split.elB);
     if (!stage || !a || !b) { return; }
     ev.preventDefault();
     var saved = readSplit();
@@ -341,9 +357,16 @@ _BIND_JS = r"""
     if (!deck.querySelector(".vl-deck-tools")) {
       var tools = document.createElement("div");
       tools.className = "vl-deck-tools";
-      tools.innerHTML = '<button type="button" id="vl-fit-toggle" aria-pressed="false"' +
+      tools.innerHTML = '<span class="vl-workspaces" role="group" aria-label="작업공간">' +
+        CFG.workspaces.map(function (w) {
+          return '<button type="button" data-vl-workspace-pick="' + w[0] + '"' +
+            ' aria-pressed="false" title="작업공간 — ' + w[1] + '">' + w[1] + "</button>";
+        }).join("") + "</span>" +
+        '<button type="button" id="vl-fit-toggle" aria-pressed="false"' +
         ' title="위 덱 · 아래 덱을 화면 높이에 맞춰 나눈다(Final Cut 창처럼)">화면 맞춤</button>';
       tools.addEventListener("click", function (ev) {
+        var pick = ev.target.closest ? ev.target.closest("[data-vl-workspace-pick]") : null;
+        if (pick) { WIN.setWorkspace(pick.getAttribute("data-vl-workspace-pick")); return; }
         if (!(ev.target.closest && ev.target.closest("#vl-fit-toggle"))) { return; }
         writeFit(!readFit());
         paintFit();
@@ -352,6 +375,60 @@ _BIND_JS = r"""
     }
     paintFit();
   }
+  // ─── 작업공간(W-87c, D152) — 「기본」 · 「자막」(Subtitle Edit식). 「자막」이면 재생기의 자막
+  // 목록 · 입력칸(`.tl-cues-body`)을 노드째 브라우저 열의 자막 칸으로 옮기고(청취자 그대로) 뷰어는
+  // 타임라인, 아래 덱의 파형 레인은 키운다. 「기본」으로 오면 제자리(재생기의 자막 칸)로 돌린다.
+  function readWorkspace() {
+    try { return W.localStorage.getItem(CFG.workspaceKey) === CFG.captionsMode ? CFG.captionsMode
+      : CFG.basicMode; }
+    catch (error) { return CFG.basicMode; }
+  }
+  function writeWorkspace(key) {
+    try { W.localStorage.setItem(CFG.workspaceKey, key); } catch (error) { /* 편의 */ }
+  }
+  function captionsHolder() {
+    var holder = $(CFG.captions);
+    var stage = $(CFG.stage);
+    if (!holder && stage) {
+      holder = document.createElement("div");
+      holder.id = CFG.captions;
+      holder.setAttribute("data-vl-own-keys", "");
+      holder.setAttribute("aria-label", "자막 목록 · 입력칸");
+      stage.appendChild(holder);
+    }
+    return holder;
+  }
+  function placeCaptions() {
+    var key = readWorkspace();
+    var stage = $(CFG.stage);
+    if (stage) { stage.setAttribute("data-vl-workspace", key); }
+    var live = "#" + CFG.deck + " .tl-root:not(.tl-empty) ";
+    var deckBody = document.querySelector(live + ".tl-cues-body");
+    var holder = $(CFG.captions);
+    if (key === CFG.captionsMode) {
+      holder = captionsHolder();
+      if (holder && deckBody) {
+        while (holder.firstChild) { holder.removeChild(holder.firstChild); }
+        holder.appendChild(deckBody);
+      }
+    } else if (holder && holder.firstChild) {
+      var home = document.querySelector(live + ".tl-cues");
+      var moved = holder.querySelector(".tl-cues-body");
+      if (home && moved && !home.querySelector(".tl-cues-body")) { home.appendChild(moved); }
+      while (holder.firstChild) { holder.removeChild(holder.firstChild); }
+    }
+    Array.prototype.forEach.call(document.querySelectorAll("[data-vl-workspace-pick]"),
+      function (b) {
+        b.setAttribute("aria-pressed", b.getAttribute("data-vl-workspace-pick") === key
+          ? "true" : "false");
+      });
+  }
+  WIN.setWorkspace = function (key) {
+    writeWorkspace(key);
+    placeCaptions();
+    if (key === CFG.captionsMode && WIN.stageNode) { WIN.setMode(CFG.programMode); }
+    placeHandles();
+  };
   function settle() {
     if (!WIN.stageNode) {
       var found = document.querySelector("#" + CFG.deck + " .tl-root:not(.tl-empty)");
@@ -360,6 +437,7 @@ _BIND_JS = r"""
     if (WIN.stageNode && !WIN.stageNode.isConnected) { ensureProgram(); }
     ensureTabs();
     ensureFit();
+    placeCaptions();
     applySplit();
     placeHandles();
     watchSizes();
@@ -410,6 +488,11 @@ def window_bind_js() -> str:
         "fitKey": FIT_STORAGE_KEY,
         "fitOn": FIT_ON,
         "splitKey": SPLIT_STORAGE_KEY,
+        "captions": CAPTIONS_ID,
+        "workspaceKey": WORKSPACE_STORAGE_KEY,
+        "basicMode": BASIC,
+        "captionsMode": CAPTIONS,
+        "workspaces": [list(pair) for pair in WORKSPACES],
         "tabs": [[key, label, list(ids)] for key, label, ids in INSPECTOR_TABS],
     }
     return WINDOW_CORE_JS + _BIND_JS.replace("__CONFIG__", json.dumps(config, ensure_ascii=False))
@@ -451,6 +534,19 @@ def window_css() -> str:
 /* 화면 맞춤(W-86c, D150) — 덱 머리의 단추. 켜면(넓은 화면, 타임라인이 있을 때) 무대를
    화면 높이에 묶고 위 덱(재생기 줄)과 아래 덱을 토큰 비율로 나눈다 — 덱과 뷰어는 제 칸
    안에서 스크롤·맞춤한다. */
+/* 「자막」 작업공간(W-87c, D152) — 브라우저 열에 자막 목록 · 입력칸, 파형 레인을 키운다. 재생기가
+   없으면(자막 칸이 비면) 브라우저 그대로다. */
+#{CAPTIONS_ID} {{ display: none; }}
+#{STAGE_ID}[data-vl-workspace="{CAPTIONS}"]:has(#{CAPTIONS_ID} .tl-cues-body) #vl-thumbs {{
+  display: none; }}
+#{STAGE_ID}[data-vl-workspace="{CAPTIONS}"] #{CAPTIONS_ID}:has(.tl-cues-body) {{ display: flex;
+  grid-area: thumbs; flex-direction: column; min-width: 0; min-height: 0; overflow: auto; }}
+#{CAPTIONS_ID} .tl-cues-body {{ flex-direction: column; flex: 1 1 auto; min-height: 0; }}
+#{CAPTIONS_ID} .tl-cue-list {{ flex: 1 1 auto; max-height: none; min-height: 160px; }}
+#{STAGE_ID}[data-vl-workspace="{CAPTIONS}"] .tl-lane {{ height: var(--vl-caption-lane-h); }}
+.vl-workspaces {{ display: inline-flex; margin-right: auto; }}
+.vl-workspaces button + button {{ border-left: 0; }}
+.vl-workspaces button[aria-pressed="true"] {{ background: var(--vl-accent-soft); }}
 .vl-deck-tools {{ display: flex; justify-content: flex-end; gap: 6px; }}
 .vl-deck-tools button {{ font: inherit; font-size: 12px; padding: 1px 8px; border-radius: 4px;
   border: 1px solid var(--vl-line-strong); background: var(--vl-surface-raised);
