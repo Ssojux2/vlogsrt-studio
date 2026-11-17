@@ -20,7 +20,7 @@ import html
 import json
 from dataclasses import dataclass
 
-from ui import platform_keys
+from ui import platform_keys, window_js
 
 ANY, TIMELINE, CAPTIONS = "any", "timeline", "captions"
 PANE_LABELS = {ANY: "어디서나", TIMELINE: "타임라인", CAPTIONS: "자막"}
@@ -45,6 +45,12 @@ def _k(code: str, action: str, label: str, keys: str, pane: str = ANY, **flags: 
     return PlayerKey(code, action, label, keys, pane, **flags)
 
 
+# 자막 창 걸음의 이름 — 재생기는 설정(`captionStepMs` · `captionSmallStepMs`)의 값으로 걷고, 이름은
+# 그 기본값이다(이 모듈은 project 계층을 모른다 — 시험이 설정과 같음을 못 박는다).
+_STEP = "1초"
+_SMALL = "0.5초"
+
+
 PLAYER_KEYMAP: tuple[PlayerKey, ...] = (
     # 글 칸 안(확정 · 나가기)
     _k("Escape", "leave-text", "글 확정하고 나가기", "Esc", CAPTIONS, in_text=True),
@@ -53,6 +59,13 @@ PLAYER_KEYMAP: tuple[PlayerKey, ...] = (
     # 재생(어디서나 — Final Cut)
     _k("Space", "toggle", "재생 · 멈춤", "Space"),
     _k("KeyK", "stop", "멈춤", "K"),
+    _k("KeyJ", "shuttle-back", "거꾸로 재생(거듭 누르면 빨라진다)", "J"),
+    _k("KeyL", "shuttle-forward", "재생(거듭 누르면 빨라진다)", "L"),
+    # 자막 창의 ← · → 는 Subtitle Edit 걸음이다 — 창이 정한 줄이 「어디서나」 줄보다 먼저다.
+    _k("ArrowLeft", "cue-step-back", _STEP + " 뒤로", "←", CAPTIONS),
+    _k("ArrowRight", "cue-step-forward", _STEP + " 앞으로", "→", CAPTIONS),
+    _k("ArrowLeft", "cue-small-back", _SMALL + " 뒤로", "⌥←", CAPTIONS, alt=True),
+    _k("ArrowRight", "cue-small-forward", _SMALL + " 앞으로", "⌥→", CAPTIONS, alt=True),
     _k("ArrowLeft", "frame-back", "1프레임 뒤로", "←"),
     _k("ArrowRight", "frame-forward", "1프레임 앞으로", "→"),
     _k("ArrowLeft", "big-back", "10프레임 뒤로", "⇧←", shift=True),
@@ -66,10 +79,21 @@ PLAYER_KEYMAP: tuple[PlayerKey, ...] = (
     _k("KeyZ", "redo", "실행 복귀", "⌘⇧Z", mod=True, shift=True),
     _k("KeyS", "save", "지금 저장", "⌘S", mod=True, in_text=True),
     _k("Digit2", "index", "타임라인 인덱스", "⇧⌘2", mod=True, shift=True),
+    # 보기(어디서나 — Final Cut). ⌘= · ⌘− 는 브라우저 확대와 겹쳐 수식키 없는 짝을 함께 둔다.
+    _k("Equal", "zoom-in", "확대", "⌘=", mod=True),
+    _k("Equal", "zoom-in", "확대", "="),
+    _k("Minus", "zoom-out", "축소", "⌘−", mod=True),
+    _k("Minus", "zoom-out", "축소", "−"),
+    _k("KeyZ", "zoom-fit", "창에 맞추기", "⇧Z", shift=True),
+    _k("KeyN", "snapping", "스내핑 켜기 · 끄기", "N"),
+    _k("KeyE", "share", "공유(번인 캡션 칸으로)", "⌘E", mod=True),
     # 타임라인 창(클립 — Final Cut)
     _k("KeyB", "blade", "블레이드(플레이헤드에서 클립 자르기)", "⌘B", TIMELINE, mod=True),
-    _k("Backspace", "delete-clip", "삭제(고른 클립 — 뒤가 당겨 온다)", "⌫", TIMELINE),
-    _k("Delete", "delete-clip", "삭제(고른 클립 — 뒤가 당겨 온다)", "⌦", TIMELINE),
+    _k("Backspace", "delete-clip", "삭제(범위 또는 고른 클립 — 뒤가 당겨 온다)", "⌫", TIMELINE),
+    _k("Delete", "delete-clip", "삭제(범위 또는 고른 클립 — 뒤가 당겨 온다)", "⌦", TIMELINE),
+    _k("KeyI", "mark-in", "범위 시작 설정(플레이헤드)", "I", TIMELINE),
+    _k("KeyO", "mark-out", "범위 끝 설정(플레이헤드)", "O", TIMELINE),
+    _k("KeyX", "mark-clear", "범위 지우기", "⌥X", TIMELINE, alt=True),
     _k("BracketLeft", "trim-start", "클립 앞을 플레이헤드로", "⌥[", TIMELINE, alt=True),
     _k("BracketRight", "trim-end", "클립 뒤를 플레이헤드로", "⌥]", TIMELINE, alt=True),
     _k("KeyC", "cue-insert", "캡션 추가(플레이헤드에 빈 자막)", "⌥C", alt=True),
@@ -97,6 +121,16 @@ PLAYER_KEYMAP: tuple[PlayerKey, ...] = (
     _k("Enter", "edit-text", "입력칸으로", "Enter", CAPTIONS),
     _k("KeyT", "edit-text", "입력칸으로", "T", CAPTIONS),
     _k("KeyT", "edit-text", "입력칸으로", "⌘T", CAPTIONS, mod=True),
+    _k(
+        "KeyV",
+        "cue-split-caret",
+        "커서에서 줄 나누기",
+        "⌘⌥V",
+        CAPTIONS,
+        mod=True,
+        alt=True,
+        in_text=True,
+    ),
     _k("Backspace", "delete-cue", "고른 줄 지우기", "⌫", CAPTIONS),
     _k("Delete", "delete-cue", "고른 줄 지우기", "⌦", CAPTIONS),
     _k("Escape", "clear-cue", "고름 풀기", "Esc"),
@@ -106,19 +140,27 @@ KEYS_CORE_JS = r"""
 (function (root) {
   var K = root.__vlKeys || {};
   // 키 하나 → 동작 이름(없으면 null). 수식키는 정확히 같아야 하고(Mod = ⌘ 또는 Ctrl), 창은 그
-  // 줄의 창이거나 「any」, 글 칸 안이면 `inText` 줄만 맞는다. 표의 앞 줄이 먼저다.
+  // 줄의 창이거나 「any」, 글 칸 안이면 `inText` 줄만 맞는다. 그 창의 줄이 「any」 줄보다 먼저이고
+  // (자막 창의 ← · → 는 Subtitle Edit 걸음이다), 같은 창 안에서는 표의 앞 줄이 먼저다.
   K.match = function (table, ev, pane, inText) {
     var mod = !!(ev.metaKey || ev.ctrlKey);
     var code = ev.code || (ev.key === " " ? "Space" : "");
+    var fallback = null;
     for (var i = 0; i < table.length; i += 1) {
       var row = table[i];
       if (row.code !== code || row.mod !== mod || row.shift !== !!ev.shiftKey ||
         row.alt !== !!ev.altKey) { continue; }
       if (inText && !row.inText) { continue; }
-      if (row.pane !== "any" && row.pane !== pane) { continue; }
-      return row.action;
+      if (row.pane === pane) { return row.action; }
+      if (row.pane === "any" && fallback === null) { fallback = row.action; }
     }
-    return null;
+    return fallback;
+  };
+  // J · L 셔틀(Final Cut) — 같은 쪽을 거듭 누르면 다음 배속(끝에서 멈춘다), 다른 쪽이면 그 쪽 첫
+  // 배속. dir은 1(앞) · -1(뒤) · 0(멈춤)이다.
+  K.shuttle = function (state, dir, rates) {
+    var stepAt = state && state.dir === dir ? Math.min(state.step + 1, rates.length - 1) : 0;
+    return { dir: dir, step: stepAt, rate: rates[stepAt] };
   };
   root.__vlKeys = K;
   if (typeof module !== "undefined" && module.exports) { module.exports = K; }
@@ -163,6 +205,12 @@ def keysheet_html(platform: str | None = None) -> str:
             for label, keys in merged.items()
         )
         parts.append(f"<h4>{html.escape(PANE_LABELS[pane])}</h4><dl>{rows}</dl>")
+    windows = "".join(
+        f"<dt><kbd>{html.escape(platform_keys.display(keys, platform))}</kbd></dt>"
+        f"<dd>{html.escape(label)}</dd>"
+        for _code, _pane, label, keys in window_js.PANE_KEYS
+    )
+    parts.append(f"<h4>창 옮기기</h4><dl>{windows}</dl>")
     return (
         '<details class="tl-keys"><summary>단축키 — 마지막으로 누른 창이 정한다</summary>'
         f"{''.join(parts)}</details>"

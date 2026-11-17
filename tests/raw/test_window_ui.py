@@ -218,3 +218,53 @@ def test_many_picked_cues_move_and_delete_as_one_change() -> None:
         '"자막 " + ids.length + "개 지우기"',
     ):
         assert label in PLAYER_APP_JS
+
+
+_PANES = r"""
+const WIN = require(process.argv[2]);
+const table = JSON.parse(process.argv[3]);
+const ev = (code, o) => Object.assign({ code: code, metaKey: false, ctrlKey: false,
+  shiftKey: false, altKey: false }, o || {});
+console.log(JSON.stringify([
+  WIN.paneFor(table, ev("Digit1", { altKey: true }), false),
+  WIN.paneFor(table, ev("Digit2", { altKey: true }), false),
+  WIN.paneFor(table, ev("Digit3", { altKey: true }), false),
+  WIN.paneFor(table, ev("Digit4", { altKey: true }), false),
+  WIN.paneFor(table, ev("Digit5", { altKey: true }), false),
+  WIN.paneFor(table, ev("Digit1"), false),
+  WIN.paneFor(table, ev("Digit1", { altKey: true, metaKey: true }), false),
+  WIN.paneFor(table, ev("Digit1", { altKey: true }), true),
+]));
+"""
+
+
+@needs_node
+def test_alt_digits_move_to_the_final_cut_panes(tmp_path: Path) -> None:
+    """⌥1–4(Final Cut ⌘1–4 — 브라우저 · 타임라인 · 뷰어 · 인스펙터).
+
+    다른 수식키 · 글 칸 안은 아니다."""
+    core = tmp_path / "window.js"
+    core.write_text(window_js.WINDOW_CORE_JS, encoding="utf-8")
+    runner = tmp_path / "panes.js"
+    runner.write_text(_PANES, encoding="utf-8")
+    table = json.dumps([[code, pane] for code, pane, _l, _k in window_js.PANE_KEYS])
+    done = subprocess.run(
+        ["node", str(runner), str(core), table],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    assert json.loads(done.stdout) == [
+        "vl-thumbs",
+        window_js.DECK_ID,
+        window_js.VIEWER_ID,
+        window_js.INSPECTOR_ID,
+        None,
+        None,
+        None,
+        None,
+    ]
+    bind = window_js.window_bind_js()
+    assert '"paneKeys": [["Digit1", "vl-thumbs"]' in bind
+    assert "WIN.paneFor(CFG.paneKeys, ev, inText)" in bind

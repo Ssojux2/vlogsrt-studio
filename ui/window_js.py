@@ -47,6 +47,14 @@ CAPTIONS_ID = "vl-captions"
 WORKSPACE_STORAGE_KEY = "vlogsrt.workspace"
 BASIC, CAPTIONS = "basic", "captions"
 WORKSPACES: tuple[tuple[str, str], ...] = ((BASIC, "기본"), (CAPTIONS, "자막"))
+# 창 옮기기(Final Cut ⌘1–4: 브라우저 · 타임라인 · 뷰어 · 인스펙터) — ⌘1–4는 브라우저가 탭 바꾸기로
+# 먼저 가져가므로(페이지가 막지 못한다) ⌥1–4로 둔다. (키 코드, 칸 아이디, 이름, 표기)
+PANE_KEYS: tuple[tuple[str, str, str, str], ...] = (
+    ("Digit1", "vl-thumbs", "브라우저로", "⌥1"),
+    ("Digit2", DECK_ID, "타임라인으로", "⌥2"),
+    ("Digit3", VIEWER_ID, "뷰어로", "⌥3"),
+    ("Digit4", INSPECTOR_ID, "인스펙터로", "⌥4"),
+)
 
 WINDOW_CORE_JS = r"""
 (function (root) {
@@ -64,6 +72,14 @@ WINDOW_CORE_JS = r"""
     var a = Math.max(minA, Math.min(total - minB, pxA + delta));
     var fr = frA + frB;
     return [fr * a / total, fr * (total - a) / total];
+  };
+  // ⌥1–4 → 옮겨 갈 칸의 아이디(없으면 null). ⌥ 하나만 — 다른 수식키가 있거나 글 칸 안이면 아니다.
+  WIN.paneFor = function (table, ev, inText) {
+    if (inText || !ev.altKey || ev.metaKey || ev.ctrlKey || ev.shiftKey) { return null; }
+    for (var i = 0; i < table.length; i += 1) {
+      if (table[i][0] === ev.code) { return table[i][1]; }
+    }
+    return null;
   };
   root.__vlWindow = WIN;
   if (typeof module !== "undefined" && module.exports) { module.exports = WIN; }
@@ -460,6 +476,19 @@ _BIND_JS = r"""
     });
   }
   W.addEventListener("resize", function () { placeHandles(); });
+  // ⌥1–4 — 칸으로 초점을 옮긴다(타임라인은 클립 띠 — 재생기 키가 그 창의 뜻으로 받는다).
+  document.addEventListener("keydown", function (ev) {
+    var t = ev.target;
+    var inText = !!t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || ""));
+    var id = WIN.paneFor(CFG.paneKeys, ev, inText);
+    var pane = id ? $(id) : null;
+    if (!pane) { return; }
+    var target = (id === CFG.deck && pane.querySelector(".tl-strip")) || pane;
+    if (!target.hasAttribute("tabindex")) { target.setAttribute("tabindex", "-1"); }
+    target.focus({ preventScroll: false });
+    ev.preventDefault();
+    ev.stopPropagation();
+  }, true);
   if (typeof MutationObserver === "function") {
     var pending = false;
     new MutationObserver(function () {
@@ -493,6 +522,7 @@ def window_bind_js() -> str:
         "captionsMode": CAPTIONS,
         "workspaces": [list(pair) for pair in WORKSPACES],
         "tabs": [[key, label, list(ids)] for key, label, ids in INSPECTOR_TABS],
+        "paneKeys": [[code, pane] for code, pane, _label, _keys in PANE_KEYS],
     }
     return WINDOW_CORE_JS + _BIND_JS.replace("__CONFIG__", json.dumps(config, ensure_ascii=False))
 

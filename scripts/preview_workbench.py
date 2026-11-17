@@ -95,18 +95,13 @@ def _seed(folder: Path) -> Path:
     sys.path.insert(0, str(ROOT))
     import tests.raw.test_render_export as tre
     import tests.raw.test_review_workspace as trw
-    from vlogsrt.project.raw import service as raw_service
-    from vlogsrt.project.raw import timeline_edit_io, timing_engine
-    from vlogsrt.project.raw.config import TIMING_ENGINE_WHISPER
+    from vlogsrt.project.raw import timeline_edit_io
 
     tre.UTTERANCES.clear()
     tre.UTTERANCES.update({name: _speech(offset) for name, _, _, _, offset in SOURCES})
     for name, size, rate, created, _ in SOURCES:
         tre._encode(folder / name, size, rate, SECONDS, created=created)
     originals = {name: tre._identity(folder / name) for name in tre.UTTERANCES}
-    # 재생 픽스처는 whisper 응답 모양이다 — 새로 듣는 엔진을 whisper로 둔다(bench_workbench와 같다).
-    timing_engine.DEFAULT_NEW_HEARING_ENGINE = TIMING_ENGINE_WHISPER
-    raw_service.DEFAULT_NEW_HEARING_ENGINE = TIMING_ENGINE_WHISPER
     real = tre._write_replay_fixtures
 
     def more_windows(root: Path, sources: dict[str, Any]) -> None:

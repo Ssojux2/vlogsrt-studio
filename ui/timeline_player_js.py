@@ -26,6 +26,7 @@ PLAYER_APP_JS = r"""
   S.server = server;
   var POLL_MS = 2000;
   var TRANSLATION_KEY = "vlogsrt.translationMode";
+  var MS_PER_SECOND = 1000;
 
   function $(id) { return document.getElementById(id); }
   function clamp(value, low, high) { return Math.max(low, Math.min(high, value)); }
@@ -196,6 +197,7 @@ PLAYER_APP_JS = r"""
     if (!mediaOf(id)) { say("「" + nameOf(id) + "」의 미리보기가 아직 없습니다.", true); return; }
     S.playing = true;
     S.loopGen += 1;
+    v.playbackRate = shuttleRate();
     var started = v.play();
     if (started && started.catch) {
       started.catch(function () { S.playing = false; paintTransport(); });
@@ -204,7 +206,12 @@ PLAYER_APP_JS = r"""
     paintTransport();
   }
   function stopPlayback() {
-    decks().forEach(function (v) { if (v && !v.paused) { v.pause(); } });
+    stopReverse();
+    S.shuttle = null;
+    decks().forEach(function (v) {
+      if (v && !v.paused) { v.pause(); }
+      if (v) { v.playbackRate = 1; }
+    });
     S.playing = false;
     S.loopGen += 1;
     paintTransport();
@@ -282,8 +289,59 @@ PLAYER_APP_JS = r"""
     frameLoop(gen);
   }
   function step(frames) {
-    if (S.playing) { stopPlayback(); }
+    if (S.playing || reversing()) { stopPlayback(); }
     seek(S.playhead + frames);
+  }
+  // 자막 창의 ← · → (Subtitle Edit) — 밀리초 걸음을 시퀀스 프레임으로 옮겨 플레이헤드만 옮긴다.
+  // 재생 중이면 그 자리에서 이어 튼다(Subtitle Edit처럼).
+  function stepMs(ms) {
+    if (!S.doc) { return; }
+    var frames = Math.round(ms * TL.msTicks(S.doc.facts) / seqTicks());
+    var playing = S.playing;
+    if (playing || reversing()) { stopPlayback(); }
+    seek(S.playhead + frames);
+    if (playing && S.playhead < S.total) { play(); }
+  }
+
+  // ─── 셔틀(J · K · L — Final Cut) ───────────────────────────────
+  // 앞은 영상의 재생 배속이고, 뒤는 영상이 거꾸로 돌지 못해 `reverseTickMs`마다 그 배속만큼 뒤로
+  // 시크한다. 멈춤(K · Space · 프레임 걸음 · 컷 이동)은 배속을 1로 되돌린다.
+  function reversing() { return !!(S.shuttle && S.shuttle.dir < 0); }
+  function shuttleRate() { return S.shuttle && S.shuttle.dir > 0 ? S.shuttle.rate : 1; }
+  function shuttle(dir) {
+    if (!S.doc || !S.spans.length) { return; }
+    var next = KEYS.shuttle(S.shuttle, dir, S.settings.shuttleRates);
+    if (dir < 0 || reversing()) { stopPlayback(); }
+    S.shuttle = next;
+    if (dir < 0) {
+      startReverse();
+    } else {
+      decks().forEach(function (v) { if (v) { v.playbackRate = next.rate; } });
+      if (!S.playing) { play(); }
+    }
+    say((dir < 0 ? "◀ 거꾸로 " : "▶ ") + next.rate + "배 — K로 멈춥니다.", false);
+    paintTransport();
+  }
+  function startReverse() {
+    var gen = S.reverseGen;
+    var perSecond = laneRate() / seqTicks();
+    var tick = function () {
+      S.reverseTimer = null;
+      if (gen !== S.reverseGen || !reversing()) { return; }
+      if (!S.rootEl || S.rootEl.offsetParent === null || S.playhead <= 0) {
+        stopPlayback();
+        return;
+      }
+      var frames = Math.max(1,
+        Math.round(S.shuttle.rate * perSecond * S.settings.reverseTickMs / MS_PER_SECOND));
+      seek(S.playhead - frames);
+      S.reverseTimer = W.setTimeout(tick, S.settings.reverseTickMs);
+    };
+    tick();
+  }
+  function stopReverse() {
+    S.reverseGen = (S.reverseGen || 0) + 1;
+    if (S.reverseTimer) { W.clearTimeout(S.reverseTimer); S.reverseTimer = null; }
   }
   function cutPoints() { return S.spans.map(function (span) { return span.outStart; }); }
   function goCut(direction) {
@@ -293,11 +351,11 @@ PLAYER_APP_JS = r"""
       : points.filter(function (p) { return p < S.playhead; }).pop();
     if (target === undefined) { return; }
     var playing = S.playing;
-    if (playing) { stopPlayback(); }
+    if (playing || reversing()) { stopPlayback(); }
     seek(target);
     if (playing && target < S.total) { play(); }
   }
-  function toggle() { if (S.playing) { stopPlayback(); } else { play(); } }
+  function toggle() { if (S.playing || reversing()) { stopPlayback(); } else { play(); } }
 
   // ─── 준비 · 다시 묻기 ────────────────────────────────────────────
   function prepare() {
@@ -453,6 +511,16 @@ PLAYER_APP_JS = r"""
         g.restore();
       }
     });
+    var marked = rangeOf();
+    if (marked) {
+      g.globalAlpha = 0.3;
+      g.fillStyle = cssVar("--vl-accent");
+      g.fillRect(marked[0] / total * w, 0, (marked[1] - marked[0]) / total * w, h);
+      g.globalAlpha = 1;
+      g.fillStyle = cssVar("--vl-accent");
+      g.fillRect(marked[0] / total * w, 0, 2, h);
+      g.fillRect(marked[1] / total * w - 2, 0, 2, h);
+    }
     var px = S.playhead / total * w;
     g.fillStyle = cssVar("--vl-danger");
     g.fillRect(Math.round(px) - 1, 0, 2, h);
@@ -641,6 +709,102 @@ PLAYER_APP_JS = r"""
     S.cursor = null;
     change(out.doc, "클립 " + (number + 1) + " " + CLIP_EDIT_LABELS[op]);
     seek(out.playhead);
+  }
+
+  // ─── 범위(I · O · ⌥X — Final Cut): 타임라인 프레임 [시작, 끝) ──────
+  // 화면 상태일 뿐 문서·저장에 없다. 한쪽만 찍으면 다른 쪽은 타임라인 처음 · 끝이다. ⌫는 범위가
+  // 있으면 그 범위를 모델의 리플 삭제(`TL.rippleDelete`)로 지운다 — 뒤가 당겨 오고, 지운 원본
+  // 구간은 클립 지우기와 같이 문서의 뺀 구간으로 남아 되돌리기로 돌아온다.
+  function rangeOf() {
+    if (!S.range || !S.total) { return null; }
+    var lo = clamp(S.range.start === null ? 0 : S.range.start, 0, S.total);
+    var hi = clamp(S.range.end === null ? S.total : S.range.end, 0, S.total);
+    return lo < hi ? [lo, hi] : null;
+  }
+  function markRange(side) {
+    if (!S.doc || !S.total) { return; }
+    var range = S.range || { start: null, end: null };
+    if (side === "in") {
+      range.start = S.playhead;
+      if (range.end !== null && range.end <= range.start) { range.end = null; }
+    } else {
+      range.end = Math.min(S.total, S.playhead + 1);
+      if (range.start !== null && range.start >= range.end) { range.start = null; }
+    }
+    S.range = range;
+    var got = rangeOf();
+    say(got ? "범위 " + timecode(got[0]) + " – " + timecode(got[1]) + " · " + (got[1] - got[0]) +
+      "프레임 — ⌫로 지우고 ⌥X로 풉니다." : "범위가 비었습니다.", !got);
+    paint();
+  }
+  function clearRange() {
+    if (!S.range) { return false; }
+    S.range = null;
+    say("범위를 풀었습니다.", false);
+    paint();
+    return true;
+  }
+  function deleteRange() {
+    var got = rangeOf();
+    if (!got) { say("범위가 비었습니다 — I · O로 다시 찍으세요.", true); return; }
+    if (got[0] === 0 && got[1] === S.total) {
+      say("범위가 타임라인 전체라 지우지 않습니다 — 마지막 클립은 남깁니다.", true);
+      return;
+    }
+    var next;
+    try {
+      next = TL.rippleDelete(S.doc, got[0], got[1]);
+    } catch (error) {
+      if (!TL.isError(error)) { throw error; }
+      say("범위를 지우지 못했습니다 — " + error.message, true);
+      return;
+    }
+    S.range = null;
+    S.cursor = null;
+    var left = TL.editedFrames(next);
+    S.sel = TL.sourcePoint(next, Math.min(got[0], left - 1))[0];
+    change(next, "범위 " + (got[1] - got[0]) + "프레임 삭제");
+    seek(Math.min(got[0], left));
+  }
+
+  // ─── 보기(⌘= · ⌘− · ⇧Z · N — Final Cut): 파형 자막 레인의 줌 · 맞춤 · 스내핑 ──
+  // 클립 띠는 언제나 타임라인 전체라 줌은 레인의 보기다. 플레이헤드가 보이면 그 자리를 두고 넓힌다.
+  function zoomLane(factor) {
+    var c = laneCanvas();
+    if (!c || !S.doc) { return false; }
+    var view = laneView();
+    var rate = laneRate();
+    var width = c.clientWidth || c.width;
+    var x = LN.x(view, S.playhead * seqTicks());
+    S.lane = LN.zoom(view, factor, x >= 0 && x <= width ? x : width / 2,
+      rate / S.settings.zoomMaxPxPerS, rate / S.settings.zoomMinPxPerS);
+    requestLane();
+    return true;
+  }
+  function fitLane() {
+    var c = laneCanvas();
+    if (!c || !S.doc) { return false; }
+    var rate = laneRate();
+    S.lane = LN.fit(laneTotal(), c.clientWidth || c.width, rate / S.settings.zoomMaxPxPerS,
+      rate / S.settings.zoomMinPxPerS);
+    requestLane();
+    return true;
+  }
+  function toggleSnap() {
+    S.snapOff = !S.snapOff;
+    if (S.rootEl) { S.rootEl.setAttribute("data-tl-snap", S.snapOff ? "off" : "on"); }
+    say(S.snapOff
+      ? "스내핑을 껐습니다 — 자막 가장자리가 컷 경계에 붙지 않습니다(N으로 다시 켭니다)."
+      : "스내핑을 켰습니다 — 자막 가장자리가 컷 경계에 붙습니다(⇧를 누르면 그때만 끕니다).", false);
+    return true;
+  }
+  // ⌘E(Final Cut 「공유」) — 공유 칸(번인 캡션)으로 갈 뿐 렌더를 걸지 않는다. 거는 것은 단추다.
+  function focusShare() {
+    var pick = $("tl-burn");
+    if (!pick) { return false; }
+    pick.focus();
+    say("공유 — 번인 캡션을 고른 뒤 「공유」를 누르세요.", false);
+    return true;
   }
 
   // ─── 원본 넣기(W-71g): 클립이 없는 원본을 원본 전체 클립으로 ─────
@@ -1300,7 +1464,7 @@ PLAYER_APP_JS = r"""
     return clamp(Math.floor(ticks / seqTicks()), 0, Math.max(0, S.total - 1));
   }
   function onLaneDown(ev) {
-    if (!S.doc || !S.spans.length) { return; }
+    if (!S.doc || !S.spans.length || ev.button === 2) { return; }
     commitText();
     var view = laneView();
     var x = laneX(ev);
@@ -1356,7 +1520,8 @@ PLAYER_APP_JS = r"""
     var ticks = clamp(LN.ticksAt(view, x), 0, laneTotal());
     var cues = S.proj.cues;
     if (drag.part === "start" || drag.part === "end") {
-      var snapped = ev.shiftKey ? ticks : LN.snap(ticks, laneSnaps(), S.settings.snapPx * view.tpp);
+      var snapped = ev.shiftKey || S.snapOff ? ticks
+        : LN.snap(ticks, laneSnaps(), S.settings.snapPx * view.tpp);
       var paired = drag.pair ? LN.edgePair(cues, drag.index, drag.part, snapped, seqTicks()) : null;
       drag.neighbor = paired ? paired.neighbor : -1;
       drag.neighborValue = paired ? paired.neighborValue : null;
@@ -1625,6 +1790,12 @@ PLAYER_APP_JS = r"""
     var inText = editable(ev.target);
     if (inText && ev.target.id !== "tl-cue-text") { return; }
     var mod = ev.metaKey || ev.ctrlKey;
+    if (S.menu && ev.code === "Escape") {
+      ev.preventDefault();
+      ev.stopPropagation();
+      closeMenu();
+      return;
+    }
     var laneKey = ev.code === "Enter" || ev.code === "Escape";
     if (!inText && S.laneSel && !mod && !ev.altKey && laneKey) {
       ev.preventDefault();
@@ -1650,9 +1821,21 @@ PLAYER_APP_JS = r"""
       "go-start": function () { step(-S.total); }, "go-end": function () { step(S.total); },
       undo: function () { undo(false); }, redo: function () { undo(true); },
       save: function () { commitText(); saveNow(false); }, index: toggleIndex,
-      blade: function () { clipOp("blade"); }, "delete-clip": function () { clipOp("delete"); },
+      blade: function () { clipOp("blade"); },
+      "delete-clip": function () { if (S.range) { deleteRange(); } else { clipOp("delete"); } },
       "trim-start": function () { trimToCursor(TL.SIDE_START); },
       "trim-end": function () { trimToCursor(TL.SIDE_END); },
+      "shuttle-back": function () { shuttle(-1); },
+      "shuttle-forward": function () { shuttle(1); },
+      "cue-step-back": function () { stepMs(-S.settings.captionStepMs); },
+      "cue-step-forward": function () { stepMs(S.settings.captionStepMs); },
+      "cue-small-back": function () { stepMs(-S.settings.captionSmallStepMs); },
+      "cue-small-forward": function () { stepMs(S.settings.captionSmallStepMs); },
+      "zoom-in": function () { return zoomLane(S.settings.zoomStepPercent / 100); },
+      "zoom-out": function () { return zoomLane(100 / S.settings.zoomStepPercent); },
+      "zoom-fit": fitLane, snapping: toggleSnap, share: focusShare,
+      "mark-in": function () { markRange("in"); }, "mark-out": function () { markRange("out"); },
+      "mark-clear": clearRange, "cue-split-caret": splitAtCaret,
       "cue-insert": function () { commitText(); cueOp("insert"); },
       "cue-start": function () { cueOp("start"); }, "cue-end": function () { cueOp("end"); },
       "cue-split": function () { cueOp("split"); }, "cue-merge": function () { cueOp("merge"); },
@@ -1688,6 +1871,90 @@ PLAYER_APP_JS = r"""
     };
     return S.keyActions;
   }
+  // ⌘⌥V(Subtitle Edit 「커서 위치에서 줄 나누기」) — 글은 입력칸의 커서에서, 시각은 플레이헤드에서
+  // 나눈다. 고친 글을 먼저 확정하고, 나눈 뒤 입력칸을 다시 그린다 — 그러지 않으면 칸에 남은 온 글이
+  // 다음 확정에서 왼쪽 줄로 되돌아간다.
+  function splitAtCaret(ev) {
+    var area = ev && ev.target && ev.target.id === "tl-cue-text" ? ev.target : $("tl-cue-text");
+    var id = area ? area.getAttribute("data-cue") : null;
+    if (!area || !id) { return false; }
+    var caret = area.selectionStart;
+    commitText();
+    cueOp("split", id, caret);
+    paintCueEditor(true);
+    // 입력칸은 고치는 중이라 다시 그리기가 글을 덮지 않는다 — 나눈 왼쪽 글을 여기서 직접 넣는다.
+    var kept = S.doc.cues.filter(function (row) { return row[0] === id; })[0];
+    var fresh = $("tl-cue-text");
+    if (kept && fresh && fresh.getAttribute("data-cue") === id) {
+      fresh.value = kept[4];
+      fresh.setSelectionRange(fresh.value.length, fresh.value.length);
+    }
+    return true;
+  }
+
+  // ─── 오른쪽 누름 메뉴(Subtitle Edit) — 자막 목록 · 파형 레인 ──────────
+  // 누른 줄을 고르되 플레이헤드는 그대로 둔다(「종료점 설정」이 플레이헤드를 쓴다).
+  // 메뉴는 이 화면의 DOM 하나이고 동작은 키 · 단추와 같은 연산이다.
+  // 다른 곳을 누르거나 Esc면 닫힌다.
+  var MENU_ITEMS = [["start", "시작점 설정"], ["end", "종료점 설정"], ["split", "줄 나누기"],
+    ["merge", "다음 줄과 합치기"], ["extend", "다음 줄까지 늘리기"], ["delete", "지우기"]];
+  function openMenu(ev, id) {
+    ev.preventDefault();
+    closeMenu();
+    commitText();
+    // 입력칸에 초점이 있으면 고친 줄이 바뀌어도 칸이 옛 줄에 머문다 — 초점을 재생기로 옮긴다.
+    if (document.activeElement && document.activeElement.id === "tl-cue-text" && S.rootEl) {
+      S.rootEl.focus({ preventScroll: true });
+    }
+    var items = id ? MENU_ITEMS.slice() : [];
+    items.push(S.laneSel ? ["selection", "선택 영역에 새 자막 삽입"]
+      : ["insert", "플레이헤드에 새 자막"]);
+    if (id) {
+      S.cue = id;
+      S.picked = [id];
+      S.anchor = id;
+      paintCues();
+      requestLane();
+    }
+    var menu = document.createElement("div");
+    menu.className = "tl-menu";
+    menu.setAttribute("role", "menu");
+    menu.innerHTML = items.map(function (item) {
+      return '<button type="button" role="menuitem" data-menu="' + item[0] + '">' + esc(item[1]) +
+        "</button>";
+    }).join("");
+    menu.style.left = ev.clientX + "px";
+    menu.style.top = ev.clientY + "px";
+    menu.addEventListener("click", function (e) {
+      var button = e.target.closest ? e.target.closest("[data-menu]") : null;
+      if (button) { runMenu(button.getAttribute("data-menu"), id); }
+    });
+    document.body.appendChild(menu);
+    S.menu = menu;
+  }
+  function runMenu(action, id) {
+    closeMenu();
+    if (action === "selection") { insertSelection(); return; }
+    if (action === "insert") { cueOp("insert"); return; }
+    if (action === "extend") { S.cue = id; extendToNext(); return; }
+    cueOp(action, id);
+  }
+  function closeMenu() {
+    if (!S.menu) { return; }
+    if (S.menu.parentNode) { S.menu.parentNode.removeChild(S.menu); }
+    S.menu = null;
+  }
+  function onLaneMenu(ev) {
+    if (!S.doc || !S.spans.length) { return; }
+    var hit = LN.hit(S.proj.cues, laneView(), laneX(ev), S.settings.snapPx);
+    openMenu(ev, hit ? hit.id : null);
+  }
+  function onListMenu(ev) {
+    var row = ev.target.closest ? ev.target.closest(".tl-cue-row") : null;
+    if (!row || !S.doc) { return; }
+    openMenu(ev, row.getAttribute("data-cue"));
+  }
+
   // , · . — 고른 줄(여러 줄이면 함께)을 시퀀스 프레임만큼 민다. 이웃 · 최소 간격 · 끝 안에서만
   // (파형 몸통 끌기와 같은 계산 · 같은 문서 연산). 고른 줄이 없으면 할 일이 없다.
   function nudgeCues(frames) {
@@ -1831,15 +2098,17 @@ PLAYER_APP_JS = r"""
       lane.addEventListener("pointerup", onLaneUp);
       lane.addEventListener("pointercancel", onLaneUp);
       lane.addEventListener("wheel", onLaneWheel, { passive: false });
+      lane.addEventListener("contextmenu", onLaneMenu);
       if (W.ResizeObserver) { new W.ResizeObserver(requestLane).observe(lane); }
     }
     var list = $("tl-cue-list");
     if (list && !list.__tlBound) {
       list.__tlBound = true;
+      list.addEventListener("contextmenu", onListMenu);
       // 누르는 순간 고른다 — 글 칸이 먼저 확정되며 목록을 다시 지어도 누름을 잃지 않는다.
       list.addEventListener("pointerdown", function (ev) {
         var row = ev.target.closest ? ev.target.closest(".tl-cue-row") : null;
-        if (!row) { return; }
+        if (!row || ev.button === 2) { return; }
         ev.preventDefault();
         pickFromList(row.getAttribute("data-cue"), ev);
         // 누름 기본 동작을 막았으니 키(화살표·Enter·[ ])가 재생기로 오게 초점을 직접 둔다.
@@ -1865,6 +2134,13 @@ PLAYER_APP_JS = r"""
       commitText();
       if (S.dirty) { saveNow(false); }
     });
+    // 오른쪽 누름 메뉴는 메뉴 밖을 누르면 닫힌다(메뉴 안의 누름은 메뉴가 먼저 멈춘다).
+    document.addEventListener("pointerdown", function (ev) {
+      var menu = W.__vlTimelinePlayer && W.__vlTimelinePlayer.menu;
+      if (!menu || menu.contains(ev.target)) { return; }
+      if (menu.parentNode) { menu.parentNode.removeChild(menu); }
+      if (W.__vlTimelinePlayer) { W.__vlTimelinePlayer.menu = null; }
+    }, true);
     W.addEventListener("beforeunload", function (ev) {
       commitText();
       if (S.dirty) { ev.preventDefault(); ev.returnValue = ""; }

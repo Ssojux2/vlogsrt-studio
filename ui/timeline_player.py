@@ -252,6 +252,13 @@ TIMELINE_PLAYER_CSS = """
 .tl-burn { display: inline-flex; gap: 4px; align-items: center; font-size: 12px;
   color: var(--vl-ink-muted); }
 .tl-burn select { font: inherit; font-size: 12px; }
+/* 오른쪽 누름 메뉴(Subtitle Edit) — 문서 위에 뜬다(재생기 밖, 누른 자리). */
+.tl-menu { position: fixed; z-index: 1000; display: flex; flex-direction: column; min-width: 180px;
+  padding: 4px 0; background: var(--vl-surface-raised); border: 1px solid var(--vl-line-strong);
+  border-radius: 6px; box-shadow: var(--vl-shadow-pop); }
+.tl-menu button { text-align: left; padding: 6px 12px; border: 0; background: transparent;
+  color: var(--vl-ink); font: inherit; font-size: 13px; cursor: pointer; }
+.tl-menu button:hover, .tl-menu button:focus-visible { background: var(--vl-accent-soft); }
 .tl-cues { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
 .tl-cues-head { display: flex; gap: 6px; align-items: center; }
 .tl-cue-count { color: var(--vl-ink-muted); }

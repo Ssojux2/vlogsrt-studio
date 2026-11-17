@@ -30,6 +30,8 @@ def test_cue_limits_equal_refine_config() -> None:
         {"zoom_max_px_per_s": 1},
         {"zoom_step_percent": 100},
         {"shuttle_rates": ()},
+        {"caption_step_ms": 0},
+        {"caption_small_step_ms": -500},
         {"shuttle_rates": (1, 0)},
     ],
 )
@@ -41,5 +43,7 @@ def test_settings_refuse_broken_values(changes: dict) -> None:
 def test_client_settings_carry_every_number_for_the_browser() -> None:
     sent = client_settings()
     assert sent["shuttleRates"] == [1, 2, 4, 8]
+    # 자막 창의 ← · → · ⌥← · ⌥→ — Subtitle Edit 기본 걸음 그대로.
+    assert (sent["captionStepMs"], sent["captionSmallStepMs"]) == (1000, 500)
     assert sent["minDurationMs"] == 850
     assert all(isinstance(value, (int, list)) for value in sent.values())

@@ -85,5 +85,6 @@ def test_the_player_draws_the_lane_and_edits_only_through_document_operations() 
         "LN.snap(ticks, laneSnaps(), S.settings.snapPx * view.tpp)",
     ):
         assert needle in js, needle
-    # ⇧이면 스냅하지 않는다(Subtitle Edit) — 눌린 수식키를 확인한다.
-    assert "var snapped = ev.shiftKey ? ticks :" in js
+    # ⇧이면 스냅하지 않는다(Subtitle Edit) — 눌린 수식키를 확인한다. N으로 끈 스내핑(Final Cut,
+    # W-93)도 같은 자리에서 끈다.
+    assert "var snapped = ev.shiftKey || S.snapOff ? ticks" in js

@@ -34,6 +34,8 @@ class FinalEditSettings:
     - `lane_px_per_s`: 파형 자막 레인(W-87b)이 처음 보이는 1초의 화소 폭 — 줌 범위 안.
     - `big_step_frames`: Shift+화살표·Shift+밀기의 프레임 수.
     - `shuttle_rates`: L을 거듭 누를 때의 배속.
+    - `caption_step_ms`·`caption_small_step_ms`: 자막 창의 ←/→ · ⌥←/→ 한 걸음(Subtitle Edit 기본
+      1초 · 500 ms 그대로 — 재생기 화면이 데이터로 받는다).
     """
 
     min_duration_ms: int = 850
@@ -58,13 +60,16 @@ class FinalEditSettings:
     lane_px_per_s: int = 100
     big_step_frames: int = 10
     shuttle_rates: tuple[int, ...] = (1, 2, 4, 8)
+    caption_step_ms: int = 1000
+    caption_small_step_ms: int = 500
 
     def __post_init__(self) -> None:
         positive = (
             self.min_duration_ms, self.max_duration_ms, self.max_cps, self.undo_limit,
             self.min_clip_frames, self.max_text_chars, self.max_cues, self.autosave_ms,
             self.new_cue_ms, self.reverse_tick_ms, self.waveform_rate, self.waveform_bin_ms,
-            self.zoom_min_px_per_s, self.big_step_frames,
+            self.zoom_min_px_per_s, self.big_step_frames, self.caption_step_ms,
+            self.caption_small_step_ms,
         )  # fmt: skip
         if min(positive) <= 0 or self.min_gap_ms < 0 or self.coalesce_ms < 0 or self.snap_px < 0:
             raise ValueError("최종 편집 설정의 크기·한도는 양수여야 한다")
@@ -104,4 +109,6 @@ def client_settings(settings: FinalEditSettings = FINAL_EDIT_SETTINGS) -> dict[s
         "lanePxPerS": settings.lane_px_per_s,
         "bigStepFrames": settings.big_step_frames,
         "shuttleRates": list(settings.shuttle_rates),
+        "captionStepMs": settings.caption_step_ms,
+        "captionSmallStepMs": settings.caption_small_step_ms,
     }

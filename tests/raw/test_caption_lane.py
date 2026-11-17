@@ -144,3 +144,29 @@ def test_neighbor_edges_and_many_cues_move_inside_their_limits(tmp_path: Path) -
         {"picked": ["c"], "anchor": "c"},
         {"picked": ["c"], "anchor": "c"},
     ]
+
+
+_FIT = r"""
+const L = require(process.argv[2]);
+console.log(JSON.stringify([L.fit(30000, 300, 1, 1000), L.fit(30000, 0, 1, 1000),
+  L.fit(10, 300, 1, 1000)]));
+"""
+
+
+@needs_node
+def test_fit_shows_the_whole_timeline_inside_the_zoom_limits(tmp_path: Path) -> None:
+    """⇧Z(Final Cut 「창에 맞추기」) — 타임라인 전체가 레인 폭에 든다.
+
+    줌 한도 밖이면 한도에서 멈춘다."""
+    core = tmp_path / "lane.js"
+    core.write_text(caption_lane_js.CAPTION_LANE_JS, encoding="utf-8")
+    runner = tmp_path / "fit.js"
+    runner.write_text(_FIT, encoding="utf-8")
+    done = subprocess.run(
+        ["node", str(runner), str(core)], capture_output=True, text=True, check=True, timeout=30
+    )
+    assert json.loads(done.stdout) == [
+        {"start": 0, "tpp": 100},
+        {"start": 0, "tpp": 1000},
+        {"start": 0, "tpp": 1},
+    ]

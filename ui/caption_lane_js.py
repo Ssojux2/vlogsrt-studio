@@ -134,6 +134,11 @@ CAPTION_LANE_JS = r"""
     var anchor = L.ticksAt(view, anchorX);
     return { start: anchor - anchorX * tpp, tpp: tpp };
   };
+  // 창에 맞추기(⇧Z) — 타임라인 전체가 width 화소에 들게, 화소당 틱을 [minTpp, maxTpp] 안으로.
+  L.fit = function (total, width, minTpp, maxTpp) {
+    var tpp = Math.max(minTpp, Math.min(maxTpp, total / Math.max(1, width)));
+    return { start: 0, tpp: tpp };
+  };
   // 보이게 — ticks가 보기 밖이면 그 자리를 가운데로 옮긴 보기, 안이면 그대로.
   L.follow = function (view, ticks, width) {
     var x = L.x(view, ticks);

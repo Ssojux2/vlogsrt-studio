@@ -573,6 +573,12 @@ TIMELINE_CORE_JS = r"""
     if (best < 0) { return [text, ""]; }
     return [list.slice(0, best).join(""), list.slice(best + 1).join("")];
   };
+  // 커서에서 나누기(Subtitle Edit ⌘⌥V) — caret은 입력칸의 `selectionStart`(UTF-16 위치)라 글도
+  // 같은 단위로 자른다. 자른 자리의 공백만 떨군다(`splitText`와 같다).
+  TL.splitAt = function (text, caret) {
+    var at = Math.max(0, Math.min(text.length, Math.round(caret)));
+    return [text.slice(0, at).replace(/\s+$/, ""), text.slice(at).replace(/^\s+/, "")];
+  };
   function visibleIds(doc) { return TL.project(doc).cues.map(function (cue) { return cue[0]; }); }
   TL.cueAt = function (doc, playhead) {
     var t = playhead * TL.sequenceFrameTicks(doc.facts);
@@ -620,7 +626,9 @@ TIMELINE_CORE_JS = r"""
         cue: id };
     }
     if (op === "split") {
-      var parts = TL.splitText(cue[4]);
+      // text가 수면 그 커서에서(⌘⌥V), 아니면 줄바꿈 · 가운데 공백에서 글을 나눈다. 시각은 언제나
+      // 플레이헤드다 — 글 길이로 시각을 나누지 않는다(규칙 1).
+      var parts = typeof text === "number" ? TL.splitAt(cue[4], text) : TL.splitText(cue[4]);
       var at = playheadMs(doc, cue, playhead, SIDE_START);
       return { doc: TL.cueSplit(doc, id, at, parts[0], parts[1]), cue: id };
     }

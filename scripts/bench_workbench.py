@@ -44,9 +44,7 @@ from tests.raw.test_proposal_queue import _with_tiers  # noqa: E402
 from tests.raw.test_review_workspace import _wait_terminal  # noqa: E402
 from ui.workspace_service import STATUS_SENT_CELLS, RawWorkspaceUi  # noqa: E402
 from vlogsrt import log, preprocess  # noqa: E402
-from vlogsrt.project.raw import ingest, sync_report, timing_engine  # noqa: E402
-from vlogsrt.project.raw import service as RAW_SERVICE  # noqa: E402, N812
-from vlogsrt.project.raw.config import TIMING_ENGINE_WHISPER  # noqa: E402
+from vlogsrt.project.raw import ingest, sync_report  # noqa: E402
 from vlogsrt.project.raw.review_workspace import ReviewWorkspaceFacade  # noqa: E402
 from vlogsrt.project.raw.service import VISUAL_PREPARE_JOB_KIND, RawWorkspaceService  # noqa: E402
 
@@ -347,10 +345,6 @@ def main() -> int:
                 _read_only_upkeep(patch)
                 root = args.workspace.expanduser().resolve()
             else:
-                # 합성 재생 픽스처는 whisper 응답 모양이다 — 시험의 `built`처럼 새로 듣는 엔진을
-                # whisper로 둔다(D104 뒤로 이 길은 Gemini 재생 선언이 없어 깨져 있었다).
-                patch(timing_engine, "DEFAULT_NEW_HEARING_ENGINE", TIMING_ENGINE_WHISPER)
-                patch(RAW_SERVICE, "DEFAULT_NEW_HEARING_ENGINE", TIMING_ENGINE_WHISPER)
                 started = time.perf_counter()
                 root = fixture.build_workspace(base)
                 log.out(f"합성 작업공간 {time.perf_counter() - started:.1f}초: {root}")
