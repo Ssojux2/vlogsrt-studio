@@ -33,8 +33,10 @@ from vlogsrt import log, oscompat, preprocess
 from vlogsrt.project import sync_check
 from vlogsrt.project.config import (
     SYNC_CHECK_SETTINGS,
+    SYNC_REPORT_RETENTION,
     ProjectConfig,
     SyncCheckSettings,
+    SyncReportRetention,
     sync_check_settings_sha256,
     validate_sync_check_settings,
 )
@@ -986,12 +988,37 @@ def report_path(
 
 
 def write_report(
-    cache_root: Path, document: Mapping[str, Any], settings: SyncCheckSettings
+    cache_root: Path,
+    document: Mapping[str, Any],
+    settings: SyncCheckSettings,
+    *,
+    retention: SyncReportRetention = SYNC_REPORT_RETENTION,
 ) -> Path:
     source = document["source"]
     path = report_path(cache_root, source["source_id"], source["transcript_revision"], settings)
     _atomic_write(path, sync_check.report_json(document))
+    prune_reports(cache_root, source["source_id"], path, retention)
     return path
+
+
+def prune_reports(
+    cache_root: Path, source_id: str, kept: Path, retention: SyncReportRetention
+) -> None:
+    """그 원본의 보고서를 가장 새 `keep_per_source`개만 남긴다 — `kept`(방금 쓴 것)는 언제나 남는다.
+
+    리비전마다 쌓이던 보고서 정리(W-15F ⑧, D165). 지운 보고서는 표시만 하는 무료 측정이라 다음
+    확인이 다시 잰다. 보고서(`*.json`)만 보고, 사라진 파일(다른 쪽이 먼저 지움)은 넘어간다.
+    """
+    others = [path for path in (cache_root / "reports" / source_id).glob("*.json") if path != kept]
+    dated: list[tuple[float, Path]] = []
+    for path in others:
+        try:
+            dated.append((path.stat().st_mtime, path))
+        except FileNotFoundError:
+            continue
+    dated.sort(key=lambda item: item[0], reverse=True)
+    for _mtime, path in dated[retention.keep_per_source - 1 :]:
+        oscompat.unlink(path, missing_ok=True)
 
 
 def load_report(path: Path) -> dict[str, Any] | None:
