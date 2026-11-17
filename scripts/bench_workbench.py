@@ -211,7 +211,7 @@ def _actions(server: RawWorkspaceUi, root: Path, signature: str, counts: Counter
         _measure(
             "1초 상태 틱",
             counts,
-            lambda _i: server.status_tick(signature, None, None, None, None, *sent),
+            lambda _i: server.status_tick(signature, None, *sent),
             settled,
         )
     )
