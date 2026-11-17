@@ -80,6 +80,8 @@ def client_model(
             "cues": payload["cues"],
             "nextCue": payload["nextCue"],
             "seeded": payload["seeded"],
+            # 고친 영어(D166)는 있을 때만 — 없는 문서의 화면 모델은 예전 바이트 그대로다.
+            **({"english": payload["english"]} if "english" in payload else {}),
         },
         "names": names,
         "media": media["sources"],
@@ -315,6 +317,9 @@ TIMELINE_PLAYER_CSS = """
 .tl-cue-list.is-translation .tl-cue-row, .tl-cue-list.is-translation .tl-cue-grid-head {
   grid-template-columns: 2.5em 6.5em 6.5em 3.5em minmax(0, 1fr) minmax(0, 1fr) 3.5em 3.5em; }
 .tl-cue-en { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tl-cue-en.is-edited { color: var(--vl-accent-ink); }
+.tl-cue-en-edit { display: flex; flex-direction: column; gap: 2px; }
+.tl-cue-en-edit[hidden] { display: none; }
 .tl-cue-en.is-missing, .tl-cue-en-note.is-missing { color: var(--vl-ink-muted);
   font-style: italic; }
 #tl-translation[aria-pressed="true"] { background: var(--vl-accent-soft); }

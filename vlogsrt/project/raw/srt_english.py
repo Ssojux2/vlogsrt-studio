@@ -177,6 +177,13 @@ def english_payload(
 ) -> tuple[bytes, dict[str, Any]]:
     """저장된 번역 → 영어 SRT 바이트와 센 수. 같은 입력이면 같은 바이트다(쓴 파일과 대조한다)."""
     english = {str(key): str(value) for key, value in document["english"].items()}
+    return english_texts_payload(job, english, settings)
+
+
+def english_texts_payload(
+    job: SrtJob, english: dict[str, str], settings: TranslationSettings = TRANSLATION
+) -> tuple[bytes, dict[str, Any]]:
+    """{큐 번호: 영어} → 영어 SRT 바이트와 센 수 — 옮긴 글이 없는 큐가 있으면 거부한다(규칙 9)."""
     texts, counts = translation.english_cue_texts(
         [cue.text for cue in job.cues], english, settings.english_line_chars
     )
@@ -219,6 +226,18 @@ def write_english(
 ) -> dict[str, Any]:
     """조판해 입력 옆에 쓴다(못 쓰면 작업공간 `export/english/<시각>/`) — 결과 사실을 돌려준다."""
     payload, counts = english_payload(job, document, settings)
+    return place_english(service, root, job, payload, counts, settings)
+
+
+def place_english(
+    service: RawWorkspaceService,
+    root: Path,
+    job: SrtJob,
+    payload: bytes,
+    counts: dict[str, Any],
+    settings: TranslationSettings = TRANSLATION,
+) -> dict[str, Any]:
+    """영어 SRT 바이트를 입력 옆 새 이름에(같은 글이면 그 파일) — 못 쓰면 작업공간에."""
     stamp = datetime.now(UTC).strftime(STAMP_FORMAT)
     name = english_name(job.path)
     try:

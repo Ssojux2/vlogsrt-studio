@@ -33,6 +33,10 @@ class _Calls:
         self.written: list[Any] = []
 
 
+_DOC = SimpleNamespace(english=(), cues=())
+"""고친 영어가 없는 문서 — 글은 `srt_text` 대역이 정한다."""
+
+
 @pytest.fixture
 def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, _Calls]:
     folder = tmp_path / "export" / "20261116T000000Z"
@@ -43,7 +47,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, _Calls
     calls = _Calls()
     exported = SimpleNamespace(folder=folder, video=video, srt=srt)
     monkeypatch.setattr(timeline_render, "export_timeline", lambda *a, **k: exported)
-    monkeypatch.setattr(timeline_edit_io, "read_document", lambda root, tid: (tid, 4, "doc"))
+    monkeypatch.setattr(timeline_edit_io, "read_document", lambda root, tid: (tid, 4, _DOC))
     monkeypatch.setattr(timeline_edit, "srt_text", lambda document: SRT)
 
     def prepare(v: Path, k: Path, e: Path | None) -> str:
@@ -149,3 +153,75 @@ def test_a_revision_that_moved_while_rendering_is_not_burned(
 def test_unknown_modes_are_refused() -> None:
     with pytest.raises(RawWorkspaceError, match="번인 캡션"):
         timeline_share.require_mode("fr")
+
+
+# ─── 사람이 고친 영어(D166) ───────────────────────────────────────────────
+
+
+TWO = "1\n00:00:00,000 --> 00:00:01,000\n안녕\n\n2\n00:00:01,000 --> 00:00:02,000\n잘 가\n"
+
+
+def _service() -> Any:
+    """`srt_english.prepare`가 묻는 용어집과 작업공간 — 번역 열쇠만 짓는다(부르지 않는다)."""
+    return SimpleNamespace(
+        glossary=lambda root: SimpleNamespace(sha="g"),
+        _workspace=lambda root: SimpleNamespace(root=root),
+    )
+
+
+def _with_edits(
+    world: tuple[Path, _Calls], monkeypatch: pytest.MonkeyPatch, edits: dict, saved: dict | None
+) -> tuple[dict[str, Any], Path]:
+    root, _calls = world
+    srt = root / "export" / "20261116T000000Z" / "draft.srt"
+    srt.write_bytes(TWO.encode("utf-8"))
+    monkeypatch.setattr(timeline_edit, "srt_text", lambda document: TWO)
+    monkeypatch.setattr(timeline_share, "edited_by_number", lambda document: edits)
+    monkeypatch.setattr(srt_english, "cached", lambda s, r, j: saved)
+    monkeypatch.setattr(srt_english, "convert", lambda *a: pytest.fail("사지 않는다(D114)"))
+    facts = timeline_share.share(
+        _service(), root, "t1", 4, timeline_share.BURN_KOREAN_ENGLISH, STYLE
+    )
+    return facts, srt.with_name("draft.en.srt")
+
+
+def test_edited_english_alone_is_burned_when_it_covers_every_cue(
+    world: tuple[Path, _Calls], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    facts, english = _with_edits(world, monkeypatch, {"1": "Hi", "2": "Bye"}, None)
+    assert facts["english"] == timeline_share.ENGLISH_EDITED
+    assert world[1].prepared[0][2] == english
+    assert english.read_text(encoding="utf-8").split("\n")[2::4] == ["Hi", "Bye"]
+
+
+def test_edited_english_overrides_only_its_cue_of_the_saved_translation(
+    world: tuple[Path, _Calls], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    saved = {"english": {"1": "Hello", "2": "Goodbye"}}
+    facts, english = _with_edits(world, monkeypatch, {"2": "See you"}, saved)
+    assert facts["english"] == timeline_share.ENGLISH_EDITED
+    assert english.read_text(encoding="utf-8").split("\n")[2::4] == ["Hello", "See you"]
+
+
+def test_partial_edits_without_a_translation_burn_korean_only(
+    world: tuple[Path, _Calls], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    facts, english = _with_edits(world, monkeypatch, {"1": "Hi"}, None)
+    assert facts["english"] == timeline_share.ENGLISH_MISSING and not english.exists()
+    assert world[1].prepared[0][2] is None and world[1].burned
+
+
+def test_edits_are_numbered_by_the_rendered_srt_and_stale_or_hidden_ones_drop() -> None:
+    """번호는 렌더한 SRT 차례다 — 낡은 것(한국어가 바뀜)과 컷에 가려진 자막의 것은 쓰지 않는다."""
+    import json
+
+    from tests.raw.test_timeline_edit import case_facts
+    from tests.raw.test_timeline_edit_js import CASES
+
+    base = next(c for c in json.loads(CASES.read_text("utf-8")) if c["name"] == "cue set text")
+    payload = dict(base["doc"], english={"c1": ["옛 글", "old"], "c2": ["가려짐", "hidden"],
+                                        "c3": ["둘", "two"]})  # fmt: skip
+    document = timeline_edit.from_payload(payload, case_facts(base["facts"]))
+    rendered = [cue.utterance_id for cue in timeline_edit.render_cues(document)[0]]
+    assert "c2" not in rendered  # 가려졌다
+    assert timeline_share.edited_by_number(document) == {str(rendered.index("c3") + 1): "two"}

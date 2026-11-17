@@ -427,6 +427,7 @@ DOC_OPS = {
     "cue_split": te.cue_split,
     "cue_merge_next": te.cue_merge_next,
     "cue_insert": te.cue_insert,
+    "cue_set_english": te.cue_set_english,
 }
 
 
@@ -549,3 +550,21 @@ def test_add_source_refuses_past_the_cue_cap() -> None:
     )
     with pytest.raises(TimelineEditError, match="1개를 넘는다"):
         te.add_source(document, "b", ("rb", (_cue("u1", 0, 1, "둘"),)), tight)
+
+
+# ─── 사람이 고친 영어(D166) ─────────────────────────────────────────────────
+
+
+def test_edited_english_round_trips_and_an_unedited_document_keeps_its_old_shape() -> None:
+    cases = json.loads(CASES.read_text(encoding="utf-8"))
+    base = next(c for c in cases if c["name"] == "cue set text")
+    facts = case_facts(base["facts"])
+    plain = te.from_payload(base["doc"], facts)
+    assert "english" not in te.to_payload(plain)  # 저장 바이트가 예전 그대로다
+    edited = te.cue_set_english(plain, "c3", "two")
+    again = te.from_payload(te.to_payload(edited), facts)
+    assert again.english == (("c3", "둘", "two"),)
+    assert te.edited_english(again, again.cues[2]) == ("two", False)
+    stale = te.cue_set_text(again, "c3", "셋")
+    assert te.edited_english(stale, stale.cues[2]) == ("two", True)
+    assert te.srt_text(edited) == te.srt_text(plain)  # 한국어 SRT·시각은 그대로다

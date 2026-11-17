@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -64,8 +65,12 @@ def test_english_is_found_by_the_same_joined_text_the_translation_keyed(tmp_path
     assert json.loads(done.stdout) == ["Hello everyone", "Hello everyone", None, "", None, None]
 
 
-def test_translation_mode_adds_a_read_only_english_column() -> None:
-    """「번역 모드」 단추가 영어 열과 입력칸의 영어 줄을 붙인다 — 읽기만(문서 연산이 없다)."""
+def test_translation_mode_adds_an_english_column_edited_only_by_one_document_op() -> None:
+    """「번역 모드」가 영어 열과 입력칸의 영어 칸을 붙인다. 저장된 번역은 읽기만 하고, 고치기는
+    문서 연산 `TL.cueSetEnglish` 하나다(D166).
+
+    보이는 차례는 고친 것 · 저장된 번역 · 낡은 고친 것이다.
+    """
     from tests.raw.test_timeline_player_ui import TIERS, _media, _opened
     from ui.timeline_player import client_model
 
@@ -74,10 +79,18 @@ def test_translation_mode_adds_a_read_only_english_column() -> None:
     assert "번역 모드" in html
     body = PLAYER_APP_JS[PLAYER_APP_JS.index("function englishKey()") :]
     body = body[: body.index("function cell(")]
-    assert "TL." not in body.replace("TRANSLATION_KEY", "")
     assert "S.server.tl_english({ signature: S.signature, timelineId: asked })" in body
-    assert '(S.translation ? englishCell(row.text) : "")' in PLAYER_APP_JS
-    assert '<span id="tl-cue-en" class="tl-cue-en-note" hidden></span>' in PLAYER_APP_JS
+    assert set(re.findall(r"TL\.(\w+)\(", body)) == {"editedEnglish", "cueSetEnglish", "isError"}
+    label = body[body.index("function englishLabel(") : body.index("var ENGLISH_NOTE")]
+    order = [label.index(k) for k in ('kind: "edited"', 'kind: "saved"', 'kind: "stale"')]
+    assert order == sorted(order)
+    commit = body[body.index("function commitEnglish()") : body.index("function onEnglishKey(")]
+    assert 'getAttribute("data-shown")' in commit and "change(next," in commit
+    assert '(S.translation ? englishCell(row.id, row.text) : "")' in PLAYER_APP_JS
+    assert 'id="tl-cue-en-text"' in PLAYER_APP_JS
+    # 확정 자리(저장 · 렌더 · 고르기 · 메뉴 앞)는 모두 `commitText`를 지나고,
+    # 그것이 영어도 확정한다.
+    assert "function commitText() {\n    commitEnglish();" in PLAYER_APP_JS
     # 공유가 끝나면 새 초안의 영어를 다시 찾는다.
     done = PLAYER_APP_JS[PLAYER_APP_JS.index('showInspector("share"); }') :][:400]
     assert "S.english = null;" in done and "askEnglish();" in done

@@ -980,6 +980,7 @@ PLAYER_APP_JS = r"""
   }
   // 글 칸의 고친 글을 문서로 — 칸을 떠날 때(change)·⌘Enter·Esc, 그리고 저장·렌더·넣기 앞에서.
   function commitText() {
+    commitEnglish();
     var area = $("tl-cue-text");
     if (!area || !S.doc) { return; }
     var id = area.getAttribute("data-cue");
@@ -1039,7 +1040,7 @@ PLAYER_APP_JS = r"""
           '<span class="tl-cue-time">' + timecode(row.endFrame) + "</span>" +
           cell("tl-cue-num", row.bad.dur, row.seconds.toFixed(2)) +
           cell("tl-cue-words", row.bad.text, esc(CG.oneLine(row.text)) || "(빈 글)") +
-          (S.translation ? englishCell(row.text) : "") +
+          (S.translation ? englishCell(row.id, row.text) : "") +
           cell("tl-cue-num", row.bad.gap,
             row.gapSeconds === null ? "" : row.gapSeconds.toFixed(2)) +
           cell("tl-cue-num", row.bad.cps, row.cps === null ? "" : row.cps.toFixed(1)) + "</div>";
@@ -1075,18 +1076,61 @@ PLAYER_APP_JS = r"""
     if (!S.english) { return "none"; }
     return S.english === "pending" || S.english === "error" ? S.english : "ready";
   }
-  function englishLabel(text) {
-    if (S.english === "pending") { return { text: "찾는 중…", missing: true }; }
-    if (!S.english || S.english === "error") { return { text: "번역을 읽지 못함", missing: true }; }
-    var en = CG.englishOf(text, S.english.pairs);
-    if (en === null) { return { text: "번역 없음", missing: true }; }
-    return { text: en, missing: false };
+  // 사람이 고친 영어(D166)가 먼저다 — 낡지 않은 것, 저장된 번역, 낡은 고친 것(「낡음」) 차례.
+  // `kind`: edited · saved · stale · none · pending · error. `value`는 입력칸에 채울 영어다.
+  function englishLabel(id, text) {
+    var edit = TL.editedEnglish(S.doc, [id, null, 0, 0, text]);
+    if (edit && !edit.stale) { return { text: edit.text, value: edit.text, kind: "edited" }; }
+    var saved = S.english && S.english.pairs ? CG.englishOf(text, S.english.pairs) : null;
+    if (saved !== null && saved !== "") { return { text: saved, value: saved, kind: "saved" }; }
+    if (edit) { return { text: "낡음 · " + edit.text, value: edit.text, kind: "stale" }; }
+    if (S.english === "pending") { return { text: "찾는 중…", value: "", kind: "pending" }; }
+    if (!S.english || S.english === "error") {
+      return { text: "번역을 읽지 못함", value: "", kind: "error" };
+    }
+    return { text: saved === "" ? "" : "번역 없음", value: "", kind: "none" };
   }
-  function englishCell(text) {
-    var label = englishLabel(text);
-    return '<span class="tl-cue-en' + (label.missing ? " is-missing" : "") + '"' +
-      (label.missing ? ' title="글을 고쳤거나 아직 옮기지 않았습니다 — 공유 뒤 결과 카드의' +
-        ' 「영어 SRT로 변환」으로 옮깁니다"' : "") + ">" + esc(label.text) + "</span>";
+  var ENGLISH_NOTE = {
+    edited: "고친 영어 — 공유가 저장된 번역보다 먼저 씁니다",
+    saved: "저장된 번역 — 고치면 이 줄만 고친 영어로 씁니다",
+    stale: "낡음 — 한국어를 고친 뒤의 옛 영어입니다. 고치거나 비우세요",
+    none: "번역 없음 — 적으면 이 줄의 영어로 씁니다",
+    pending: "번역을 찾는 중…",
+    error: "저장된 번역을 읽지 못했습니다 — 적으면 이 줄의 영어로 씁니다" };
+  function englishCell(id, text) {
+    var label = englishLabel(id, text);
+    var muted = label.kind !== "edited" && label.kind !== "saved";
+    return '<span class="tl-cue-en' + (muted ? " is-missing" : "") +
+      (label.kind === "edited" ? " is-edited" : "") + '" title="' +
+      esc(ENGLISH_NOTE[label.kind]) + '">' + esc(label.text) + "</span>";
+  }
+  // 영어 입력칸 확정 — 보인 값과 다를 때만 문서 연산 하나(빈 값은 고친 영어를 뺀다).
+  function commitEnglish() {
+    var area = $("tl-cue-en-text");
+    if (!area || !S.doc || !S.translation) { return; }
+    var id = area.getAttribute("data-cue");
+    if (!id || !projectedCue(id)) { return; }
+    var value = area.value.replace(/\r/g, "").replace(/\n{2,}/g, "\n").replace(/^\n+|\n+$/g, "");
+    if (value === area.getAttribute("data-shown")) { return; }
+    if (!value.trim() && !(S.doc.english || {})[id]) { return; }
+    var next;
+    try {
+      next = TL.cueSetEnglish(S.doc, id, value, S.settings);
+    } catch (error) {
+      if (!TL.isError(error)) { throw error; }
+      say("영어 고치기 — 하지 못했습니다: " + error.message, true);
+      return;
+    }
+    area.setAttribute("data-shown", value);
+    change(next, (value.trim() ? "영어 고치기 " : "고친 영어 지우기 ") + id);
+    paint();
+  }
+  function onEnglishKey(ev) {
+    if (ev.code === "Escape" || (ev.code === "Enter" && (ev.metaKey || ev.ctrlKey))) {
+      ev.preventDefault();
+      commitEnglish();
+      if (S.rootEl) { S.rootEl.focus({ preventScroll: true }); }
+    }
   }
   function askEnglish() {
     S.english = "pending";
@@ -1185,7 +1229,8 @@ PLAYER_APP_JS = r"""
     var box = $("tl-cue-edit");
     if (!box || !S.doc) { return; }
     var area = $("tl-cue-text");
-    var typing = !!area && document.activeElement === area;
+    var typing = !!area && (document.activeElement === area ||
+      document.activeElement === $("tl-cue-en-text"));
     var id = targetCue();
     var cue = id ? projectedCue(id) : null;
     var same = box.__tlId === id && (!cue || !!area);
@@ -1197,6 +1242,11 @@ PLAYER_APP_JS = r"""
         " 없습니다 — 목록에서 고르거나 「새 자막」(⌥C)으로 넣으세요.</span>";
       var fresh = $("tl-cue-text");
       if (fresh) { fresh.addEventListener("change", commitText); }
+      var en = $("tl-cue-en-text");
+      if (en) {
+        en.addEventListener("change", commitEnglish);
+        en.addEventListener("keydown", onEnglishKey);
+      }
       ["tl-cue-start", "tl-cue-end"].forEach(function (name) {
         var input = $(name);
         if (input) { input.addEventListener("change", commitTime); }
@@ -1218,13 +1268,21 @@ PLAYER_APP_JS = r"""
     if (warn) { warn.textContent = warnText(id); }
     var text = $("tl-cue-text");
     if (text && !typing && text.value !== cue[4]) { text.value = cue[4]; }
+    paintEnglishEditor(id, cue);
+  }
+  function paintEnglishEditor(id, cue) {
+    var wrap = $("tl-cue-en-edit");
+    var area = $("tl-cue-en-text");
     var note = $("tl-cue-en");
-    if (note) {
-      note.hidden = !S.translation;
-      var label = englishLabel(cue[4]);
-      note.textContent = "영어 · " + label.text;
-      note.classList.toggle("is-missing", label.missing);
+    if (!wrap || !area || !note) { return; }
+    wrap.hidden = !S.translation;
+    var label = englishLabel(id, cue[4]);
+    if (document.activeElement !== area) {
+      area.value = label.value;
+      area.setAttribute("data-shown", label.value);
     }
+    note.textContent = ENGLISH_NOTE[label.kind];
+    note.classList.toggle("is-missing", label.kind !== "edited" && label.kind !== "saved");
   }
   // 입력칸의 시각·길이·문자/초·줄 길이(Subtitle Edit 입력칸) — 고치는 중인 칸은 덮지 않는다.
   function paintCueTimes(id, cue) {
@@ -1259,7 +1317,11 @@ PLAYER_APP_JS = r"""
       '<span id="tl-cue-warn" class="tl-cue-warn"></span>' +
       '<textarea id="tl-cue-text" data-cue="' + esc(id) + '" spellcheck="false"' +
       ' aria-label="자막 글 — ⌘Enter·Esc로 확정"></textarea>' +
-      '<span id="tl-cue-en" class="tl-cue-en-note" hidden></span>' +
+      '<div id="tl-cue-en-edit" class="tl-cue-en-edit" hidden>' +
+      '<textarea id="tl-cue-en-text" data-cue="' + esc(id) + '" spellcheck="true" lang="en"' +
+      ' aria-label="영어 — 고치면 이 줄의 영어로 씁니다. ⌘Enter·Esc로 확정"' +
+      ' placeholder="영어"></textarea>' +
+      '<span id="tl-cue-en" class="tl-cue-en-note"></span></div>' +
       '<div class="tl-cue-buttons">' +
       cueButton("cue-start", "시작을 여기로 [", "자막 시작을 플레이헤드로") +
       cueButton("cue-end", "끝을 여기로 ]", "자막 끝을 플레이헤드로") +
@@ -1737,7 +1799,10 @@ PLAYER_APP_JS = r"""
     S.saveTimer = W.setTimeout(function () { saveNow(false); }, S.settings.autosaveMs);
   }
   function docPayload() {
-    return { clips: S.doc.clips, cues: S.doc.cues, nextCue: S.doc.nextCue, seeded: S.doc.seeded };
+    var out = { clips: S.doc.clips, cues: S.doc.cues, nextCue: S.doc.nextCue,
+      seeded: S.doc.seeded };
+    if (S.doc.english) { out.english = S.doc.english; }  // 고친 영어(D166) — 없으면 예전 모양
+    return out;
   }
   function saveNow(force) {
     if (S.saveTimer) { W.clearTimeout(S.saveTimer); S.saveTimer = null; }

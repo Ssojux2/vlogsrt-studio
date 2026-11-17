@@ -24,18 +24,20 @@ RUNNER = r"""
 const TL = require(process.argv[2]);
 const cases = JSON.parse(require("fs").readFileSync(process.argv[3], "utf8"));
 const settings = JSON.parse(process.argv[4]);
-const SETTINGS_OPS = new Set(["set_clip_start", "set_clip_end", "cue_set_text"]);
+const SETTINGS_OPS = new Set(["set_clip_start", "set_clip_end", "cue_set_text", "cue_set_english"]);
 const NAMES = {
   blade: "blade", ripple_delete: "rippleDelete", delete_clips: "deleteClips",
   set_clip_start: "setClipStart", set_clip_end: "setClipEnd", join_clips: "joinClips",
   cue_set_times: "cueSetTimes", cue_shift: "cueShift", cue_set_text: "cueSetText",
   cue_delete: "cueDelete", cues_delete_inside: "cuesDeleteInside", cue_split: "cueSplit",
-  cue_merge_next: "cueMergeNext", cue_insert: "cueInsert",
+  cue_merge_next: "cueMergeNext", cue_insert: "cueInsert", cue_set_english: "cueSetEnglish",
   source_point: "sourcePoint", source_ms_at: "sourceMsAt", clip_bounds: "clipBounds",
   edited_ticks: "editedTicks",
 };
 function payload(doc) {
-  return { clips: doc.clips, cues: doc.cues, nextCue: doc.nextCue, seeded: doc.seeded };
+  const out = { clips: doc.clips, cues: doc.cues, nextCue: doc.nextCue, seeded: doc.seeded };
+  if (doc.english) { out.english = doc.english; }
+  return out;
 }
 function value(doc, c) {
   if (c.op === "layout") {

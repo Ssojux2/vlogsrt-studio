@@ -15,6 +15,9 @@ D118에 맞먹는 검사: 렌더한 `draft.srt`의 바이트가 그 리비전 �
 **영어는 공유 안에서 사지 않는다**(D114 — 번역은 사람이 따로 누르는 유료 단추): 지금 한국어 글을
 옮긴 영어 SRT가 옆에 있으면 쓰고, 없어도 같은 글의 번역이 작업공간에 저장돼 있으면 무료로 그 옆에
 써서 쓴다. 둘 다 없으면 한국어만 입히고 까닭을 남긴다.
+
+**사람이 고친 영어가 먼저다**(D166): 문서의 고친 영어 중 지금 한국어와 같은 글에 묶인 것(낡지 않은
+것)은 그 큐의 저장된 번역을 덮는다. 번역이 없어도 고친 영어가 보이는 큐를 다 덮으면 그것만으로 쓴다.
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ from vlogsrt.project.raw import (
     timeline_edit,
     timeline_edit_io,
     timeline_render,
+    translation,
 )
 from vlogsrt.project.raw.models import RawWorkspaceError
 
@@ -47,6 +51,7 @@ ENGLISH_OFF = "off"
 ENGLISH_USED = "used"
 ENGLISH_WRITTEN = "written"
 ENGLISH_MISSING = "missing"
+ENGLISH_EDITED = "edited"
 MISSING_ENGLISH_TEXT = (
     "이 글의 영어 번역이 아직 없어 한국어만 입혔습니다 — 「영어 SRT로 변환」을 누른 뒤"
     " 다시 공유하면 저장된 번역을 무료로 씁니다."
@@ -83,15 +88,17 @@ def share(
     }
     if mode == BURN_NONE:
         return facts
-    _require_rendered_text(root, timeline_id, revision, exported.srt)
-    english, facts["english"] = _english(service, root, exported.srt, mode)
+    document = _require_rendered_text(root, timeline_id, revision, exported.srt)
+    english, facts["english"] = _english(service, root, exported.srt, mode, document)
     job = burn_export.prepare(exported.video, exported.srt, english)
     facts["burned"] = burn_export.burn(service, root, job, style)
     return facts
 
 
-def _require_rendered_text(root: Path, timeline_id: str, revision: int, srt: Path) -> None:
-    """렌더한 SRT가 그 리비전 문서의 글과 바이트가 같은가(D118의 sha 검사와 같은 뜻)."""
+def _require_rendered_text(
+    root: Path, timeline_id: str, revision: int, srt: Path
+) -> timeline_edit.TimelineDocument:
+    """렌더한 SRT가 그 리비전 문서의 글과 바이트가 같은가(D118의 sha 검사와 같은 뜻) — 그 문서."""
     _name, current, document = timeline_edit_io.read_document(root, timeline_id)
     if current != revision:
         raise RawWorkspaceError(
@@ -104,21 +111,63 @@ def _require_rendered_text(root: Path, timeline_id: str, revision: int, srt: Pat
         raise RawWorkspaceError(
             f"렌더한 `{srt.name}`이 리비전 {revision}의 자막과 다르다 — 입히지 않았다(D118)"
         )
+    return document
 
 
 def _english(
-    service: RawWorkspaceService, root: Path, korean: Path, mode: str
+    service: RawWorkspaceService,
+    root: Path,
+    korean: Path,
+    mode: str,
+    document: timeline_edit.TimelineDocument,
 ) -> tuple[Path | None, str]:
-    """입힐 영어 SRT와 그 출처 — 사지 않는다(D114)."""
+    """입힐 영어 SRT와 그 출처 — 사지 않는다(D114). 고친 영어가 있으면 그것이 먼저다(D166)."""
     if mode != BURN_KOREAN_ENGLISH:
         return None, ENGLISH_OFF
+    edits = edited_by_number(document)
+    if edits:
+        return _english_with_edits(service, root, korean, edits)
     matched, _others = srt_english.matching_english(service, root, korean)
     if matched is not None:
         return matched, ENGLISH_USED
     job = srt_english.prepare(service, root, korean)
-    document = srt_english.cached(service, root, job)
-    if document is None:
+    saved = srt_english.cached(service, root, job)
+    if saved is None:
         log.warn(MISSING_ENGLISH_TEXT)
         return None, ENGLISH_MISSING
-    written = srt_english.write_english(service, root, job, document)
+    written = srt_english.write_english(service, root, job, saved)
     return Path(str(written["path"])), ENGLISH_WRITTEN
+
+
+def edited_by_number(document: timeline_edit.TimelineDocument) -> dict[str, str]:
+    """렌더한 SRT의 큐 번호(1부터) → 낡지 않은 고친 영어. 가려진 자막의 것은 들지 않는다."""
+    if not document.english:
+        return {}
+    cues = {cue.cue_id: cue for cue in document.cues}
+    fresh: dict[str, str] = {}
+    for cue_id, korean, english in document.english:
+        if cues[cue_id].text == korean:
+            fresh[cue_id] = english
+    rendered = timeline_edit.render_cues(document)[0]
+    return {
+        str(number): fresh[cue.utterance_id]
+        for number, cue in enumerate(rendered, start=1)
+        if cue.utterance_id in fresh
+    }
+
+
+def _english_with_edits(
+    service: RawWorkspaceService, root: Path, korean: Path, edits: dict[str, str]
+) -> tuple[Path | None, str]:
+    """저장된 번역(있으면)에 고친 영어를 덮어 쓴다 — 빈 큐가 남으면 한국어만(사지 않는다)."""
+    job = srt_english.prepare(service, root, korean)
+    saved = srt_english.cached(service, root, job)
+    english = {str(k): str(v) for k, v in (saved or {}).get("english", {}).items()}
+    english.update(edits)
+    try:
+        payload, counts = srt_english.english_texts_payload(job, english)
+    except translation.TranslationError:
+        log.warn(MISSING_ENGLISH_TEXT)
+        return None, ENGLISH_MISSING
+    written = srt_english.place_english(service, root, job, payload, counts)
+    return Path(str(written["path"])), ENGLISH_EDITED

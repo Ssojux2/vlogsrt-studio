@@ -6,7 +6,9 @@ Python과 정확히 같은 값을 확인한다. 서버는 저장마다 문서 �
 문서가 저장되지는 않는다. D117의 `CORE_JS`(`window.__vlFE`, 초안 위의 편집)와는 따로 산다.
 
 문서 모양: `{facts: {sequence: {num, den}, sources: [{id, num, den, frames}]}, clips: [[원본, 시작,
-끝]], cues: [[아이디, 원본, 시작 ms, 끝 ms, 글, 원본 줄]], nextCue, seeded: {원본: 리비전}}`.
+끝]], cues: [[아이디, 원본, 시작 ms, 끝 ms, 글, 원본 줄]], nextCue, seeded: {원본: 리비전},
+english?:
+{아이디: [고칠 때의 한국어, 영어]}}` — `english`는 사람이 고친 영어(D166)이고 없으면 칸이 없다.
 숫자 기준(최소 클립·글 길이·자막 경고)은 서버가 보낸 설정에서 온다(규칙 8).
 """
 
@@ -144,10 +146,30 @@ TIMELINE_CORE_JS = r"""
     }
     validateCues(doc, settings);
     if (!(doc.nextCue >= 1)) { throw fail("다음 자막 번호가 1보다 작다"); }
+    validateEnglish(doc, settings);
     var order = sourceOrder(doc.facts);
     Object.keys(doc.seeded || {}).forEach(function (id) {
       if (order[id] === undefined) { throw fail("심은 리비전의 원본이 사실에 없다"); }
     });
+  };
+  function validateEnglish(doc, settings) {
+    var ids = {};
+    doc.cues.forEach(function (cue) { ids[cue[0]] = true; });
+    Object.keys(doc.english || {}).forEach(function (id) {
+      var pair = doc.english[id];
+      if (!ids[id] || !Array.isArray(pair) || pair.length !== 2 ||
+          typeof pair[0] !== "string" || typeof pair[1] !== "string") {
+        throw fail("고친 영어가 없는 자막을 가리키거나 모양이 틀렸다");
+      }
+      if (!pair[1].trim()) { throw fail("고친 영어가 비었다"); }
+      validateText(pair[0], settings);
+      validateText(pair[1], settings);
+    });
+  }
+  // 그 자막의 고친 영어 — {text, stale}(고칠 때의 한국어가 지금 글과 다르면 낡음), 없으면 null.
+  TL.editedEnglish = function (doc, cue) {
+    var pair = (doc.english || {})[cue[0]];
+    return pair ? { text: pair[1], stale: pair[0] !== cue[4] } : null;
   };
 
   // ─── 배치 — 렌더 계획 `sequence_edges`와 같은 규칙 ─────────────────
@@ -395,8 +417,21 @@ TIMELINE_CORE_JS = r"""
     throw fail("자막이 없다: " + id);
   }
   function withCues(doc, cues, nextCue) {
-    return Object.assign({}, doc, { cues: sortedCues(doc.facts, cues),
+    var next = Object.assign({}, doc, { cues: sortedCues(doc.facts, cues),
       nextCue: nextCue === undefined ? doc.nextCue : nextCue });
+    return withEnglish(next, doc.english);
+  }
+  // 사라진 자막의 고친 영어를 뺀다 — 남은 것이 없으면 칸을 지운다(Python `to_payload`와 같은 모양).
+  function withEnglish(doc, english) {
+    var kept = {};
+    var any = false;
+    doc.cues.forEach(function (cue) {
+      if (english && english[cue[0]]) { kept[cue[0]] = english[cue[0]]; any = true; }
+    });
+    var out = Object.assign({}, doc);
+    delete out.english;
+    if (any) { out.english = kept; }
+    return out;
   }
   function checkTimes(doc, sourceId, startMs, endMs) {
     var limit = TL.sourceTotalMs(source(doc.facts, sourceId));
@@ -461,6 +496,18 @@ TIMELINE_CORE_JS = r"""
     var cues = doc.cues.filter(function (cue) { return cue !== second; })
       .map(function (cue) { return cue === first ? merged : cue; });
     return withCues(doc, cues);
+  };
+  // 그 자막의 영어를 사람이 고친다(D166) — 지금 한국어와 함께. 빈 영어면 고친 것을 뺀다.
+  TL.cueSetEnglish = function (doc, id, text, settings) {
+    var cue = doc.cues[cueIndex(doc, id)];
+    var english = Object.assign({}, doc.english || {});
+    if (text.trim()) {
+      validateText(text, settings);
+      english[id] = [cue[4], text];
+    } else {
+      delete english[id];
+    }
+    return withEnglish(doc, english);
   };
   TL.cueInsert = function (doc, sourceId, startMs, endMs, text) {
     checkTimes(doc, sourceId, startMs, endMs);
