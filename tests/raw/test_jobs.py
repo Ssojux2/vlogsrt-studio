@@ -378,6 +378,9 @@ def _open_descriptors() -> int:
         from ctypes import wintypes
 
         kernel = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        # 핸들은 64비트다 — 형을 적지 않으면 ctypes가 int로 잘라 호출이 실패(0)한다.
+        kernel.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel.GetProcessHandleCount.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
         count = wintypes.DWORD()
         assert kernel.GetProcessHandleCount(kernel.GetCurrentProcess(), ctypes.byref(count))
         return int(count.value)

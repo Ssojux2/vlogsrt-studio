@@ -229,10 +229,17 @@ def _fake_probe() -> Any:
 
 
 _REPORT_NICE = "import os, time; time.sleep(0.4); print(os.getpriority(os.PRIO_PROCESS, 0))"
-_REPORT_CLASS = (
-    "import ctypes, time; time.sleep(0.4); k = ctypes.windll.kernel32;"
-    " print(k.GetPriorityClass(k.GetCurrentProcess()))"
+_PRIORITY_CLASS = (
+    "import ctypes\n"
+    "from ctypes import wintypes\n"
+    "k = ctypes.windll.kernel32\n"
+    "k.GetCurrentProcess.restype = wintypes.HANDLE\n"
+    "k.GetPriorityClass.argtypes = [wintypes.HANDLE]\n"
+    "k.GetPriorityClass.restype = wintypes.DWORD\n"
+    "value = k.GetPriorityClass(k.GetCurrentProcess())\n"
 )
+"""Windows 우선순위 등급 — 핸들은 64비트라 형을 적는다(적지 않으면 ctypes가 잘라 0이 나왔다)."""
+_REPORT_CLASS = "import time\ntime.sleep(0.4)\n" + _PRIORITY_CLASS + "print(value)\n"
 _BELOW_NORMAL_CLASS = 0x4000
 """Windows에는 nice가 없다 — 「보통보다 낮음」 등급이 같은 양보다(`preprocess._launch`, D100 §1)."""
 
@@ -240,10 +247,9 @@ _BELOW_NORMAL_CLASS = 0x4000
 def _own_priority() -> int:
     """이 프로세스의 우선순위 — POSIX는 nice, Windows는 우선순위 등급."""
     if sys.platform == "win32":
-        import ctypes
-
-        kernel = ctypes.windll.kernel32  # type: ignore[attr-defined]
-        return int(kernel.GetPriorityClass(kernel.GetCurrentProcess()))
+        scope: dict[str, Any] = {}
+        exec(_PRIORITY_CLASS, scope)  # 자식과 같은 글로 잰다
+        return int(scope["value"])
     return os.getpriority(os.PRIO_PROCESS, 0)
 
 

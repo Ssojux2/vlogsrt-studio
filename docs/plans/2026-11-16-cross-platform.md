@@ -37,7 +37,7 @@
 
 ## W-84a 첫 묶음(2026-11-17, main `74de4ac`의 Windows CI — 239 failed · 6061 passed)
 
-ubuntu·macOS는 이미 초록이다. Windows 239개를 갈래마다 고쳤다(로컬 macOS에서 바뀐 시험 748개 통과 — Windows는 다음 CI가 잰다).
+ubuntu·macOS는 이미 초록이다. Windows 239개를 갈래마다 고쳤다 — 다음 CI(`b15247e`)에서 20개가 남았고 둘째 묶음이 이어 고쳤다(미디어 맵의 `C:\…`를 URI로 읽던 제품 버그 · 고정 sha 문서의 Windows URI · FIFO · ctypes 핸들 형 · 끝 공백 이름).
 
 **제품 버그(Windows에서만 드러났다)**
 

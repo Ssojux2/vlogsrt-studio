@@ -313,10 +313,13 @@ def test_device_as_original_is_rejected_before_opening(tmp_path: Path) -> None:
 def test_fifo_as_original_is_rejected_without_blocking(tmp_path: Path) -> None:
     """FIFO 원본은 열면 막힌다 — is_file 선검사로 열기 전에 거부한다."""
     fifo = tmp_path / "pipe.mp4"
-    os.mkfifo(str(fifo))
-    # 선검사가 없는 빨간 상태에서 해시 열기가 막히지 않도록, 곧 닫는 쓴이를 둔다.
-    writer = threading.Thread(target=lambda: os.close(os.open(str(fifo), os.O_WRONLY)), daemon=True)
-    writer.start()
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(str(fifo))
+        # 선검사가 없는 빨간 상태에서 해시 열기가 막히지 않도록, 곧 닫는 쓴이를 둔다.
+        target = lambda: os.close(os.open(str(fifo), os.O_WRONLY))  # noqa: E731
+        threading.Thread(target=target, daemon=True).start()
+    else:
+        fifo.mkdir()  # Windows에는 FIFO가 없다 — 일반 파일이 아닌 다른 자리로 같은 선검사를 본다
     document = parse_media_project(
         tmp_path, [asset("r2", rep(ORIGINAL, file_uri(fifo)))], clips("r2")
     )
@@ -878,3 +881,19 @@ def test_a_windows_drive_uri_path_loses_only_its_leading_slash(
     assert media_module._drive_path("/media/a.mov") == "/media/a.mov"
     assert media_module._drive_path("/가:/a") == "/가:/a"
     assert media_module._drive_path("/C:a") == "/C:a"  # 드라이브 상대는 URI 꼴이 아니다
+
+
+def test_a_windows_drive_path_in_the_media_map_is_not_a_uri(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`urlparse("C:\\\\a.mov").scheme`은 `c`다 — Windows에서는 드라이브지 URI가 아니다(W-84a)."""
+    from pathlib import PureWindowsPath
+
+    from vlogsrt.project import media as media_module
+
+    assert media_module._is_windows_drive("C:\\a.mov") is (os.name == "nt")
+    monkeypatch.setattr(media_module, "Path", PureWindowsPath)
+    assert media_module._is_windows_drive("C:\\a.mov")
+    assert media_module._is_windows_drive("d:/a.mov")
+    assert not media_module._is_windows_drive("file:///C:/a.mov")
+    assert not media_module._is_windows_drive("C:a.mov")  # 드라이브 상대는 받지 않는다

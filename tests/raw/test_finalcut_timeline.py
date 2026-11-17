@@ -26,7 +26,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import replace
 from datetime import datetime
 from fractions import Fraction
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -55,10 +55,25 @@ NTSC = F(1001, 30000)
 BT709 = ("bt709", "bt709", "bt709")
 
 
+_NATIVE_TO_POSIX_URI: dict[str, str] = {}
+"""`os_absolute`가 지은 경로의 이 운영체제 URI → 원래 POSIX URI(바이트 고정 시험이 되돌린다)."""
+
+
 def os_absolute(posix: str) -> Path:
     """POSIX 꼴 가짜 경로를 이 운영체제의 절대 경로로 — Windows에서 `/Users/…`는 드라이브가 없어
     절대 경로가 아니다(제품의 검사가 맞다). macOS·Linux에서는 그대로다."""
-    return Path(os.path.abspath(posix))
+    path = Path(os.path.abspath(posix))
+    _NATIVE_TO_POSIX_URI[path.as_uri()] = PurePosixPath(posix).as_uri()
+    return path
+
+
+def posix_render(document: ft.TimelineDocument) -> bytes:
+    """문서 바이트 — 고정한 sha는 macOS에서 잰 것이라 Windows의 `file:///D:/…`를 POSIX URI로
+    되돌린 뒤 견준다(W-84a). POSIX에서는 `ft.render` 그대로다."""
+    raw = ft.render(document)
+    for native, posix in sorted(_NATIVE_TO_POSIX_URI.items(), key=lambda item: -len(item[0])):
+        raw = raw.replace(native.encode(), posix.encode())
+    return raw
 
 
 BUNDLE = os_absolute("/Users/ssojux2/Movies/test_dir/260810_wangbang.fcpbundle")
@@ -1262,7 +1277,7 @@ def test_single_orientation_documents_keep_the_w16_sequence_format(name: str) ->
 
 
 def test_single_orientation_bytes_match_the_pre_w26_render() -> None:
-    assert hashlib.sha256(ft.render(one_side_document())).hexdigest() == ONE_SIDE_SHA256
+    assert hashlib.sha256(posix_render(one_side_document())).hexdigest() == ONE_SIDE_SHA256
 
 
 # ─── 11c. 프레임레이트가 섞이면 많은 쪽 레이트 하나로 (W-27d, D71) ─────────────
@@ -1336,7 +1351,7 @@ def test_conform_rate_spellings_cover_every_supported_rate() -> None:
 @pytest.mark.parametrize("name", sorted(SINGLE_RATE_SHA256))
 def test_single_rate_documents_keep_their_pre_w27d_bytes(name: str) -> None:
     document = one_side_document() if name == "one_side" else EDGE_DOCUMENTS[name]()
-    raw = ft.render(document)
+    raw = posix_render(document)
     assert hashlib.sha256(raw).hexdigest() == SINGLE_RATE_SHA256[name]
     assert b"conform-rate" not in raw
     assert all(not source.sequence_frames for source in document.sources)

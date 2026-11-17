@@ -155,7 +155,7 @@ def _map_path(entry: dict, key: str, position: int, where: str, base: Path) -> P
             " — 비지 않은 경로 문자열이어야 한다"
         )
     scheme = urlparse(value).scheme
-    if scheme:
+    if scheme and not _is_windows_drive(value):
         # 스킴이 파싱되면 URI다 — file:·http:·data: 그 무엇이든 경로가 아니다.
         raise ValueError(
             f"{where}: 미디어 맵 항목 {position}의 {key}가 URI다: {value!r}"
@@ -323,6 +323,16 @@ def _file_uri_to_path(src: str, where: str) -> Path:
         # XML의 자리는 문서 자신뿐이다 — 상대 경로를 cwd로 풀면 문서 밖 상태가 새어 든다.
         raise UnsupportedProject(where, f"file URI가 상대 경로다: {src} — 절대 경로여야 한다")
     return path
+
+
+def _is_windows_drive(value: str) -> bool:
+    """Windows의 `C:\\…`·`C:/…` — `urlparse`는 드라이브 글자를 한 글자 스킴(`c`)으로 읽는다(W-84a).
+
+    POSIX에서는 언제나 거짓이다 — 거기서 `c:…`는 경로가 아니라 URI 꼴이다.
+    """
+    letter, colon, rest = value[:1], value[1:2], value[2:3]
+    drive = letter.isascii() and letter.isalpha() and colon == ":" and rest in ("\\", "/")
+    return drive and isinstance(Path(), PureWindowsPath)
 
 
 def _drive_path(decoded: str) -> str:

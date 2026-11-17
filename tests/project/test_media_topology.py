@@ -603,8 +603,10 @@ def test_grant_roots_keep_their_exact_characters(
     커버리지를 계산한다(공백 정리가 정당한 경로를 부수는 회귀를 잡는다)."""
     from vlogsrt.project import commands as project_commands
 
-    # Windows는 이름 끝 공백을 지운다 — 앞 공백은 지키므로 거기서는 앞 공백으로 같은 것을 본다.
-    trailing = tmp_path / ("media root trailing " if os.name == "posix" else " media root leading")
+    # Windows는 이름 끝의 보통 공백을 지운다 — 줄바꿈 없는 공백(U+00A0)은 지키고 `strip`도 지운다.
+    trailing = tmp_path / (
+        "media root trailing " if os.name == "posix" else "media root trailing\u00a0"
+    )
     trailing.mkdir()
     unicode_root = tmp_path / "미디어 루트 한글"
     unicode_root.mkdir()

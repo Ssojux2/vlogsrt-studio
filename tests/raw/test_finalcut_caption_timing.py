@@ -26,6 +26,7 @@ from tests.raw.test_finalcut_timeline import (
     needs_installed_dtd,
     needs_xmllint,
     parsed,
+    posix_render,
     real_like_sources,
     spine_clips,
 )
@@ -73,7 +74,8 @@ def keywords(clip: ET.Element) -> list[str]:
 @pytest.mark.parametrize("name", sorted(EDGE_DOCUMENTS))
 def test_without_flags_the_documents_are_byte_identical_to_w16(name: str) -> None:
     assert (
-        hashlib.sha256(ft.render(EDGE_DOCUMENTS[name]())).hexdigest() == (W16_DOCUMENT_SHA256[name])
+        hashlib.sha256(posix_render(EDGE_DOCUMENTS[name]())).hexdigest()
+        == W16_DOCUMENT_SHA256[name]
     )
     empty = ft.plan(
         real_like_sources(), title=TITLE, library_bundle=BUNDLE, caption_timing=frozenset()
