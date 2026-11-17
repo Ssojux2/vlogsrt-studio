@@ -19,7 +19,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import shutil
 import sqlite3
 import subprocess
@@ -38,6 +37,7 @@ pytest.importorskip(
 
 import gradio as gr  # noqa: E402
 
+from tests.raw.gemini_echo import write_utterance_replay
 from ui import ui_facade, workspace_service  # noqa: E402
 from vlogsrt.project.raw import service as raw_service  # noqa: E402
 from vlogsrt.project.raw.models import PlannedInterval  # noqa: E402
@@ -156,19 +156,14 @@ def _prepare(
         }
         fixtures = root / "analysis" / "replay"
         fixtures.mkdir(parents=True, exist_ok=True)
-        (fixtures / "asr-fixtures.json").write_text(
-            json.dumps(
-                {
-                    "sources": {
-                        shas[assets["발화.mov"]]: [
-                            {"start": 0.8, "end": 2.0, "text": "도착해서 일정 설명"},
-                            {"start": 2.5, "end": 3.4, "text": "다음 장소 안내"},
-                        ]
-                    }
-                },
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
+        write_utterance_replay(
+            fixtures,
+            {
+                shas[assets["발화.mov"]]: [
+                    {"start": 0.8, "end": 2.0, "text": "도착해서 일정 설명"},
+                    {"start": 2.7, "end": 3.4, "text": "다음 장소 안내"},
+                ]
+            },
         )
         analysis = server.raw.start_analysis(root)
         analysis_record = _wait_terminal(server, root, analysis.job_id)

@@ -17,9 +17,6 @@ from vlogsrt.project.raw.review_workspace import ReviewWorkspaceFacade
 from vlogsrt.project.raw.service import RawWorkspaceError, RawWorkspaceService
 from vlogsrt.project.timebase import parse_fcpx_time
 
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
-
 
 @pytest.fixture
 def d80_export(monkeypatch: pytest.MonkeyPatch) -> None:

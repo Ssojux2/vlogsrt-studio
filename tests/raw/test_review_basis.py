@@ -10,15 +10,11 @@ from __future__ import annotations
 
 import sqlite3
 
-import pytest
-
 from tests.raw.test_background_library import setup_library
 from tests.raw.test_review_workspace import _wait_terminal
 from tests.raw.test_selection_analysis import wait_until
 from vlogsrt.project.raw.review_workspace import carried_basis
 from vlogsrt.project.raw.workspace import DB_NAME
-
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
 
 
 def _review_jobs(ui, root) -> list:

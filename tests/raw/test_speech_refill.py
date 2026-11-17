@@ -381,7 +381,7 @@ def test_an_unmeasurable_report_says_so_instead_of_waiting(gapped: tuple[Any, Pa
 
 
 def test_a_source_heard_by_whisper_is_refused_and_sends_nothing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, whisper_for_new_hearings: None
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """whisper로 들은 원본은 빈칸을 새로 묻지 않는다(D163) — 범위도 실행도 같은 이유로 닫힌다."""
     numpy_or_fake(monkeypatch)
@@ -408,7 +408,11 @@ def test_a_source_heard_by_whisper_is_refused_and_sends_nothing(
 
 
 def _whisper_heard_workspace(tmp_path: Path) -> tuple[Any, Path, str]:
-    """덩어리 둘을 뺀 원본 자막을 whisper 모양 재생으로 들은 작업공간(새로 듣는 엔진 = whisper)."""
+    """덩어리 둘을 뺀 원본 자막을 whisper 모양 재생으로 들은 작업공간 — 옛 whisper 원본(D163).
+
+    새로 듣는 엔진은 Gemini뿐이라, 그 원본의 차례를 whisper로 고정해 은퇴 전에 들은 원본을 만든다.
+    whisper 차례의 재생은 whisper 모양 발화 선언(`asr-fixtures.json`)을 읽는다.
+    """
     card = tmp_path / "card"
     make_media(card / "tone.mov")
     root = tmp_path / "ws"
@@ -433,6 +437,7 @@ def _whisper_heard_workspace(tmp_path: Path) -> tuple[Any, Path, str]:
     (replay / "asr-fixtures.json").write_text(json.dumps(sources), "utf-8")
     luna = {f"window_{i:06d}": _luna(f"window_{i:06d}") for i in range(12)}
     (replay / "luna-fixtures.json").write_text(json.dumps({"windows": luna}), "utf-8")
+    timing_engine.pin(service._workspace(root), asset.asset_id, 0, TIMING_ENGINE_WHISPER)
     assert wait(service, root, service.start_analysis(root).job_id).status == "succeeded"
     wait_sync(service, root)
     return service, root, asset.asset_id

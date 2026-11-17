@@ -20,9 +20,6 @@ from vlogsrt.project.raw.config import OPENAI_LUNA_MODEL, TIMING_ENGINE_GEMINI
 from vlogsrt.project.raw.segment_review import unreviewed_auto_exclusions
 from vlogsrt.project.raw.service import RawWorkspaceError
 
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
-
 
 class SuitabilityClient:
     def __init__(self, pause_second: bool = False):
@@ -88,8 +85,7 @@ def keep_luna(server: RawWorkspaceUi) -> None:
 def keep_whisper_only(server: RawWorkspaceUi) -> None:
     """실제(가짜) 호출 흐름 시험 — 처음 듣는 영상을 Gemini 시간 엔진으로 듣는 작업공간(D163).
 
-    whisper는 은퇴해 실제 1단계는 Gemini 문으로만 듣는다. 이 파일의 재생 시험은 whisper 모양
-    선언을 쓰므로(`whisper_for_new_hearings`) 실제 호출 흐름의 작업공간만 Gemini로 둔다.
+    whisper는 은퇴해 실제 1단계는 Gemini 문으로만 듣는다 — 재생 시험도 Gemini 응답 선언을 쓴다.
     """
     server.raw.set_new_hearing_engine(server.workspace_root(), TIMING_ENGINE_GEMINI)
 

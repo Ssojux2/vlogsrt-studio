@@ -32,14 +32,11 @@ from vlogsrt.project.raw import (
     render_plan,
     timeline_edit,
     timeline_edit_io,
-    timing_engine,
 )
 from vlogsrt.project.raw import service as raw_service
-from vlogsrt.project.raw.config import RENDER_SETTINGS, TIMING_ENGINE_WHISPER
+from vlogsrt.project.raw.config import RENDER_SETTINGS
 from vlogsrt.project.raw.final_edit_config import FINAL_EDIT_SETTINGS
 from vlogsrt.project.raw.timeline_edit import TimelineEditError
-
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
 
 F = Fraction
 MOMENT = datetime(2026, 11, 13, 1, 2, 3, tzinfo=UTC)
@@ -56,10 +53,7 @@ def trip(tmp_path_factory: pytest.TempPathFactory) -> Folder:
     _encode(folder / "B_hd.mp4", "1920x1080", 30, 9, created="2026-09-01T10:00:00Z")
     _encode(folder / "C_tall.mp4", "1080x1920", 24, 2, created="2026-09-01T09:55:00Z")
     originals = {name: _identity(folder / name) for name in UTTERANCES}
-    with pytest.MonkeyPatch.context() as patch:  # D104 — 모듈 범위라 파일 머리 표시보다 먼저 돈다
-        patch.setattr(timing_engine, "DEFAULT_NEW_HEARING_ENGINE", TIMING_ENGINE_WHISPER)
-        patch.setattr(raw_service, "DEFAULT_NEW_HEARING_ENGINE", TIMING_ENGINE_WHISPER)
-        return _trip(folder, originals)
+    return _trip(folder, originals)
 
 
 def _tree(folder: Path) -> dict[str, tuple[int, int]]:
@@ -267,7 +261,8 @@ def test_too_many_cues_are_refused_with_the_count_and_the_largest_sources(
     base = trip.root / timeline_edit_io.TIMELINE_FOLDER
     before = sorted(p.name for p in base.iterdir()) if base.is_dir() else []
     tight = dataclasses.replace(FINAL_EDIT_SETTINGS, max_cues=2)
-    with pytest.raises(TimelineEditError, match=r"5줄로 상한 2줄") as caught:
+    with pytest.raises(TimelineEditError, match=r"6줄로 상한 2줄") as caught:
+        # Gemini 단어 묶기는 문장 끝 부호에서 줄을 나눠 A의 두 문장이 두 줄이다(D163).
         _create(trip, datetime(2026, 11, 13, 0, 9, 0, tzinfo=UTC), edit_settings=tight)
     assert "B_hd.mp4 3줄" in str(caught.value)
     after = sorted(p.name for p in base.iterdir()) if base.is_dir() else []

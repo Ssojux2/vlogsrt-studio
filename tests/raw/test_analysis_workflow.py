@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.raw.gemini_echo import GeminiEcho
+from tests.raw.gemini_echo import GeminiEcho, write_utterance_replay
 from vlogsrt import preprocess
 from vlogsrt.config import Config
 from vlogsrt.project.raw import analysis_workflow
@@ -37,9 +37,6 @@ from vlogsrt.project.raw import service as raw
 from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
 from vlogsrt.project.raw.config import OPENAI_LUNA_MODEL
 from vlogsrt.project.raw.workspace import DB_NAME, DB_SCHEMA_VERSION, RawWorkspace
-
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
 
 needs_ffmpeg = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
@@ -118,9 +115,7 @@ def _write_fixtures(
     luna_windows: dict[str, dict[str, object]] | None = None,
 ) -> None:
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / "asr-fixtures.json").write_text(
-        json.dumps({"sources": asr_sources or {}}, ensure_ascii=False), encoding="utf-8"
-    )
+    write_utterance_replay(directory, asr_sources or {})
     (directory / "luna-fixtures.json").write_text(
         json.dumps({"windows": luna_windows or {}}, ensure_ascii=False), encoding="utf-8"
     )

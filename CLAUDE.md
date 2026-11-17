@@ -11,8 +11,9 @@
 원본 자막은 **읽기 그대로**다: 표시·편집·공유·번인에 쓰고, 저장된 결속·캐시 열쇠·지문 바이트는 그대로다(그래서
 `RawModelRoles`의 `whisper-1`·`gpt-transcribe` 기본값·whisper 계약·`cross-check/` 꼬리표 같은 **저장 신원 값은 남긴다**). whisper
 영상을 새로 듣는 길은 「다시 듣기」(Gemini)뿐이고, whisper로 듣게 된 영상의 실제 1단계·빈칸 재전사는 유료 호출 **앞에서**
-까닭을 대고 닫힌다. 남은 whisper 흔적은 오프라인 재생(whisper 모양 `asr-fixtures.json` 선언을 읽는 `ReplayAsrProvider`·
-`whisper_for_new_hearings` 시험 픽스처)과 캐시만 읽는 글자 적용 경로(`source_text`·`gemini_text`·`retext` — 새로 묻지 않는다)뿐이다.
+까닭을 대고 닫힌다. 남은 whisper 흔적은 옛 whisper 원본(차례가 whisper로 고정된 원본)의 오프라인 재생(whisper 모양
+`asr-fixtures.json` 선언을 읽는 `ReplayAsrProvider`)과 캐시만 읽는 글자 적용 경로(`source_text`·`gemini_text`·`retext` — 새로
+묻지 않는다)뿐이다.
 
 조판 정리(`polish.polish_text` — 온점을 지우고 `...`을 `…`로 모은다, D30)는 내보내는 자막 글자에 그대로 쓴다. 한글·영문·숫자는
 한 자도 못 지운다.
@@ -277,8 +278,9 @@ vlogsrt media analyze --workspace <ws> --fixtures <dir>   # 재생 픽스처로 
 녹화는 사람 전용 `scripts/record_gemini_transcribe.py`다(유료, 조각 하나에 약 $0.01).
 
 whisper 시절 녹화(`tests/fixtures/api/*.whisper.json` 등)와 합성 whisper 픽스처는 whisper와 함께 쓰는 곳이 사라졌다(D163) —
-지우지도 고치지도 않는다. 작업대 재생 시험은 whisper 모양 `asr-fixtures.json` 선언(`whisper_for_new_hearings`)이나 Gemini 응답
-선언(`word-text-fixtures.json`)을 쓰고, 실제 호출 경로 시험은 가짜 Gemini 클라이언트(`tests/raw/gemini_echo.py`)를 쓴다.
+지우지도 고치지도 않는다. 작업대 재생 시험은 Gemini 응답 선언(`word-text-fixtures.json` — 발화 목록은
+`gemini_echo.write_utterance_replay`로 쓴다)을 쓰고, 실제 호출 경로 시험은 가짜 Gemini 클라이언트(`tests/raw/gemini_echo.py`)를
+쓴다. whisper 모양 `asr-fixtures.json` 선언은 옛 whisper 원본을 재현하는 시험만 쓴다 — 그 원본의 차례를 whisper로 고정한다.
 
 `tests/fixtures/api/`의 파일은 **읽되 수정하지 마라.**
 `tests/fixtures/synthetic/`의 합성 픽스처는 만들고 고쳐도 된다 — API를 부르지 않는다.

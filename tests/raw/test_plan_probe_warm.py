@@ -128,7 +128,6 @@ def test_a_failing_source_is_reported_where_the_loop_meets_it(library, monkeypat
 
 
 @needs_ffmpeg
-@pytest.mark.usefixtures("whisper_for_new_hearings")  # 재생 분석은 whisper 응답 모양이다(D104)
 def test_analysis_planning_warms_the_whole_library_before_its_loop(tmp_path, monkeypatch) -> None:
     """분석 → 계획도 같다 — 분석되지 않은 원본의 전체 한 조각을 재는 루프보다 먼저 함께 잰다."""
     from tests.raw.test_creation_order import reverse_imported_project

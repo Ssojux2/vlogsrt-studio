@@ -40,14 +40,15 @@ from ui.workspace_service import (  # noqa: E402
 )
 from vlogsrt.env import ANALYSIS_GEMINI_KEY_ENV  # noqa: E402
 from vlogsrt.project.raw import service as raw  # noqa: E402
+from vlogsrt.project.raw import timing_engine  # noqa: E402
 from vlogsrt.project.raw.analysis_approval import LiveAnalysisTransport  # noqa: E402
 from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings  # noqa: E402
 from vlogsrt.project.raw.analysis_store import AnalysisStore  # noqa: E402
-from vlogsrt.project.raw.config import DEFAULT_ANALYSIS_MODEL  # noqa: E402
+from vlogsrt.project.raw.config import (  # noqa: E402
+    DEFAULT_ANALYSIS_MODEL,
+    TIMING_ENGINE_WHISPER,
+)
 from vlogsrt.project.raw.models import AnalysisRevision, RawWorkspaceError  # noqa: E402
-
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
 
 needs_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
 
@@ -64,9 +65,12 @@ POLITE_END = re.compile(r"(니다|세요|까요)[.)]*$")
 def test_the_mode_is_folded_into_the_digest_and_the_full_digest_is_pinned(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # 견적만 재는 시험 — whisper 작업공간의 digest 바이트가 그대로인지 본다(D163 읽기 그대로).
+    # 견적만 재는 시험 — 옛 whisper 원본의 digest 바이트가 그대로인지 본다(D163 읽기 그대로).
     ui, _sender, client, root, ids = setup_library(tmp_path, monkeypatch, gemini=False)
     client.resume.set()
+    workspace = ui.raw._workspace(root)
+    for asset_id in ids.values():  # 은퇴 전에 whisper로 듣기로 고정된 원본들이다
+        timing_engine.pin(workspace, asset_id, 0, TIMING_ENGINE_WHISPER)
     measured = ui.raw.selection_quote(root, ui._library_ids(root))
     every = tuple(measured.asset_ids)
     assert measured.mode == FULL and measured.digest == pre_19b_digest(ui, root, measured)

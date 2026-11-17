@@ -16,9 +16,6 @@ from vlogsrt.project.raw.jobs import JobStore
 from vlogsrt.project.raw.models import ACTIVE_JOB_STATUSES
 from vlogsrt.project.raw.workspace import RawWorkspace
 
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
-
 SLOW_QUOTE_SECONDS = 0.6
 CLICK_BUDGET_SECONDS = 0.4
 ACCEPTED = "승인 접수"

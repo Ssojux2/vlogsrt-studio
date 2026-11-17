@@ -40,9 +40,6 @@ from vlogsrt.project.raw import browser_runtime  # noqa: E402
 from vlogsrt.project.raw import service as raw_service  # noqa: E402
 from vlogsrt.project.raw.config import OPENAI_LUNA_MODEL  # noqa: E402
 
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
-
 needs_ffmpeg = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
     reason="ffmpeg/ffprobe가 없는 환경",
@@ -584,7 +581,7 @@ def test_browser_production_refusals_are_zero_send(tmp_path: Path, monkeypatch) 
     assert sender.calls == []
     monkeypatch.setattr("vlogsrt.env.is_offline", lambda: False)
 
-    # 종료 예정일 이후 — 수명주기 문이 먼저 닫힌다(§11.10).
+    # 시간 엔진(Gemini)의 단가 재확인 기한 이후 — 수명주기 문이 먼저 닫힌다(§11.10·D84·D163).
     stale_transport = server._live_transport
     server._live_transport = LiveAnalysisTransport(
         sender=sender,
@@ -594,7 +591,7 @@ def test_browser_production_refusals_are_zero_send(tmp_path: Path, monkeypatch) 
         luna_approvals=server._production_luna_approvals,
         on=date(2027, 3, 1),
     )
-    with pytest.raises(gr.Error, match="종료 예정일"):
+    with pytest.raises(gr.Error, match="단가 재확인 기한"):
         server.analysis_live_asr_view(signature, None, True)
     assert sender.calls == []
     server._live_transport = stale_transport

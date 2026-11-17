@@ -18,10 +18,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.raw.gemini_echo import write_utterance_replay
 from vlogsrt.project.raw import commands as media
-
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
 
 needs_ffmpeg = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
@@ -110,9 +108,7 @@ def test_analyze_replay_runs_and_plans(tmp_path: Path, capsys) -> None:
     stereo_sha = _ingest(tmp_path, workspace)
     fixtures = tmp_path / "fixtures"
     fixtures.mkdir()
-    (fixtures / "asr-fixtures.json").write_text(
-        json.dumps({"sources": {stereo_sha: []}}), encoding="utf-8"
-    )
+    write_utterance_replay(fixtures, {stereo_sha: []})
     (fixtures / "luna-fixtures.json").write_text(
         json.dumps(
             {

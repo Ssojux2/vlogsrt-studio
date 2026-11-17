@@ -40,8 +40,7 @@ needs_ffmpeg = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
     reason="ffmpeg/ffprobe가 없는 환경",
 )
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = [needs_ffmpeg, pytest.mark.usefixtures("whisper_for_new_hearings")]
+pytestmark = [needs_ffmpeg]
 
 
 @pytest.fixture(autouse=True)
@@ -352,6 +351,12 @@ def test_paid_pre_proxy_revision_stays_reusable_after_the_proxy_exists(imported,
     from vlogsrt.project.raw import cross_check
 
     workspace.set_meta_value(cross_check.META_KEY, cross_check.SETTING_OFF)  # 그 시절 표지
+    # 그 시절 원본은 whisper로 들었다 — 새로 듣는 엔진이 Gemini뿐인 지금도 그 차례는
+    # whisper다(D163).
+    from vlogsrt.project.raw import timing_engine
+    from vlogsrt.project.raw.config import TIMING_ENGINE_WHISPER
+
+    timing_engine.pin(workspace, asset.asset_id, 0, TIMING_ENGINE_WHISPER)
     revision_id = _persist_paid_revision(service, root, workspace, asset)
     media_refs.resolve(workspace, asset, "frames")  # 분석 프록시가 이제 디스크에 있다
     monkeypatch.setattr(media_refs, "_FAILED", {})  # 새 프로세스

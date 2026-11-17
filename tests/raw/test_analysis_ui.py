@@ -30,13 +30,10 @@ pytest.importorskip(
 
 import gradio as gr  # noqa: E402
 
-from tests.raw.gemini_echo import GeminiEcho
+from tests.raw.gemini_echo import GeminiEcho, write_utterance_replay
 from tests.raw.test_selection_analysis import keep_luna  # noqa: E402
 from ui import workspace_service  # noqa: E402
 from vlogsrt.config import Config  # noqa: E402
-
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
 
 needs_ffmpeg = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
@@ -190,9 +187,7 @@ def test_browser_replay_analysis_flow_to_segment_plan(server, tmp_path: Path) ->
     # 명시적 합성 픽스처 — 없는 창·청크는 실패로 기록된다(지어내지 않는다).
     fixtures = root / "analysis" / "replay"
     fixtures.mkdir(parents=True)
-    (fixtures / "asr-fixtures.json").write_text(
-        json.dumps({"sources": {asset.content_sha256 or "": []}}), encoding="utf-8"
-    )
+    write_utterance_replay(fixtures, {asset.content_sha256 or "": []})
     (fixtures / "luna-fixtures.json").write_text(
         json.dumps(
             {

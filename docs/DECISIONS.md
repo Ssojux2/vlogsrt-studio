@@ -11603,8 +11603,7 @@ D152가 나눠 둔 영어 열이다. **읽기만 한다** — 번역을 사지 �
 - **읽기는 그대로**: 이미 whisper로 들은 원본 자막은 표시·편집·공유·번인에 쓴다. 저장 신원(설정의 `whisper-1`·`gpt-transcribe`
   기본값 · whisper 계약 · `cross-check/`·`gemini-text/` 꼬리표 · `CACHE_ORIGIN` · 빈칸 재전사의 `whisper` 캐시 이름)은 **바이트
   그대로** 남긴다 — 결속·청크 캐시 열쇠·분석 지문이 바뀌면 이미 산 결과가 낡는다. 캐시만 읽는 글자 적용(`source_text`·
-  `gemini_text`·`retext`의 적용 경로)과 whisper 모양 재생 선언(`ReplayAsrProvider` · `whisper_for_new_hearings`)은 남겼다 —
-  새로 묻지 않는다.
+  `gemini_text`·`retext`의 적용 경로)과 옛 whisper 원본의 whisper 모양 재생(`ReplayAsrProvider`)은 남겼다 — 새로 묻지 않는다.
 - **옛 CLI·옛 엔진**: `vlogsrt run/redo/eval/evalset/probe/record/config/keywords`, `pipeline`·`repair`·`repetition`·`verify`·
   `evaluate`·`refine`·`layout`·`cutpoints`, `make eval/verify/fixtures`, `scripts/verify_timing.py`·`speech_onsets.py`·
   `smoke_project.py`, `ui/service.py`의 옛 단일 영상 화면(포트 고르기·`UiError`만 남는다)을 지웠다.
@@ -11615,6 +11614,14 @@ D152가 나눠 둔 영어 열이다. **읽기만 한다** — 번역을 사지 �
   (whisper)으로 읽혀 입력 지문이 어긋났다(D104부터 Gemini 기본에서 「분석 확인 필요」로 끝날 수 있었다) — 글자 귀처럼 1단계
   시작에서 엔진도 고정한다.
 - **CLAUDE.md**: 머리말·불변 규칙 1·2·3·5·6·7·9·10·흐름·픽스처·임계값 표·명령어·용어·금지 목록을 다시 썼다.
-- **남은 것**: whisper 모양 재생 선언을 쓰는 시험 묶음(약 60개 파일)은 그대로다 — Gemini 선언으로 옮기면 기대 큐 수·시각이
-  바뀌어 따로 한다. `OPENAI_API_KEY`가 없으면 실제 분석을 시작하지 않는 문은 그대로다(Luna가 쓴다 — Gemini만 쓰는 사람에게는
+- **재생 시험 옮기기**(같은 날, 사용자 지시 「지금 옮기기」): 「새로 듣는 엔진 = whisper」 전제(`whisper_for_new_hearings`
+  픽스처·모듈 범위 패치)를 지우고, 재생 시험 60여 개 파일이 Gemini 응답 선언으로 듣는다 — 발화 목록은
+  `tests/raw/gemini_echo.write_utterance_replay`가 청크 0번의 `word-text-fixtures.json`으로 쓴다(낱말은 그 발화의 시각을 그대로
+  가진다). 기대값이 바뀐 곳은 Gemini 단어 묶기 때문뿐이다: 쉼(0.6초) 없이 붙은 발화는 한 줄로 묶이므로 줄을 나눠야 하는
+  선언은 문장 끝 온점을 달거나 쉼을 0.6초 이상 벌렸고(자막 확인 아홉 줄·시각 확인 다섯 줄·측정 VTT 두 발화), 두 문장 발화는
+  두 줄이 된다(타임라인 자막 상한 5 → 6줄). 렌더 골든은 그 원본이 이제 Gemini로 들은 원본이라 빈칸 재전사 칸이 「막힘」에서
+  「없음」으로 바뀐 것만 다시 잠갔다. 옛 whisper 원본을 재는 시험(견적·결속·승인의 바이트, whisper 원본 빈칸 거부, 실제 호출
+  거부, 프록시 이전 유료 리비전, 「전사만」 digest)은 그 원본의 차례를 whisper로 고정해 재현한다 — 새로 듣는 엔진을 고를 수
+  없으니 「엔진을 바꾼 뒤의 승인 거부」 시험은 지웠다.
+- **남은 것**: `OPENAI_API_KEY`가 없으면 실제 분석을 시작하지 않는 문은 그대로다(Luna가 쓴다 — Gemini만 쓰는 사람에게는
   걸림돌일 수 있다). `tests/fixtures/api/`의 whisper 녹화는 쓰는 곳이 사라졌지만 고치지 않는다.

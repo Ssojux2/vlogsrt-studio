@@ -55,9 +55,6 @@ from vlogsrt.project.raw.analysis_config import (
 from vlogsrt.project.raw.review_workspace import ReviewWorkspaceFacade
 from vlogsrt.project.raw.service import RawWorkspaceService
 
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
-
 needs_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
 
 F = Fraction
@@ -282,19 +279,22 @@ NINE: tuple[dict[str, object], ...] = tuple(
     {"start": 0.5 + 1.5 * i, "end": 2 + 1.5 * i, "text": text}
     for i, text in enumerate(
         (
-            "안녕하세요 오늘은 계곡에 왔어요",
-            "물이 정말 맑고 시원해 보여요",
-            "저기 바위 위에 앉아 볼게요",
-            "발을 담그니까 차갑네요",
-            "물고기가 지나가요 보이세요",
-            "햇빛이 나뭇잎 사이로 들어와요",
-            "바람이 불어서 시원하네요",
-            "조금 더 위쪽으로 올라가 볼게요",
-            "이제 천천히 들어가 볼게요",
+            "안녕하세요 오늘은 계곡에 왔어요.",
+            "물이 정말 맑고 시원해 보여요.",
+            "저기 바위 위에 앉아 볼게요.",
+            "발을 담그니까 차갑네요.",
+            "물고기가 지나가요 보이세요.",
+            "햇빛이 나뭇잎 사이로 들어와요.",
+            "바람이 불어서 시원하네요.",
+            "조금 더 위쪽으로 올라가 볼게요.",
+            "이제 천천히 들어가 볼게요.",
         )
     )
 )
-"""`usable` 화면 위 아홉 줄(0.5–14초, 서로 다른 말) — 한 줄이 짚히면 확인 필요 몫이 11.1%다."""
+"""`usable` 화면 위 아홉 줄(0.5–14초, 서로 다른 말) — 한 줄이 짚히면 확인 필요 몫이 11.1%다.
+
+줄 사이에 쉼이 없어 Gemini 단어 묶기는 문장 끝 부호에서만 줄을 나눈다 — 줄마다 온점으로
+끝낸다(D163)."""
 
 
 def _tier_rows(service: RawWorkspaceService, root: Path, asset_id: str) -> list[tuple]:

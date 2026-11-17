@@ -7,9 +7,6 @@ from tests.raw.test_selection_analysis import make_server, wait_until
 from vlogsrt.project.raw import source_transcript as captions
 from vlogsrt.project.raw.models import RawWorkspaceError
 
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
-
 
 def test_edit_split_merge_stale_revision_and_restart(tmp_path, monkeypatch):
     source = tmp_path / "sentence.mov"

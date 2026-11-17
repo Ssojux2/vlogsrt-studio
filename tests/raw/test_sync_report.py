@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 
 from tests._sync_fakes import bursts, energy_factory, make_media, numpy_or_fake
+from tests.raw.gemini_echo import write_utterance_replay
 from vlogsrt import cli
 from vlogsrt.project import sync_check
 from vlogsrt.project.config import ProjectConfig, SyncCheckSettings
@@ -30,13 +31,11 @@ from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
 from vlogsrt.project.raw.config import RawWorkflowConfig
 from vlogsrt.project.vad.runtime import VadUnavailable
 
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
 pytestmark = [
     pytest.mark.skipif(
         shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
         reason="ffmpeg/ffprobe가 없는 환경",
     ),
-    pytest.mark.usefixtures("whisper_for_new_hearings"),
 ]
 
 TERMINAL = frozenset({"succeeded", "failed", "cancelled"})
@@ -147,7 +146,7 @@ def start_tone_analysis(
         for index, (start, end) in enumerate(bursts())
     ]
     sources = {asset.content_sha256: spoken} if declared else {}
-    (replay / "asr-fixtures.json").write_text(json.dumps({"sources": sources}), encoding="utf-8")
+    write_utterance_replay(replay, sources)
     luna = {f"window_{i:06d}": _luna(f"window_{i:06d}") for i in range(12)}
     (replay / "luna-fixtures.json").write_text(json.dumps({"windows": luna}), encoding="utf-8")
     return service, root, asset.asset_id, service.start_analysis(root)

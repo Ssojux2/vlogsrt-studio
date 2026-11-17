@@ -21,9 +21,6 @@ from vlogsrt.project.raw.analysis_config import (
 from vlogsrt.project.raw.models import ACTIVE_JOB_STATUSES
 from vlogsrt.project.raw.service import RawWorkspaceError
 
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
-
 GATE_SECONDS = 30
 TICKS = 4
 TICK_SECONDS = 0.15

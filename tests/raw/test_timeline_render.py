@@ -29,8 +29,6 @@ from vlogsrt.project.raw import (
 from vlogsrt.project.raw.final_edit_config import FINAL_EDIT_SETTINGS
 from vlogsrt.project.raw.timeline_edit import TimelineEditError
 
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
-
 MOMENT = datetime(2026, 11, 13, 5, 0, 0, tzinfo=UTC)
 
 

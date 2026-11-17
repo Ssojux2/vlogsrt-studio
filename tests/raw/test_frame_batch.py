@@ -22,9 +22,6 @@ from vlogsrt.project.raw.jobs import JobCancelledError
 from vlogsrt.project.raw.media_refs import _FrameSampler
 from vlogsrt.task_runtime import cancellation_scope
 
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
-
 LONG_EDGE = 160
 TIMEOUT = ANALYSIS_PROXY_LIMITS.frame_batch_timeout(None)  # 길이를 모르면 바닥(D59)
 

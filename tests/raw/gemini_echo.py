@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from fractions import Fraction
+from pathlib import Path
 from typing import Any
 
 from vlogsrt.gemini_messages import GeminiClient
@@ -92,3 +93,24 @@ class GeminiEcho:
             timeout_seconds=30.0,
             opener=self,
         )
+
+
+def write_utterance_replay(
+    directory: Path, sources: Mapping[str, Sequence[Mapping[str, object]]]
+) -> None:
+    """원본 sha → 발화 선언(원본 오디오 시계 초)을 Gemini 재생 선언으로 쓴다.
+
+    선언 파일은 `word-text-fixtures.json`이고 whisper 모양 재생 선언(`asr-fixtures.json`)을
+    대신한다(D163). 시험 원본은 Gemini 청크 한도보다 짧아 청크 하나(0번)이므로 원본 시계가 곧
+    청크 시계다 — 청크가 더 있으면 그 청크는 선언이 없어 보이는
+    실패다(지어내지 않는다). 이미 있는 선언 파일의 다른 원본은 그대로 둔다.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "word-text-fixtures.json"
+    body: dict[str, Any] = {"sources": {}}
+    if path.is_file():
+        body = json.loads(path.read_text(encoding="utf-8"))
+        body.setdefault("sources", {})
+    for sha, utterances in sources.items():
+        body["sources"][sha] = {"0": interaction_body(utterances)}
+    path.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")

@@ -29,9 +29,6 @@ from vlogsrt.project.raw.analysis_store import AnalysisStore
 from vlogsrt.project.raw.config import GEMINI_ANALYSIS_PROFILES, gemini_profile
 from vlogsrt.project.raw.understanding_luna import gemini_output_schema_bytes
 
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
-
 needs_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
 
 FLASH = "gemini-3.8-flash"

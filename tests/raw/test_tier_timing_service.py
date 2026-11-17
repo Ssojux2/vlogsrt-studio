@@ -40,19 +40,19 @@ from vlogsrt.project.raw.segment_review import (
 )
 from vlogsrt.project.raw.service import UPKEEP_JOB_KIND, RawWorkspaceService
 
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
-
 needs_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
 
 DENSE = (
-    {"start": 0.5, "end": 3, "text": "안녕하세요 오늘은 계곡에 왔어요"},
-    {"start": 3, "end": 6, "text": "물이 정말 맑고 시원해 보여요"},
-    {"start": 6, "end": 9, "text": "저기 바위 위에 앉아 볼게요"},
-    {"start": 9, "end": 12, "text": "발을 담그니까 차갑네요"},
-    {"start": 12, "end": 14.5, "text": "이제 천천히 들어가 볼게요"},
+    {"start": 0.5, "end": 3, "text": "안녕하세요 오늘은 계곡에 왔어요."},
+    {"start": 3, "end": 6, "text": "물이 정말 맑고 시원해 보여요."},
+    {"start": 6, "end": 9, "text": "저기 바위 위에 앉아 볼게요."},
+    {"start": 9, "end": 12, "text": "발을 담그니까 차갑네요."},
+    {"start": 12, "end": 14.5, "text": "이제 천천히 들어가 볼게요."},
 )
-"""말이 끊이지 않는 15초 — 창 하나(추천)가 녹색 한 구간이고 검토 머리는 「추천」 한 조각이다."""
+"""말이 끊이지 않는 15초 — 창 하나(추천)가 녹색 한 구간이고 검토 머리는 「추천」 한 조각이다.
+
+줄 사이에 쉼이 없어 Gemini 단어 묶기는 문장 끝 부호에서만 줄을 나눈다 — 줄마다 온점으로
+끝낸다(D163)."""
 
 CAP = (
     "추천 제한: 자막 시각 확인이 빨강이라 보통까지만 추천합니다 — 시각을 맞춘 뒤 다시 재면 풀립니다"
