@@ -34,3 +34,25 @@
 | 옛 project 계층(`test_export`·`runner_publish`·`test_media`·`runner_audio`) | ≈90 | file URI ↔ 경로(`relative path can't be expressed as a file URI` · `c%3A%5C…` 호스트) | 제품 코드의 URI 변환을 운영체제 경로로 — 실제 버그일 수 있다 |
 | project 작업 흐름 `assert 2 == 0` | ≈40 | 아직 모름(경고 · 오류 수?) | 조사 |
 | 그 밖 | ≈30 | `os.getuid`(UI 인스턴스 · 임시 폴더) · 권한 비트(`0o640`) · 폴더 잠금 파일이 남음 · `WinError 123`(자막 작업공간 경로) | 하나씩 |
+
+## W-84a 첫 묶음(2026-11-17, main `74de4ac`의 Windows CI — 239 failed · 6061 passed)
+
+ubuntu·macOS는 이미 초록이다. Windows 239개를 갈래마다 고쳤다(로컬 macOS에서 바뀐 시험 748개 통과 — Windows는 다음 CI가 잰다).
+
+**제품 버그(Windows에서만 드러났다)**
+
+- `fcp.py` 칸마다 링크 풀기 — 바탕 `Path`는 Windows에서도 `PureWindowsPath`의 하위 형이 아니어서 링크 표기를 POSIX로 읽었고,
+  `\\?\` 앞머리가 칸(`?`)이 되어 **모든 외부 링크·연결 지점이 「링크 대상이 없다」로 끊겼다**(Final Cut 라이브러리 외부 원본 · CapCut ·
+  참조 가져오기). `type(link)`로 고른다.
+- `media.py` file URI 풀기 — `file:///C:/…`의 경로 칸 `/C:/…`가 Windows에서 루트 상대라 「상대 경로」로 거부됐다. 앞 `/`만 벗긴다.
+- `xml_validation.py` — Windows xmllint가 명령 줄을 ANSI로 받아 한글 경로가 `??`가 됐다. Windows에서만 입력 칸을 ASCII
+  `file:///` URI로 넘긴다(POSIX argv는 그대로 — 불변 검사 통과).
+- `scripts/build_engine.py` — `--add-data` 「원본:자리」를 왼쪽 `:`에서 갈라 `D:\…`가 `D`가 됐다. 오른쪽에서 가른다.
+
+**시험의 POSIX 가정** — 가짜 절대 경로(`os.path.abspath`) · `as_uri()` · `as_posix()` 비교 · 권한 비트(Windows는 0o666) ·
+`os.getuid`/`getpriority` 없음(우선순위는 `GetPriorityClass`로 잰다) · `/dev/fd`(핸들 수로 잰다) · 폴더 잠금 파일
+(`.vlogsrt-folder.lock`) · 열린 파일을 바꿔치거나 지울 수 없음(그 경쟁이 생기지 않음을 확인한다) · 이름에 못 쓰는 글자(`:` · `*` ·
+끝 공백) · 단조 시계 눈금 15.6 ms · `write_text`의 CRLF.
+
+**알려진 한계(고치지 않았다)** — Windows `st_ctime`은 만든 시각이라 같은 크기로 고쳐 쓰고 수정 시각까지 되돌린 원본은 조사 기억
+(`PROBE_MEMO`)이 알아채지 못한다. 다른 파일(inode)로 바뀌면 잡는다.

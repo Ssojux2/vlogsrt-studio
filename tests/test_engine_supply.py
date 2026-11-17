@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -108,7 +109,8 @@ def test_stage_ffmpeg_binaries_copies_both_into_bin_with_exec_permission(
     assert (bin_dir / "ffprobe").read_bytes() == b"ffprobe-bytes"
     for name in ("ffmpeg", "ffprobe"):
         mode = (bin_dir / name).stat().st_mode & 0o111
-        assert mode == 0o111, f"{name}이 실행권한이 없다"
+        # Windows에는 실행 비트가 없다 — 엔진 번들은 macOS 것이고 거기서 이 비트를 본다(W-84a).
+        assert mode == (0o111 if os.name == "posix" else 0), f"{name}이 실행권한이 없다"
 
     manifest = _build_engine.manifest_for(
         engine, ffmpeg_report=None, python_version="3.12.14", packages={}

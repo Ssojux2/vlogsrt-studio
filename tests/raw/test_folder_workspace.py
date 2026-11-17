@@ -12,9 +12,11 @@ import hashlib
 import shutil
 import stat
 import subprocess
+import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -353,11 +355,28 @@ def test_the_folder_scan_takes_videos_only_and_skips_photos(tmp_path: Path) -> N
         ingest.scan_selected_source(folder / "IMG_0001.JPG", root)
 
 
-def test_a_read_only_folder_falls_back_to_the_sibling(tmp_path: Path) -> None:
+def _refuse_writes_inside(monkeypatch: pytest.MonkeyPatch, folder: Path) -> None:
+    """Windows는 폴더의 읽기 전용 속성으로 안에 만들기를 막지 않는다 — 거부를 대신 낸다(W-84a)."""
+    real = RawWorkspaceService.create_workspace
+
+    def create(self: RawWorkspaceService, root: Path, name: str) -> Any:
+        if Path(root).parent == folder.resolve():
+            raise PermissionError(errno.EACCES, "Access is denied", str(root))
+        return real(self, root, name)
+
+    monkeypatch.setattr(RawWorkspaceService, "create_workspace", create)
+
+
+def test_a_read_only_folder_falls_back_to_the_sibling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     folder = tmp_path / "SDCARD"
     _encode(folder / HD_NAME, "320x180", "2026-09-01T10:00:00Z", seconds=1)
     mode = folder.stat().st_mode
-    folder.chmod(stat.S_IRUSR | stat.S_IXUSR)
+    if sys.platform == "win32":
+        _refuse_writes_inside(monkeypatch, folder)
+    else:
+        folder.chmod(stat.S_IRUSR | stat.S_IXUSR)
     try:
         service = RawWorkspaceService()
         status, created = service.managed_folder_workspace(folder)

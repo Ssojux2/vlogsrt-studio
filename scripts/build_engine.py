@@ -171,7 +171,9 @@ def preflight_problems() -> list[str]:
     for problem in ffmpeg_verification_problems():
         problems.append(f"FFmpeg 공급 검증 실패 — {problem}")
     for payload in DATA_PAYLOADS:
-        source = Path(payload.split(":", 1)[0])
+        # 「원본:자리」의 자리에는 `:`이 없다 — 오른쪽에서 가른다.
+        # Windows 원본(`D:\…`)의 드라이브 `:`에서 가르면 안 된다(W-84a).
+        source = Path(payload.rsplit(":", 1)[0])
         if not source.exists():
             problems.append(f"번들 데이터가 없다: {source.relative_to(ROOT)}")
     return problems

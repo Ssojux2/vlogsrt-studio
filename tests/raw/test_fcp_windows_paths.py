@@ -276,3 +276,17 @@ def test_walks_skip_junctions_only_on_windows(
     assert names == ["real"]
     assert fcp._is_link_path(tmp_path / "junction")
     assert not fcp._is_link_path(tmp_path / "real")
+
+
+def test_a_hop_reads_the_link_text_by_the_link_s_own_path_flavour(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """칸마다 풀기의 한 걸음은 링크 자신의 형(`WindowsPath`)으로 표기를 읽는다(W-84a).
+
+    바탕 `Path`는 Windows에서도 `PureWindowsPath`의 하위 형이 아니다 — 그것으로 고르면
+    `\\\\?\\D:\\…`를 POSIX 상대 표기로 이어 `?` 칸을 만들고 모든 외부 링크가 「없다」로 끊겼다.
+    """
+    monkeypatch.setattr(fcp.os, "readlink", lambda _link: "\\\\?\\D:\\clips\\a.mov")
+    link = PureWindowsPath("C:\\Lib\\Media\\a.mov")
+    anchor, parts = fcp._hop_parts(link, "C:\\", ["Lib", "Media"], ["rest"])  # type: ignore[arg-type]
+    assert (anchor, parts) == ("D:\\", ["clips", "a.mov", "rest"])

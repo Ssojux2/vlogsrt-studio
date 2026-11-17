@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -85,7 +86,7 @@ def _run_wellformedness(xmllint: str, path: Path) -> subprocess.CompletedProcess
     """잘 이루어짐 검사 — argv는 이 형태 그대로 얼어 있다(두 형태 중 첫째)."""
     try:
         return subprocess.run(
-            [xmllint, "--nonet", "--noout", str(path)],
+            [xmllint, "--nonet", "--noout", _operand(path)],
             shell=False,
             capture_output=True,
             text=True,
@@ -100,7 +101,7 @@ def _run_dtd_validation(xmllint: str, path: Path, dtd_uri: str) -> subprocess.Co
     """DTD 대조 검사 — argv는 이 형태 그대로 얼어 있다(두 형태 중 둘째)."""
     try:
         return subprocess.run(
-            [xmllint, "--nonet", "--noout", "--dtdvalid", dtd_uri, str(path)],
+            [xmllint, "--nonet", "--noout", "--dtdvalid", dtd_uri, _operand(path)],
             shell=False,
             capture_output=True,
             text=True,
@@ -109,6 +110,19 @@ def _run_dtd_validation(xmllint: str, path: Path, dtd_uri: str) -> subprocess.Co
         )
     except OSError as error:
         raise XmlValidationUnavailable(f"xmllint을 실행하지 못했다: {xmllint} ({error})") from error
+
+
+def _operand(path: Path) -> str:
+    """xmllint에 넘길 입력 칸 — POSIX는 절대 경로 그대로, Windows는 ASCII `file:///` URI.
+
+    Windows의 xmllint는 명령 줄을 ANSI 코드 페이지로 받아 한글 경로가 `??`가 되고 파일을
+    못 연다(W-84a 실측: `…/%3F%3F/roundtripped.fcpxml`). 퍼센트 인코딩한 URI는 ASCII뿐이라
+    그대로 건너가고, libxml2가 풀어 UTF-8 → UTF-16으로 연다. `file:`로 시작하므로 `-` 깃발로도
+    읽히지 않는다.
+    """
+    if sys.platform == "win32":
+        return path.as_uri()
+    return str(path)
 
 
 def _dtd_uri(dtd_path: Path) -> str:

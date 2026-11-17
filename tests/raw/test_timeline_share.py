@@ -39,7 +39,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, _Calls
     folder.mkdir(parents=True)
     video, srt = folder / "draft.mp4", folder / "draft.srt"
     video.write_bytes(b"mp4")
-    srt.write_text(SRT, encoding="utf-8")
+    srt.write_bytes(SRT.encode("utf-8"))  # 렌더처럼 LF 바이트 — Windows `write_text`는 CRLF다
     calls = _Calls()
     exported = SimpleNamespace(folder=folder, video=video, srt=srt)
     monkeypatch.setattr(timeline_render, "export_timeline", lambda *a, **k: exported)

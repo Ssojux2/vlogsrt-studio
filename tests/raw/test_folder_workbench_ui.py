@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -197,7 +198,7 @@ def test_a_workspace_folder_itself_is_not_a_video_folder(tmp_path: Path) -> None
     [
         ("", "경로를 적거나"),
         ("상대/경로", "전체 경로"),
-        ("/없는/폴더/여기", "폴더가 없습니다"),
+        (os.path.abspath("/없는/폴더/여기"), "폴더가 없습니다"),  # Windows는 드라이브까지 붙는다
     ],
 )
 def test_bad_folder_text_is_refused_before_any_scan(

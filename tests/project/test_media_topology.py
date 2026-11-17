@@ -22,7 +22,6 @@ import json
 import os
 from pathlib import Path
 from types import ModuleType
-from urllib.parse import quote
 
 import pytest
 
@@ -345,7 +344,7 @@ def _staged_workspace(tmp_path: Path) -> Path:
   <resources>
     <format id="r1" name="FFVideoFormat1080p25" frameDuration="1/25s"/>
     <asset id="r2" name="clip.mov" uid="ASSET-1" start="0s" duration="12s" hasAudio="1" format="r1">
-      <media-rep kind="original-media" src="file://{quote(str(media))}"/>
+      <media-rep kind="original-media" src="{media.as_uri()}"/>
     </asset>
   </resources>
   <library>
@@ -439,7 +438,8 @@ def test_staged_grant_reader_accepts_snake_case_and_legacy_camel_case(
     assert project_commands._staged_app_grant_revision(workspace) == revision
 
     # Swift JSONEncoder가 실제로 내는 모양(sortedKeys·슬래시 무이스케이프).
-    swift_written = '{"grant_revision":"' + revision + '","roots":["' + str(tmp_path) + '"]}\n'
+    root_text = json.dumps(str(tmp_path))[1:-1]  # Windows 역슬래시는 JSON에서 이스케이프된다
+    swift_written = '{"grant_revision":"' + revision + '","roots":["' + root_text + '"]}\n'
     (workspace / "media-grant.json").write_text(swift_written, encoding="utf-8")
     assert project_commands._staged_app_grant_revision(workspace) == revision
 
@@ -603,7 +603,8 @@ def test_grant_roots_keep_their_exact_characters(
     커버리지를 계산한다(공백 정리가 정당한 경로를 부수는 회귀를 잡는다)."""
     from vlogsrt.project import commands as project_commands
 
-    trailing = tmp_path / "media root trailing "
+    # Windows는 이름 끝 공백을 지운다 — 앞 공백은 지키므로 거기서는 앞 공백으로 같은 것을 본다.
+    trailing = tmp_path / ("media root trailing " if os.name == "posix" else " media root leading")
     trailing.mkdir()
     unicode_root = tmp_path / "미디어 루트 한글"
     unicode_root.mkdir()

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import shutil
 from fractions import Fraction
+from pathlib import Path
 
 import pytest
 
@@ -72,7 +73,7 @@ def test_proxy_validation_decodes_the_proxy_in_one_process(imported, monkeypatch
     seen = _count_runs(monkeypatch)
     verdict = media_refs.validate_analysis_proxy(original, proxy)
     assert proxy != original and verdict.status == "verified"
-    samples = [argv for argv in seen if argv[0].endswith("ffmpeg") and "rawvideo" in argv]
+    samples = [argv for argv in seen if Path(argv[0]).stem == "ffmpeg" and "rawvideo" in argv]
     on_proxy = [argv for argv in samples if str(proxy) in argv]
     on_original = [argv for argv in samples if str(original) in argv]
     assert len(on_proxy) == 1  # 예전 35 — 같은 점 5 + 이동 6 × 5

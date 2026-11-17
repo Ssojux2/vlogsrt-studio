@@ -53,7 +53,15 @@ needs_installed_dtd = pytest.mark.skipif(
 F = Fraction
 NTSC = F(1001, 30000)
 BT709 = ("bt709", "bt709", "bt709")
-BUNDLE = Path("/Users/ssojux2/Movies/test_dir/260810_wangbang.fcpbundle")
+
+
+def os_absolute(posix: str) -> Path:
+    """POSIX 꼴 가짜 경로를 이 운영체제의 절대 경로로 — Windows에서 `/Users/…`는 드라이브가 없어
+    절대 경로가 아니다(제품의 검사가 맞다). macOS·Linux에서는 그대로다."""
+    return Path(os.path.abspath(posix))
+
+
+BUNDLE = os_absolute("/Users/ssojux2/Movies/test_dir/260810_wangbang.fcpbundle")
 ORIGINALS = BUNDLE / "clips" / "Original Media"
 
 # 실측(읽기 전용) — 라이브러리 `FFMIORADAsset`의 mediaIdentifier·mediaRange와 원본 타임코드.
@@ -246,7 +254,7 @@ def edge_mixed() -> ft.TimelineDocument:
         report=frames_report(NTSC, (0, 1, "green")),
         cues=(cue_at(0, 0, "x"),),
     )
-    bundle = Path("/Users/me/Movies/My Lib.fcpbundle")
+    bundle = os_absolute("/Users/me/Movies/My Lib.fcpbundle")
     return ft.plan(
         [first, unanalysed, unknown, single], title="vlogsrt · 테스트 · 2026-10-09 18:30",
         library_bundle=bundle,
@@ -1565,9 +1573,10 @@ def test_library_media_uses_its_identifier_and_others_get_a_prefixed_lowercase_u
     assert library_asset.attrib["uid"] == rep.attrib["sig"] == ID_0008
     assert rep.attrib["kind"] == "original-media"
     assert rep.attrib["src"] == (
-        "file:///Users/ssojux2/Movies/test_dir/260810_wangbang.fcpbundle/clips/"
-        "Original%20Media/DJI_20260811125046_0008_D.mov"
+        BUNDLE.as_uri() + "/clips/Original%20Media/DJI_20260811125046_0008_D.mov"
     )
+    if os.name == "posix":
+        assert BUNDLE.as_uri() == "file:///Users/ssojux2/Movies/test_dir/260810_wangbang.fcpbundle"
     for asset, name in zip(
         assets[1:], ("DJI_20260811131238_0014_D", "DJI_20260811153216_0019_D"), strict=True
     ):
@@ -1610,7 +1619,7 @@ def test_import_options_link_media_and_point_at_the_original_library() -> None:
     """번들 URI는 디렉터리 꼴(끝 `/`)이다 — Final Cut 자신의 내보내기가 그렇게 적는다
     (이 기기 실물: `<library location="file:///Volumes/SubSSD/EU.fcpbundle/">`)."""
     root = parsed(real_like_document())
-    uri = "file:///Users/ssojux2/Movies/test_dir/260810_wangbang.fcpbundle/"
+    uri = BUNDLE.as_uri() + "/"
     options = [o.attrib for o in root.findall("./import-options/option")]
     assert options == [
         {"key": "library location", "value": uri},
@@ -1622,7 +1631,9 @@ def test_import_options_link_media_and_point_at_the_original_library() -> None:
 
 
 def test_without_a_library_the_options_still_link_but_name_no_location() -> None:
-    loose = ft.SourceInput(media=media("loose", frames=10, ident=None, folder=Path("/tmp/x")))
+    loose = ft.SourceInput(
+        media=media("loose", frames=10, ident=None, folder=os_absolute("/tmp/x"))
+    )
     root = parsed(ft.plan([loose], title="t", library_bundle=None))
     options = [o.attrib for o in root.findall("./import-options/option")]
     assert options == [

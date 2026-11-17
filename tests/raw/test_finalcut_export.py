@@ -157,16 +157,20 @@ def _assert_valid(path: Path) -> None:
 
 
 def _tree(root: Path) -> dict[str, str]:
+    # Windows 폴더 잠금은 폴더 안의 숨은 파일이다(`filelock.DIRECTORY_LOCK_NAME`, 지우지 않는다) —
+    # 보내기가 남긴 결과가 아니다. 열쇠는 운영체제와 무관한 `/` 표기로 견준다.
     return {
-        str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
         for path in sorted(root.rglob("*"))
-        if path.is_file()
+        if path.is_file() and path.name != filelock.DIRECTORY_LOCK_NAME
     }
 
 
 def _export_files(root: Path) -> list[str]:
     folder = root / "review" / "finalcut"
-    return sorted(p.name for p in folder.iterdir()) if folder.is_dir() else []
+    if not folder.is_dir():
+        return []
+    return sorted(p.name for p in folder.iterdir() if p.name != filelock.DIRECTORY_LOCK_NAME)
 
 
 # ─── 17·22. 관문 없음 · 확인 뒤 꺼짐 · 다시 보내면 새 파일 ─────────────────────

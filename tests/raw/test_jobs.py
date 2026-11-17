@@ -9,6 +9,7 @@ from __future__ import annotations
 import gc
 import os
 import sqlite3
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -371,6 +372,15 @@ def test_resume_requires_a_nonempty_fingerprint(workspace: Path) -> None:
 
 
 def _open_descriptors() -> int:
+    """열린 서술자 수 — Windows에는 `/dev/fd`가 없어 이 프로세스의 핸들 수를 센다(W-84a)."""
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        count = wintypes.DWORD()
+        assert kernel.GetProcessHandleCount(kernel.GetCurrentProcess(), ctypes.byref(count))
+        return int(count.value)
     return len(os.listdir("/dev/fd"))
 
 

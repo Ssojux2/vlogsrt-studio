@@ -16,15 +16,18 @@ from vlogsrt import preprocess
 
 
 def test_lowering_without_setpriority_does_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delattr(preprocess.os, "setpriority")
+    monkeypatch.delattr(preprocess.os, "setpriority", raising=False)  # Windows에는 처음부터 없다
     monkeypatch.setattr(
-        preprocess.os, "getpriority", lambda *_: pytest.fail("nice가 없으면 묻지도 않는다")
+        preprocess.os,
+        "getpriority",
+        lambda *_: pytest.fail("nice가 없으면 묻지도 않는다"),
+        raising=False,
     )
     preprocess._lower_priority(1234, 10)  # AttributeError가 새지 않는다
 
 
 def test_lowering_without_prio_process_does_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delattr(preprocess.os, "PRIO_PROCESS")
+    monkeypatch.delattr(preprocess.os, "PRIO_PROCESS", raising=False)
     preprocess._lower_priority(1234, 10)
 
 
@@ -96,6 +99,7 @@ def test_windows_fast_path_hides_the_console_too(monkeypatch: pytest.MonkeyPatch
 def test_posix_launch_gets_no_creation_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[dict[str, Any]] = []
     _recording_popen(monkeypatch, seen)
+    monkeypatch.setattr(sys, "platform", "darwin")  # Windows CI에서도 POSIX 길을 본다
     preprocess.run_process(["ffmpeg", "-version"], on_poll=lambda: None)
     assert "creationflags" not in seen[0]
 
@@ -154,6 +158,7 @@ def test_posix_priority_still_takes_nice(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(
         preprocess, "_lower_priority", lambda pid, nice: lowered.append((pid, nice))
     )
+    monkeypatch.setattr(sys, "platform", "darwin")  # Windows CI에서도 POSIX 길을 본다
     preprocess.run_process(["ffmpeg", "-version"], priority=10)
     assert "creationflags" not in seen[0]
     assert [nice for _, nice in lowered] == [10]

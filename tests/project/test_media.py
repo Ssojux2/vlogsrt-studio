@@ -21,7 +21,6 @@ import sys
 import threading
 from dataclasses import fields
 from pathlib import Path
-from urllib.parse import quote
 
 import pytest
 
@@ -101,7 +100,8 @@ def media_dir(tmp_path: Path, name: str) -> Path:
 
 def file_uri(path: Path) -> str:
     """실제 FCPXML처럼 퍼센트 인코딩된 file URI — 한국어·공백이 %XX가 된다."""
-    return "file://" + quote(str(path))
+    # `as_uri()`는 POSIX에서 `"file://" + quote(str(path))`와 같고 Windows에서는 `file:///C:/…`다.
+    return path.as_uri()
 
 
 # ─── 오버라이드 우선순위 ─────────────────────────────────────────────────
@@ -176,7 +176,7 @@ def test_percent_encoded_file_uris_decode_to_exact_paths(tmp_path: Path) -> None
 def test_localhost_file_uri_resolves_like_empty_host(tmp_path: Path) -> None:
     """`file://localhost/…`도 로컬이다 — 그 밖의 호스트는 원격이므로 거부한다."""
     original = write_media(tmp_path, "original.mp4", b"original-bytes")
-    src = "file://localhost" + quote(str(original))
+    src = "file://localhost" + original.as_uri().removeprefix("file://")
     document = parse_media_project(tmp_path, [asset("r2", rep(ORIGINAL, src))], clips("r2"))
     resolved = resolve_media(document)
     assert resolved[0].original == original
@@ -861,3 +861,20 @@ def test_media_module_imports_only_allowed_roots() -> None:
                 )
             else:
                 assert root in allowed, f"media가 허용 밖 모듈을 import한다: {root}"
+
+
+def test_a_windows_drive_uri_path_loses_only_its_leading_slash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`file:///C:/…`의 경로 칸 `/C:/…`는 Windows에서 앞 `/`만 벗긴다 — POSIX는 그대로다(W-84a)."""
+    from pathlib import PureWindowsPath
+
+    from vlogsrt.project import media as media_module
+
+    assert media_module._drive_path("/C:/a b.mov") == "/C:/a b.mov" or os.name == "nt"
+    monkeypatch.setattr(media_module, "Path", PureWindowsPath)
+    assert media_module._drive_path("/C:/a b.mov") == "C:/a b.mov"
+    assert media_module._drive_path("/c:") == "c:"
+    assert media_module._drive_path("/media/a.mov") == "/media/a.mov"
+    assert media_module._drive_path("/가:/a") == "/가:/a"
+    assert media_module._drive_path("/C:a") == "/C:a"  # 드라이브 상대는 URI 꼴이 아니다

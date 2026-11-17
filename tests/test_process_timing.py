@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
 from collections.abc import Iterator
 from typing import Any
 
@@ -112,7 +113,9 @@ def test_a_timeout_is_recorded_on_both_paths(cancellable: bool) -> None:
         preprocess.run_process(sleeper, capture_output=True, timeout=0.3, step="장면 컷 찾기")
     (finished,) = preprocess.recent_processes()
     assert finished.outcome == "raised"
-    assert finished.seconds >= 0.3
+    # Windows 단조 시계의 눈금은 약 15.6 ms다 — 0.3초 시간 초과가 한 눈금 앞에서 잴 수 있다.
+    tick = time.get_clock_info("monotonic").resolution
+    assert finished.seconds >= 0.3 - tick
 
 
 def test_the_recent_ring_keeps_only_the_newest(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -202,7 +202,7 @@ def test_the_owned_host_check_matches_the_cached_bundle(monkeypatch, tmp_path):
     killed: list[int] = []
     monkeypatch.setattr(chooser.os, "kill", lambda pid, sig: killed.append(pid))
     for command, expected in (
-        (f"{app}/Contents/MacOS/applet\n", [4242]),
+        (f"{app / 'Contents' / 'MacOS' / 'applet'}\n", [4242]),  # 이 운영체제의 구분자로
         ("/Applications/남의 앱.app/Contents/MacOS/other\n", []),
     ):
         killed.clear()
