@@ -1,6 +1,6 @@
 # 세 운영체제 검사(W-84, D144) — 오프라인(VLOGSRT_OFFLINE=1) · 비밀 값 없음 · 유료 호출 없음.
-# macOS는 막는 게이트다. Windows·Linux는 처음 실행에서 무엇이 깨지는지 보고만 한다(continue-on-error) —
-# 실패는 skip·xfail하지 않고 W-84a…로 나눠 고친 뒤 막는 쪽으로 올린다(docs/plans/2026-11-16-cross-platform.md).
+# 세 운영체제 모두 막는 게이트다 — Windows·Linux는 보고만 하다가 W-84a로 다 초록이 된 뒤(2026-11-17,
+# main c67c66e) 올렸다. 실패는 skip·xfail하지 않는다(docs/plans/2026-11-16-cross-platform.md).
 name: check
 
 on:
@@ -20,7 +20,6 @@ jobs:
   check:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.os != 'macos-latest' }}
     timeout-minutes: 120
     strategy:
       fail-fast: false

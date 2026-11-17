@@ -7,10 +7,10 @@
 | 운영체제 | CI | 실행기 | 상태 |
 |---|---|---|---|
 | macOS | 막는다 | `실행.command` | 로컬 `make check` 통과 |
-| Windows | 보고만(`continue-on-error`) | `실행.bat` | 첫 CI 결과를 아래에 적는다 |
-| Linux(ubuntu) | 보고만(`continue-on-error`) | `실행.sh` | 첫 CI 결과를 아래에 적는다 |
+| Windows | 막는다(2026-11-17 W-84a) | `실행.bat` | CI 6303 passed · 0 failed(`c67c66e`) |
+| Linux(ubuntu) | 막는다(2026-11-17 W-84a) | `실행.sh` | CI 초록 |
 
-다 초록이면 `continue-on-error`를 지워 막는 게이트로 올린다(Windows 먼저). 실패는 skip·xfail하지 않는다 — W-84a…로 나눠 고친다.
+세 운영체제 모두 막는다 — W-84a(2026-11-17)로 Windows·Linux가 초록이 되어 `continue-on-error`를 지웠다. 실패는 skip·xfail하지 않는다.
 
 ## 첫 CI 결과
 

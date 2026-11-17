@@ -28,8 +28,9 @@ def test_runs_offline_without_secrets() -> None:
     assert ".env" not in text.replace("env:", "")
 
 
-def test_only_macos_blocks_for_now() -> None:
-    assert "continue-on-error: ${{ matrix.os != 'macos-latest' }}" in _text()
+def test_every_operating_system_blocks() -> None:
+    """W-84a로 Windows·Linux가 초록이 되어 보고만 하던 자리를 막는 게이트로 올렸다."""
+    assert "continue-on-error" not in _text()
 
 
 def test_runs_the_same_checks_as_make() -> None:
