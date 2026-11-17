@@ -11576,6 +11576,10 @@ D152가 나눠 둔 영어 열이다. **읽기만 한다** — 번역을 사지 �
 - **남긴 것**: Final Cut 보내기 보고서의 자막 사실(`_send_caption_facts` · `_caption_honesty_lines`), 저장된 작업이 들 수 있는 `caption_run` 작업 이름,
   `vlogsrt/`의 서비스(`caption_workspace` · `caption_preview` 등 — 이제 화면에서는 부르지 않는다). 자막 작업대 JS(`CAPTION_BOOTSTRAP_JS`)와 그 HTML 도움말 셋 ·
   `#caption-stage` CSS는 노드 하네스(`test_visual_workbench_ui`의 `_NODE_HARNESS`)를 쓰는 시험 16개가 함께 돌려 이번에는 남겼다 — 따로 정리한다.
+  **(2026-11-17 정리했다)**: `CAPTION_BOOTSTRAP_JS` · HTML 도움말 셋(`caption_overlay_player_html` · `caption_workbench_html` ·
+  `caption_workbench_details_html`) · `#caption-*`·`.cap-*` CSS · 작업대 공용 상태의 내려받기 갈래(자막 확정만 썼다) · 단축키 영상 목록의
+  `caption-video`를 지웠다(제품 약 560줄). 하네스의 자막 경우 31개는 지웠다 — 공용 `call()`·`_workbench_state` 길은 같은 영상 작업대 경우가
+  이미 잰다(서명·늦은 응답·낡은 닫힘·모델 그릇·자리표시 해체), 나머지는 `__vlWireCaption` 안의 자막 전용 논리였다.
 - **시험**: 그 탭만 시험하던 것(`test_full_ui_screens`의 자막 흐름 넷 · `test_visual_workbench_ui`의 자막 작업대 셋 · 고르기 · 큐 표 등)을 지웠고, 섞인 시험은 자막 부분만
   덜었다. 출력 자리 번호를 쓰던 시험은 새 모양으로 옮겼다. 선택 소리 미리보기(`caption_preview`)의 끝까지 시험은 함께 사라졌다 — 서비스는 남는다.
 - **남은 W-91**: W-32(whisper 종료 앞 옛 CLI 거부), 🧑 실제 라이브러리 인수.
