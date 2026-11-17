@@ -337,11 +337,15 @@ def test_confirm_source_sits_next_to_the_send_button_with_the_old_handler(
     tmp_path: Path, local_socket: None
 ):
     """일괄 확인(끈 채 보내기)은 접힌 서랍 안에 두지 않는다 — 옛 처리기를 단 원천 단추
-    (`vl-queue-confirm-src`)는 보내기 단추 곁 명령 줄에 숨어 있다. node 없이도 늘 돈다."""
+    (`vl-queue-confirm-src`)는 보내기 단추 곁 명령 줄에 숨어 있다. node 없이도 늘 돈다.
+
+    그 보내기 단추는 이제 「타임라인으로 보내기」다 — 「추천만 이어붙여 내보내기」는
+    은퇴했다(W-91, D161).
+    """
     pytest.importorskip("gradio", reason="웹 UI extra(gradio)가 없다", exc_type=ImportError)
     import gradio as gr
 
-    from ui import ui_facade
+    from ui import timeline_cell, ui_facade
     from ui.workspace_service import CONFIRM_ALL_SOURCE_LABEL, RawWorkspaceUi
 
     server = RawWorkspaceUi(state_path=tmp_path / "ui-state.json")
@@ -352,8 +356,9 @@ def test_confirm_source_sits_next_to_the_send_button_with_the_old_handler(
     assert source.visible == "hidden"
     (dep,) = [d for d in app.config["dependencies"] if d["targets"] == [(source._id, "click")]]
     assert app.fns[dep["id"]].fn == server.capcut_confirm_auto_view  # 옛 처리기 그대로
-    # 명령 줄의 숨은 원천 — 보내기 단추는 W-46a에 서랍의 「고급 · Final Cut」으로 갔다.
-    assert source.parent is buttons["추천만 이어붙여 내보내기"].parent
+    # 명령 줄의 숨은 원천 — Final Cut 보내기는 W-46a에 서랍의 「고급 · Final Cut」으로 갔다.
+    assert source.parent is buttons[timeline_cell.SEND_LABEL].parent
+    assert source.parent.elem_id == "vl-command-bar"
     node = source.parent
     while node is not None:
         assert not isinstance(node, (gr.Accordion, gr.Sidebar))
