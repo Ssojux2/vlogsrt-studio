@@ -1950,3 +1950,27 @@ class FolderWorkspaceSettings:
 
 FOLDER_WORKSPACE = FolderWorkspaceSettings()
 """지금 쓰는 폴더 작업공간 설정 — 스캔·작업공간 자리·4K 프록시·미리보기·동시 한도가 읽는다."""
+
+
+@dataclass(frozen=True)
+class FileMemoSettings:
+    """그리기 사이의 파일 바이트 기억(D167) — 외부 근거 없는 조정 대상.
+
+    64 MiB는 원본 169개 라이브러리의 그리기가 여는 JSON(원본마다 수 KB–수백 KB, 여섯 종류)을 넉넉히
+    담는다. 한 파일 상한 4 MiB를 넘는 파일은 기억하지 않는다(그 자리를 다른 작은 파일들에 둔다).
+    기억하는 것은 바이트뿐이고 열쇠는 파일 신원이라, 값은 어느 지문·캐시 열쇠·승인·등급에도 없다.
+    """
+
+    max_bytes: int = 64 * 1024 * 1024
+    max_file_bytes: int = 4 * 1024 * 1024
+
+    def __post_init__(self) -> None:
+        for name in ("max_bytes", "max_file_bytes"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name}는 1 이상의 정수여야 한다: {value!r}")
+        if self.max_file_bytes > self.max_bytes:
+            raise ValueError("max_file_bytes가 max_bytes보다 크다")
+
+
+FILE_MEMO = FileMemoSettings()

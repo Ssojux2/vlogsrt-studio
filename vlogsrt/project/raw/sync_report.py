@@ -41,7 +41,7 @@ from vlogsrt.project.config import (
     validate_sync_check_settings,
 )
 from vlogsrt.project.pcm import PcmReference
-from vlogsrt.project.raw import read_scope
+from vlogsrt.project.raw import file_memo, read_scope
 from vlogsrt.project.raw.understanding import asr_chunk_material, asr_chunk_word_notes, chunk_tick
 from vlogsrt.project.sync_check import Check, Cue, Reason
 from vlogsrt.project.vad.inference import infer_vad
@@ -256,7 +256,7 @@ def _stage1_in(folder: Path, source_sha256: str) -> Stage1Audio | None:
     for name in STAGE1_DOCUMENTS:
         path = folder / name
         if path.is_file():
-            body = json.loads(path.read_text(encoding="utf-8"))
+            body = json.loads(file_memo.read_text(path))
             created = str(body.get("created_at") or record.get("created_at") or "")
             return _stage1_of(body, folder, source_sha256, created, record)
     return None
@@ -397,7 +397,7 @@ def _atomic_write(path: Path, text: str) -> None:
 
 def _read_json(path: Path) -> dict[str, Any] | None:
     try:
-        body = json.loads(path.read_text(encoding="utf-8"))
+        body = json.loads(file_memo.read_text(path))  # 그리기마다 열지 않는다(D167)
     except (OSError, ValueError):
         return None
     return body if isinstance(body, dict) else None

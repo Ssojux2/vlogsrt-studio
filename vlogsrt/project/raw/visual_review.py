@@ -58,7 +58,7 @@ from typing import TypeVar
 
 from vlogsrt import log, oscompat, preprocess
 from vlogsrt.oscompat import process_alive, publish_exclusive
-from vlogsrt.project.raw import media_refs, read_scope, source_verify
+from vlogsrt.project.raw import file_memo, media_refs, read_scope, source_verify
 from vlogsrt.project.raw.analysis_config import REVIEW_MEDIA
 from vlogsrt.project.raw.config import FOLDER_WORKSPACE
 from vlogsrt.project.raw.jobs import JobCancelledError, JobContext
@@ -568,7 +568,7 @@ def _read_record(target: Path) -> dict[str, object] | None:
     if not target.is_file():
         return None
     try:
-        body = json.loads(target.read_text(encoding="utf-8"))
+        body = json.loads(file_memo.read_text(target))  # 그리기마다 열지 않는다(D167)
     except (OSError, ValueError):
         return None
     return body if isinstance(body, dict) else None

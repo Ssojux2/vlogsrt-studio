@@ -32,6 +32,7 @@ from vlogsrt import log, oscompat, preprocess
 from vlogsrt.env import ANALYSIS_CLAUDE_KEY_ENV, ANALYSIS_GEMINI_KEY_ENV
 from vlogsrt.project.raw import (
     analysis_workflow,
+    file_memo,
     read_scope,
     render_plan,
     segmentation,
@@ -1220,9 +1221,26 @@ class RawWorkspaceService:
         # 순서 확정·되채움 쓰기·검토 순서 맞춤이 동시에 불려도 같은 일을 두 번 하지 않는다.
         self._order_lock = threading.Lock()
         self._align_lock = threading.Lock()
+        # 풀어 쓴 작업공간 뿌리(절대 경로만) — 그리기마다 같은 뿌리를 다시 풀지 않는다(D167).
+        self._root_keys: dict[Path, Path] = {}
+
+    def _root_key(self, root: Path) -> Path:
+        """작업공간 열쇠(풀어 쓴 절대 경로) — 절대 경로는 한 번 풀어 기억한다(D167).
+
+        그리기 한 번이 같은 뿌리를 약 200번 풀었다(칸마다 `lstat`). 상대 경로와 `~`는 작업 폴더·홈에
+        따라 달라지므로 매번 푼다. 이미 연 작업공간은 예전부터 처음 푼 열쇠에 묶여 있었다."""
+        if not root.is_absolute():
+            return root.expanduser().resolve()
+        with self._lock:
+            known = self._root_keys.get(root)
+        if known is None:
+            known = root.resolve()
+            with self._lock:
+                self._root_keys[root] = known
+        return known
 
     def _workspace(self, root: Path) -> RawWorkspace:
-        key = root.expanduser().resolve()
+        key = self._root_key(root)
         with self._lock:
             workspace = self._workspaces.get(key)
             if workspace is None:
@@ -1231,7 +1249,7 @@ class RawWorkspaceService:
             return workspace
 
     def _jobs(self, root: Path) -> JobManager:
-        key = root.expanduser().resolve()
+        key = self._root_key(root)
         with self._lock:
             manager = self._job_managers.get(key)
             if manager is None:
@@ -2490,7 +2508,7 @@ class RawWorkspaceService:
             return None
         directory, document = _tier_paths(workspace.root, row)
         if document.is_file():
-            body = document.read_bytes()
+            body = file_memo.read_bytes(document)  # 바이트만 기억한다 — 등급은 매번 계산(D51·D167)
             return tiering.classify(
                 json.loads(body),
                 audio_start=_record_audio_start(workspace.root, row),
@@ -3714,7 +3732,7 @@ class RawWorkspaceService:
         if not path.is_file():
             return None
         try:
-            body = json.loads(path.read_text(encoding="utf-8"))
+            body = json.loads(file_memo.read_text(path))
         except (OSError, ValueError):
             return None
         return body if isinstance(body, dict) else None
@@ -6938,7 +6956,7 @@ def _record_audio_start(workspace_root: Path, row: AnalysisSourceResult) -> Frac
     """PCM 표본 0의 공통 시계 위치 — 기록이 없으면 0(파일 시각과 같다고 본다)."""
     if row.record_path is None:
         return Fraction(0)
-    record = json.loads((workspace_root / row.record_path).read_text(encoding="utf-8"))
+    record = json.loads(file_memo.read_text(workspace_root / row.record_path))
     start = record.get("timeline", {}).get("audio", {}).get("common_start")
     return _json_fraction(start) if start else Fraction(0)
 
