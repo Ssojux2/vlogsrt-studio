@@ -170,3 +170,40 @@ def test_fit_shows_the_whole_timeline_inside_the_zoom_limits(tmp_path: Path) -> 
         {"start": 0, "tpp": 1000},
         {"start": 0, "tpp": 1},
     ]
+
+
+_GAP = r"""
+const L = require(process.argv[2]);
+const cues = [
+  ["a", "s", 1000, 2000, "", false],
+  ["b", "s", 2400, 3000, "", false],
+  ["c", "s", 3080, 4000, "", false],
+];
+console.log(JSON.stringify({
+  snaps: [L.gapSnaps(cues, 1, "start", 80), L.gapSnaps(cues, 1, "end", 80),
+    L.gapSnaps(cues, 0, "start", 80), L.gapSnaps(cues, 2, "end", 80)],
+  fit: [
+    L.fitGap(cues, 1900, 2600, 80, 100, 0, 9000),  // a 안에서 시작 — 넣지 않는다
+    L.fitGap(cues, 2000, 2600, 80, 100, 0, 9000),  // a 끝에 붙음 → a 끝 + 80, b 시작 - 80까지
+    L.fitGap(cues, 2050, 2300, 80, 100, 0, 9000),  // 빈칸 안 → 2080–2300
+    L.fitGap(cues, 3000, 3080, 80, 10, 0, 9000),   // b·c 사이 80틱 — 간격을 두면 자리가 없다
+    L.fitGap(cues, 4500, 9999, 80, 100, 0, 9000),  // 마지막 뒤 → 클립 끝까지
+    L.fitGap(cues, 4500, 9999, 80, 100, 4200, 6000),  // 시작이 든 클립 끝(컷)에서 멈춘다
+  ],
+}));
+"""
+
+
+@needs_node
+def test_neighbour_snaps_and_new_cues_keep_the_minimum_gap(tmp_path: Path) -> None:
+    """W-101(D170) — 스냅해도 이웃과 간격을 두고, 끌어 넣은 새 자막은 빈칸 안으로 맞춘다."""
+    core = tmp_path / "lane.js"
+    core.write_text(caption_lane_js.CAPTION_LANE_JS, encoding="utf-8")
+    runner = tmp_path / "gap.js"
+    runner.write_text(_GAP, encoding="utf-8")
+    done = subprocess.run(
+        ["node", str(runner), str(core)], capture_output=True, text=True, check=True, timeout=30
+    )
+    got = json.loads(done.stdout)
+    assert got["snaps"] == [[2080], [3000], [], []]
+    assert got["fit"] == [None, [2080, 2320], [2080, 2300], None, [4500, 9000], [4500, 6000]]

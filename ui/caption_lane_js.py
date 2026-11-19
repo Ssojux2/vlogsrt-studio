@@ -60,6 +60,29 @@ CAPTION_LANE_JS = r"""
   L.trimFrame = function (edgeFrame, deltaTicks, sourceFrameTicks) {
     return edgeFrame + Math.round(deltaTicks / sourceFrameTicks);
   };
+  // 자막 간격(W-101, D170) — 이웃 자막에 붙는 스냅 자리는 가장자리 그대로가 아니라 최소 간격만큼
+  // 띄운 자리다: 시작은 앞 자막 끝 + minGap, 끝은 뒤 자막 시작 − minGap.
+  L.gapSnaps = function (cues, index, part, minGap) {
+    var near = part === "start" ? cues[index - 1] : cues[index + 1];
+    if (!near) { return []; }
+    return [part === "start" ? near[3] + minGap : near[2] - minGap];
+  };
+  // 새 선택을 이웃 자막과 최소 간격을 둔 빈칸 안으로 — 선택 시작이 든 빈칸이다. 시작이 자막
+  // 안이거나 남는 길이가 minLength보다 짧으면 null(넣지 않는다). 보이는 자막(투영)만 본다.
+  // [floor, ceiling]은 시작이 든 클립의 처음·끝이다 — 새 자막은 컷을 넘지 않는다.
+  L.fitGap = function (cues, a, b, minGap, minLength, floor, ceiling) {
+    var lo = floor;
+    var hi = ceiling;
+    for (var i = 0; i < cues.length; i += 1) {
+      var cue = cues[i];
+      if (cue[2] < a && a < cue[3]) { return null; }
+      if (cue[3] <= a) { lo = Math.max(lo, cue[3] + minGap); }
+      else if (cue[2] >= a) { hi = Math.min(hi, cue[2] - minGap); }
+    }
+    var start = Math.max(a, lo);
+    var end = Math.min(b, hi);
+    return end - start >= minLength ? [Math.round(start), Math.round(end)] : null;
+  };
   // 가까운 스냅 자리(컷 경계 등)로 — snapTicks 안에 없으면 그대로.
   L.snap = function (ticks, snaps, snapTicks) {
     var chosen = ticks;

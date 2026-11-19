@@ -1415,9 +1415,15 @@ PLAYER_APP_JS = r"""
     return S.lane;
   }
   function laneMinGap() { return S.settings.minGapMs * TL.msTicks(S.doc.facts); }
+  // 틱 → 원본 밀리초 반올림(±½ ms)이 간격을 최소 아래로 내리지 않게 1 ms를 더 둔다(W-101, D170).
+  function laneSafeGap() { return laneMinGap() + TL.msTicks(S.doc.facts); }
+  // 컷 경계 · 타임라인 끝, 그리고 끄는 가장자리면 이웃 자막에서 최소 간격을 둔 자리(W-101, D170).
   function laneSnaps() {
     var cuts = S.spans.map(function (span) { return span.outStart * seqTicks(); });
-    return cuts.concat([laneTotal()]);
+    var drag = S.laneDrag;
+    var gaps = drag && (drag.part === "start" || drag.part === "end")
+      ? LN.gapSnaps(S.proj.cues, drag.index, drag.part, laneSafeGap()) : [];
+    return cuts.concat([laneTotal()], gaps);
   }
   function rawCue(id) { return S.doc.cues.filter(function (row) { return row[0] === id; })[0]; }
   function requestLane() {
@@ -1792,8 +1798,19 @@ PLAYER_APP_JS = r"""
   }
   // Enter — 새 선택 구간에 빈 자막을 넣고 글 칸으로(같은 원본 안에서만 — 문서 연산이 가른다).
   function insertSelection() {
-    var sel = S.laneSel;
+    // 이웃 자막과 최소 간격을 둔 빈칸 안으로 맞춘다(W-101, D170) — 자리가 없으면 넣지 않는다.
+    var span = S.spans.filter(function (row) {
+      return S.laneSel[0] < (row.outStart + row.outFrames) * seqTicks();
+    })[0] || S.spans[S.spans.length - 1];
+    var sel = LN.fitGap(S.proj.cues, S.laneSel[0], S.laneSel[1], laneSafeGap(), seqTicks(),
+      span.outStart * seqTicks(), (span.outStart + span.outFrames) * seqTicks());
     S.laneSel = null;
+    if (!sel) {
+      say("새 자막 — 이웃 자막과 간격(" + S.settings.minGapMs + " ms)을 둘 빈자리가 없습니다." +
+        " 자막 밖 빈 곳에서 끌어 주세요.", true);
+      requestLane();
+      return;
+    }
     var id = "n" + S.doc.nextCue;
     laneEdit("새 자막(파형)", function () {
       var a = TL.sourceMsAt(S.doc, sel[0], TL.SIDE_START);
