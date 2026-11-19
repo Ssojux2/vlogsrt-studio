@@ -5663,7 +5663,7 @@ class RawWorkspaceUi:
         return self.workspace_view_values()
 
     def _adopt_default_model(self, root: Path) -> None:
-        """기존 작업공간의 영상 분석 모델을 기본(Gemini 3.8 Flash)으로 한 번 옮긴다(D87).
+        """기존 작업공간의 영상 분석 모델을 기본(Gemini 4 Hydrogen, D168)으로 한 번 옮긴다(D87).
 
         화면의 승인 확인이 도는 동안에는 옮기지 않는다(다음 열기에 다시 본다). 옮기면 견적만 다시
         낸다 — 이미 산 분석은 그대로이고, 다시 분석하려면 새 견적을 보고 승인한다.

@@ -1,8 +1,9 @@
-"""W-30d — 새 작업공간은 고르지 않아도 Gemini 3.8 Flash로 판정한다: 작업대 전체 흐름(D87).
+"""W-30d — 새 작업공간은 고르지 않아도 기본 Gemini(지금 4 Hydrogen, D168)로 판정한다: 작업대 전체
+흐름(D87).
 
 가짜 전송만 바뀐다 — 전사(whisper 가짜)·창 계획·프레임·**창 클립(실제 ffmpeg,
 무료·로컬)**·승인·응답자· 영수증은 진짜 길이다. 유료 호출 0회. 시험이 못 박는 것: 요청마다 클립(그림
-+ 소리) + 프레임 + 안내문이 가고, 영수증이 Flash 공식 단가로 값을 매기며, 견적 상한이 Flash 창당
++ 소리) + 프레임 + 안내문이 가고, 영수증이 기본 모델 공식 단가로 값을 매기며, 견적 상한이 그 창당
 상한 × 창 수다.
 """
 
@@ -10,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import shutil
 import sqlite3
 from datetime import date
@@ -31,7 +33,7 @@ from vlogsrt.project.raw.understanding_luna import gemini_output_schema_bytes
 
 needs_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
 
-FLASH = "gemini-3.8-flash"
+FLASH = "gemini-4-hydrogen"  # 기본 분석 모델(D168) — 이름은 D87 시험의 것 그대로
 USAGE = {"promptTokenCount": 8000, "candidatesTokenCount": 300, "thoughtsTokenCount": 700}
 """가짜 응답의 사용량 — Flash 공식 단가로 (8000×$0.75 + 1000×$3.75)/100만 = $0.00975."""
 
@@ -98,7 +100,7 @@ def gemini_clients(opener: GeminiOpener) -> dict[str, GeminiClient]:
 
 
 @needs_ffmpeg
-def test_a_new_workspace_analyzes_with_flash_clips_and_frames(
+def test_a_new_workspace_analyzes_with_the_default_gemini_clips_and_frames(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = tmp_path / "scene.mov"
@@ -118,32 +120,40 @@ def test_a_new_workspace_analyzes_with_flash_clips_and_frames(
     state = settle(server)
     assert state["stage"] == DONE, state
     assert (len(sender.calls), len(luna.calls), len(opener.calls)) == (1, 0, 3)
-    sounds = []
-    for url, body in opener.calls:
+    sounds: dict[str, int] = {}  # 창 머리글 → 클립의 소리 트랙 수
+    for number, (url, body) in enumerate(opener.calls):
         assert url == (
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-4-hydrogen:generateContent"
         )
         assert set(body) == {"contents", "generationConfig"}
         parts = body["contents"][0]["parts"]
         video = parts[1]
         assert video["inlineData"]["mimeType"] == "video/mp4"
-        clip = tmp_path / f"clip-{len(url)}-{parts[0]['text'][:3]}.mp4"
+        clip = tmp_path / f"clip-{number}.mp4"
         clip.write_bytes(base64.b64decode(video["inlineData"]["data"]))
         probe = preprocess.probe_raw_media(clip)
-        sounds.append(len(probe.audio))
+        sounds[parts[0]["text"]] = len(probe.audio)
         assert max(probe.video.width, probe.video.height) <= 640
         assert "clip(그림과 소리" in parts[-1]["text"]
         assert body["generationConfig"]["thinkingConfig"] == {"thinkingLevel": "MEDIUM"}
         bound = gemini_cost.payload_bound(body, gemini_profile(FLASH), on=date.today())
         assert bound.usd > 0
-    assert sounds[0] == 1 and all(count <= 1 for count in sounds)  # 합성 원본의 소리는 4초뿐이다
+    # 합성 원본의 소리는 처음 4초뿐이다. 창은 공급자에 함께 가므로(D142) 받은 차례가 아니라 창의
+    # 시작으로 고른다 — 0초에서 시작하는 창의 클립만 소리를 싣는다.
+    starts = {text: re.search(r"구간 (\d+\.\d+)초부터", text) for text in sounds}
+    assert all(starts.values()), list(sounds)
+    first = [text for text, found in starts.items() if found and float(found.group(1)) == 0]
+    assert len(first) == 1 and sounds[first[0]] == 1
+    assert all(count <= 1 for count in sounds.values())
     revision = AnalysisStore(server.raw._workspace(root)).revision(state["revision"])
     assert revision is not None and json.loads(revision.models_json)["luna"] == FLASH
     with sqlite3.connect(root / "project.sqlite3") as db:
         db.row_factory = sqlite3.Row
         rows = list(db.execute("SELECT * FROM analysis_requests WHERE model=?", (FLASH,)))
     assert len(rows) == 3 and all(row["unpriced_reason"] is None for row in rows)
-    assert all(Decimal(row["cost_usd"]) == Decimal("0.00975") for row in rows)
+    # 같은 토큰 · Hydrogen 단가($1.50 · $7.50)는 Flash($0.75 · $3.75)의 정확히 두 배 — 0.00975 ×
+    # 2(D168)
+    assert all(Decimal(row["cost_usd"]) == Decimal("0.0195") for row in rows)
     (quoted,) = state["quote"].estimates
     per_window = gemini_cost.window_ceiling_usd(
         gemini_profile(FLASH),

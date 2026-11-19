@@ -48,6 +48,7 @@ needs_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg req
 
 SECRET = "sk-ant-synthetic-never-shown"
 FLASH = "gemini-3.8-flash"
+HYDROGEN = "gemini-4-hydrogen"
 
 
 def bare_server(tmp_path: Path, model: str | None = LUNA) -> RawWorkspaceUi:
@@ -69,9 +70,10 @@ def model_of(server: RawWorkspaceUi) -> str:
 
 def test_the_dropdown_switches_the_workspace_model_and_back(tmp_path: Path) -> None:
     server = bare_server(tmp_path)
-    # W-30d(D87): 기본(Gemini 3.8 Flash)이 맨 앞에 「(기본)」으로, 나머지는 그대로 고른다
+    # D168: 기본(Gemini 4 Hydrogen)이 맨 앞에 「(기본)」으로, 나머지는 그대로 고른다
     assert server.analysis_model_choices() == [
-        ("Gemini 3.8 Flash (기본)", FLASH),
+        ("Gemini 4 Hydrogen (기본)", HYDROGEN),
+        ("Gemini 3.8 Flash", FLASH),
         ("Gemini 4 Argon", "gemini-4-argon"),
         ("Claude Sonnet 5.5", SONNET),
         ("Claude Opus 5.5", CLAUDE),
@@ -84,18 +86,18 @@ def test_the_dropdown_switches_the_workspace_model_and_back(tmp_path: Path) -> N
     assert model_of(server) == LUNA and dropdown.value == LUNA
 
 
-def test_a_new_workspace_shows_flash_as_the_default_without_a_price(tmp_path: Path) -> None:
-    """새 작업공간은 Gemini 3.8 Flash로 시작한다(D87) — 「(기본)」은 선택지에만, 달러는 선택지에
+def test_a_new_workspace_shows_hydrogen_as_the_default_without_a_price(tmp_path: Path) -> None:
+    """새 작업공간은 Gemini 4 Hydrogen으로 시작한다(D168) — 「(기본)」은 선택지에만, 달러는 선택지에
     없다."""
     server = bare_server(tmp_path, model=None)
-    assert model_of(server) == FLASH
+    assert model_of(server) == HYDROGEN
     dropdown, status = server.analysis_model_controls()
-    assert dropdown.value == FLASH
+    assert dropdown.value == HYDROGEN
     labels = [label for label, _ in server.analysis_model_choices()]
-    assert labels[0] == "Gemini 3.8 Flash (기본)"
+    assert labels[0] == "Gemini 4 Hydrogen (기본)"
     assert sum("(기본)" in label for label in labels) == 1
     assert not any("$" in label for label in labels)
-    assert "Gemini 3.8 Flash" in status and "(기본)" not in status
+    assert "Gemini 4 Hydrogen" in status and "(기본)" not in status
     # 상태 줄도 달러·토큰 용어 없이 단가 상태만 말한다 — 금액은 말하지 않는다(D57 결정 7 · D110)
     assert "공식 단가 확인됨" in status and "견적" not in status
     assert not any(word in status for word in PRICE_WORDS), status
@@ -121,16 +123,16 @@ def test_no_screen_text_outside_quotes_shows_a_unit_price(tmp_path: Path, model:
 
 
 def test_switching_workspaces_refreshes_the_model_chooser(tmp_path: Path) -> None:
-    """작업공간을 바꾸면 칸도 그 작업공간의 모델을 보인다 — Luna 작업공간이 Flash로 안 보인다.
+    """작업공간을 바꾸면 칸도 그 작업공간의 모델을 보인다 — Luna 작업공간이 기본으로 안 보인다.
 
-    사람이 고른 Luna는 열어도 옮기지 않는다 — 옮기는 것은 예전 기본(Sonnet)에 머문
-    작업공간뿐이다(D87).
+    사람이 고른 Luna는 열어도 옮기지 않는다 — 옮기는 것은 예전 기본(Sonnet · Flash)에 머문
+    작업공간뿐이다(D87 · D168).
     """
     server = bare_server(tmp_path)  # Luna를 저장한 기존 작업공간
     luna_root = server.workspace_root()
     server.create_workspace_view("새 작업공간", str(tmp_path / "fresh"))
     dropdown, status = server.analysis_model_controls()
-    assert dropdown.value == FLASH and "Gemini 3.8 Flash" in status
+    assert dropdown.value == HYDROGEN and "Gemini 4 Hydrogen" in status
     server.open_workspace_view(str(luna_root))
     dropdown, status = server.analysis_model_controls()
     assert dropdown.value == LUNA and "gpt-6-luna" in status
@@ -261,6 +263,7 @@ def test_the_model_panel_carries_the_model_dropdown_and_never_the_key(
     dropdown, status = by_id["analysis-model"], by_id["analysis-model-status"]
     assert isinstance(dropdown, gr.Dropdown) and dropdown.label == "영상 분석 모델"
     assert [value for _, value in dropdown.choices] == [
+        HYDROGEN,
         FLASH,
         "gemini-4-argon",
         SONNET,

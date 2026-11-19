@@ -94,15 +94,15 @@ class RawModelRoles:
     프레임·전사 증거의 의미 해석만 맡는다. 한 모델이 두 역할을 겹치는 순간
     "시각 없는 문구에 가짜 시각"이 생긴다 — 검증이 그 조합을 막는다.
 
-    의미 분석(`luna_model` — 칸 이름은 저장 형식이라 그대로다)의 기본은 Gemini 3.8 Flash다(D87 —
-    사용자 지시 2026-10-25 「주로 Flash를 이용해서 처리」, 그 전에는 Claude Sonnet 5.5, D58). 새
-    작업공간은 이 값으로 만들어지고, 기존 작업공간은 열 때 한 번 이 값으로 옮긴다
-    (`RawWorkspaceService.adopt_default_analysis_model`) — 그 뒤 사람이 고른 모델은 그대로다.
+    의미 분석(`luna_model` — 칸 이름은 저장 형식이라 그대로다)의 기본은 Gemini 4 Hydrogen이다(D168 —
+    사용자 지시 2026-11-19 「Gemini 4 Hydrogen로 대체해줘」; 그 전 D87은 Gemini 3.8 Flash, D58은
+    Claude Sonnet 5.5). 새 작업공간은 이 값으로 만들어지고, 기존 작업공간은 열 때 한 번 이 값으로
+    옮긴다(`RawWorkspaceService.adopt_default_analysis_model`) — 그 뒤 사람이 고른 모델은 그대로다.
     """
 
     text_model: str = "gpt-transcribe"
     timing_model: str = "whisper-1"
-    luna_model: str = "gemini-3.8-flash"
+    luna_model: str = "gemini-4-hydrogen"
 
 
 @dataclass(frozen=True)
@@ -706,7 +706,8 @@ GEMINI_MODEL_PREFIX = "gemini-"
 
 GEMINI_THINKING_LEVELS = ("LOW", "MEDIUM", "HIGH")
 """등록된 Gemini 모델이 모두 받는 `thinkingConfig.thinkingLevel` 값(thinking 문서, 2026-10-25) —
-3.8 Flash·4 Argon 둘 다 low·medium·high이고 기본은 medium이다. `MINIMAL`은 이 둘이 받지 않는다."""
+3.8 Flash·4 Argon은 low·medium·high(기본 medium), 4 Hydrogen은 여기에 XHIGH를 더 받고 기본이 HIGH다
+(2026-11-19 확인). 셋 모두 받는 값만 둔다. `MINIMAL`은 셋 다 받지 않는다."""
 
 GEMINI_MAX_OUTPUT_TOKENS_LIMIT = 65_536
 """동기(background=False) generateContent의 `maxOutputTokens` 상한(thinking 문서) — 넘기면 400이다.
@@ -784,8 +785,37 @@ GEMINI_ARGON_ANALYSIS_PROFILE = RawGeminiAnalysisProfile(
 $4 · $20). 무료 등급이 없다. 출력·생각 한도는 Flash와 같은 값으로 둔다(조정 대상). 창당 보수적
 상한은 클립을 넣어 약 $0.180이다(Sonnet 5.5와 비슷하다)."""
 
+GEMINI_HYDROGEN_ANALYSIS_PROFILE = RawGeminiAnalysisProfile(
+    model="gemini-4-hydrogen",
+    label="Gemini 4 Hydrogen",
+    pricing_checked_at=date(2026, 11, 19),
+    pricing_revision="google-gemini-4-hydrogen-2026-11-19",
+    price_valid_through=date(2027, 2, 19),
+    input_per_mtok=Decimal("1.50"),
+    output_per_mtok=Decimal("7.50"),
+    source_urls=(
+        "https://aistudio.google.com/docs/pricing",
+        "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/4-hydrogen",
+        "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-hydrogen",
+        "https://ai.google.dev/gemini-api/docs/media-resolution",
+        "https://ai.google.dev/api/generate-content",
+    ),
+)
+"""Gemini 4 Hydrogen — 영상 분석의 기본(D168). 공식 가격표(2026-11-19 확인) Standard 입력 $1.50 ·
+출력(생각 포함) $7.50 / 100만 토큰 — 모달리티·길이로 나누지 않고 인상 예고가 없다. 그래서
+`price_valid_through`는 인상일이 아니라 **재확인 기한**(확인일 + 3개월, 외부 근거 없음 — 전사
+프로파일과 같은 뜻)이다.
+
+모델 문서(2026-11-19 확인): 입력은 글 · 이미지 · 소리 · 영상(출력은 글), 맥락
+1,048,576토큰(입력·출력 공유), 한 번에 출력 65,536토큰 · 생각 LOW·MEDIUM·HIGH(기본)·XHIGH —
+`MINIMAL`·`thinking_budget`은 400. Hydrogen의 기본 생각은 HIGH라 Flash와 같은 깊이(MEDIUM)를 적어
+보낸다. 표본 값(temperature 등)은 백엔드가 고정한다 — 이 앱은 보내지 않는다. 영상 장당 기본 70토큰 ·
+이미지 1,120토큰이라 창 상한의 장당 280 · 1,120은 그대로 보수적이다(소리 초당 토큰은 문서에 없어
+32를 그대로 쓴다). 창당 보수적 상한은 클립을 넣어 약 $0.136이다(Flash의 두 배)."""
+
 GEMINI_ANALYSIS_PROFILES: Mapping[str, RawGeminiAnalysisProfile] = MappingProxyType(
     {
+        GEMINI_HYDROGEN_ANALYSIS_PROFILE.model: GEMINI_HYDROGEN_ANALYSIS_PROFILE,
         GEMINI_FLASH_ANALYSIS_PROFILE.model: GEMINI_FLASH_ANALYSIS_PROFILE,
         GEMINI_ARGON_ANALYSIS_PROFILE.model: GEMINI_ARGON_ANALYSIS_PROFILE,
     }
@@ -1121,9 +1151,12 @@ def word_cue_problems(settings: WordCueSettings) -> list[str]:
 
 
 DEFAULT_ANALYSIS_MODEL: str = RawModelRoles().luna_model
-PREVIOUS_DEFAULT_ANALYSIS_MODELS = frozenset({CLAUDE_SONNET_ANALYSIS_PROFILE.model})
-"""열 때 기본으로 옮겨 줄 예전 기본(D58의 Sonnet 5.5) — 사람이 따로 고른 모델(Opus·Luna·Gemini)은
-옮기지 않는다(D87)."""
+PREVIOUS_DEFAULT_ANALYSIS_MODELS = frozenset(
+    {CLAUDE_SONNET_ANALYSIS_PROFILE.model, GEMINI_FLASH_ANALYSIS_PROFILE.model}
+)
+"""열 때 기본으로 옮겨 줄 예전 기본(D58의 Sonnet 5.5 · D87의 3.8 Flash) — 사람이 따로 고른
+모델(Opus·Luna·Argon)은 옮기지 않는다(D87·D168). Flash를 사람이 고른 작업공간도 기본과 구별할 수
+없어 함께 옮긴다 — 사용자 지시가 「대체」다(옮긴 뒤 다시 Flash를 고르면 그대로다)."""
 """새 작업공간의 의미 분석 모델 — Claude Sonnet 5.5(D58). 기존 작업공간은 저장된 값을 쓴다."""
 
 ANALYSIS_MODEL_CHOICES: tuple[str, ...] = (
@@ -1134,8 +1167,8 @@ ANALYSIS_MODEL_CHOICES: tuple[str, ...] = (
         if model != DEFAULT_ANALYSIS_MODEL
     ),
 )
-"""고를 수 있는 의미 분석 모델 — 기본(Gemini 3.8 Flash, D87)이 맨 앞, 그다음 Gemini 4 Argon, Claude
-Sonnet 5.5, Claude Opus 5.5, gpt-6-luna.
+"""고를 수 있는 의미 분석 모델 — 기본(Gemini 4 Hydrogen, D168)이 맨 앞, 그다음 Gemini 3.8 Flash ·
+Gemini 4 Argon · Claude Sonnet 5.5 · Claude Opus 5.5 · gpt-6-luna.
 
 모델을 바꿔도 이미 산 분석은 그대로 남는다 — 다시 분석하려면 새 견적을 보고 승인한다(유료)."""
 

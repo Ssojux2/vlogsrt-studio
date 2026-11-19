@@ -32,7 +32,7 @@ def test_defaults_match_the_2026_10_02_plan() -> None:
     assert config.models.text_model == "gpt-transcribe"
     assert config.models.timing_model == "whisper-1"
     # W-18(D58): 새 작업공간의 의미 분석 기본은 Claude Sonnet 5.5다 — 나머지는 2026-10-02 그대로
-    assert config.models.luna_model == "gemini-3.8-flash"  # D87(그 전 D58은 Sonnet 5.5)
+    assert config.models.luna_model == "gemini-4-hydrogen"  # D168(그 전 D87 Flash · D58 Sonnet 5.5)
     assert config.registry.revision == "openai-caption-2026-10-02-v1"
     assert config.registry.docs_checked_at == date(2026, 10, 2)
     assert config.registry.account_access_status == "unverified"
@@ -549,8 +549,9 @@ def test_provider_resolution_and_choices() -> None:
         claude_profile,
     )
 
-    # W-30d(D87): 기본(Gemini 3.8 Flash)이 맨 앞, Argon·Sonnet·Opus·gpt-6-luna도 그대로 고른다
+    # D168: 기본(Gemini 4 Hydrogen)이 맨 앞, Flash·Argon·Sonnet·Opus·gpt-6-luna도 그대로 고른다
     assert ANALYSIS_MODEL_CHOICES == (
+        "gemini-4-hydrogen",
         "gemini-3.8-flash",
         "gemini-4-argon",
         "claude-sonnet-5-5",
@@ -596,7 +597,7 @@ def test_the_default_workflow_json_is_byte_identical_with_no_new_keys() -> None:
     payload = raw_workflow_config_to_json(RawWorkflowConfig())
     luna_line = '"luna_model": "gpt-6-luna"'
     assert ACCEPTED_SETTINGS_JSON.count(luna_line) == 1
-    assert payload == ACCEPTED_SETTINGS_JSON.replace(luna_line, '"luna_model": "gemini-3.8-flash"')
+    assert payload == ACCEPTED_SETTINGS_JSON.replace(luna_line, '"luna_model": "gemini-4-hydrogen"')
     assert "anthropic" not in payload.lower()
 
 

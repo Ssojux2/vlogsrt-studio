@@ -178,6 +178,7 @@ CLAUDE = "claude-opus-5-5"
 SONNET = "claude-sonnet-5-5"
 LUNA = "gpt-6-luna"
 FLASH = "gemini-3.8-flash"
+HYDROGEN = "gemini-4-hydrogen"
 
 
 def _settings_args(workspace: Path, *extra: str) -> argparse.Namespace:
@@ -199,9 +200,9 @@ def test_media_settings_prints_and_switches_the_analysis_model(tmp_path: Path, c
 
     assert media.media_command(_settings_args(workspace)) == 0
     out = " ".join(capsys.readouterr().out.split())  # rich가 좁은 폭에서 줄을 접는다
-    # W-30d(D87): 새 작업공간은 Gemini 3.8 Flash로 시작한다 — 공식 단가와 키 이름이 함께 나온다
-    assert before.models.luna_model == FLASH
-    assert "Gemini 3.8 Flash" in out and "$0.75" in out and "$3.75" in out
+    # D168: 새 작업공간은 Gemini 4 Hydrogen으로 시작한다 — 공식 단가와 키 이름이 함께 나온다
+    assert before.models.luna_model == HYDROGEN
+    assert "Gemini 4 Hydrogen" in out and "$1.50" in out and "$7.50" in out
     assert "GEMINI_API_KEY" in out and "클립" in out
     assert "단가 미확인" not in out
     assert service.settings(workspace) == before  # 인쇄만 — 아무 것도 바꾸지 않는다
@@ -223,6 +224,8 @@ def test_media_settings_prints_and_switches_the_analysis_model(tmp_path: Path, c
     assert media.media_command(_settings_args(workspace, "--analysis-model", SONNET)) == 0
     assert service.settings(workspace).models.luna_model == SONNET  # Sonnet도 그대로 고른다
     assert media.media_command(_settings_args(workspace, "--analysis-model", FLASH)) == 0
+    assert service.settings(workspace).models.luna_model == FLASH  # Flash도 그대로 고른다
+    assert media.media_command(_settings_args(workspace, "--analysis-model", HYDROGEN)) == 0
     assert service.settings(workspace) == before
 
 
@@ -261,5 +264,5 @@ def test_media_settings_refuses_a_switch_during_an_active_analysis(
     assert "분석" in capsys.readouterr().err
     service = media._service()
     service.open_workspace(workspace)
-    # W-30d(D87): 새 작업공간의 모델(Gemini 3.8 Flash)이 거절 뒤에도 그대로다
-    assert service.settings(workspace).models.luna_model == FLASH
+    # D168: 새 작업공간의 모델(Gemini 4 Hydrogen)이 거절 뒤에도 그대로다
+    assert service.settings(workspace).models.luna_model == HYDROGEN

@@ -66,7 +66,12 @@ def payload(parts: list[dict[str, object]], **config: object) -> dict[str, objec
 
 
 def test_the_registry_holds_the_official_snapshot_of_2026_10_25() -> None:
-    assert list(GEMINI_ANALYSIS_PROFILES) == ["gemini-3.8-flash", "gemini-4-argon"]
+    # D168: Hydrogen(2026-11-19 확인)이 기본으로 앞에 섰다 — Flash·Argon의 10-25 판은 그대로다.
+    assert list(GEMINI_ANALYSIS_PROFILES) == [
+        "gemini-4-hydrogen",
+        "gemini-3.8-flash",
+        "gemini-4-argon",
+    ]
     assert (FLASH.input_per_mtok, FLASH.output_per_mtok) == (Decimal("0.75"), Decimal("3.75"))
     assert FLASH.price_valid_through == date(2026, 12, 31)
     assert (ARGON.input_per_mtok, ARGON.output_per_mtok) == (Decimal("2"), Decimal("10"))
@@ -373,3 +378,15 @@ def test_a_dated_model_version_still_prices() -> None:
     body = {**reply(), "modelVersion": "gemini-3.8-flash-001"}
     usage = gemini_cost.measure_gemini_usage(Meta("gemini-3.8-flash"), body, on=TODAY)
     assert usage.cost_usd is not None
+
+
+def test_hydrogen_is_registered_with_the_checked_price_of_2026_11_19() -> None:
+    """D168 — 입력 $1.50 · 출력(생각 포함) $7.50, 같은 엔드포인트·해상도·생각 깊이, 기한은 재확인
+    기한."""
+    hydrogen = GEMINI_ANALYSIS_PROFILES["gemini-4-hydrogen"]
+    assert (hydrogen.input_per_mtok, hydrogen.output_per_mtok) == (Decimal("1.50"), Decimal("7.50"))
+    assert hydrogen.pricing_checked_at == date(2026, 11, 19)
+    assert hydrogen.price_valid_through == date(2027, 2, 19)
+    assert hydrogen.image_tokens == FLASH.image_tokens and hydrogen.thinking_level == "MEDIUM"
+    assert hydrogen.api_base_url == FLASH.api_base_url and hydrogen.api_version == "v1beta"
+    assert gemini_profile_problems(hydrogen) == [] and gemini_profile(hydrogen.model) is hydrogen
