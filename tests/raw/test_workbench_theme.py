@@ -45,10 +45,14 @@ TEXT_ON_GROUNDS: dict[str, tuple[str, ...]] = {
         "success-soft",
         "warn-soft",
         "danger-soft",
+        # 재생기 클립 띠의 라벨(`#3 C_tall · 2.4초`)은 두 클립 채움 위에 놓인다.
+        "clip-fill",
+        "clip-fill-alt",
     ),
     "ink-muted": ("bg", "surface", "surface-raised", "surface-hover", "surface-sunken"),
     "ink-faint": ("surface", "surface-raised"),
     "accent-ink": ("bg", "surface", "surface-raised", "accent-soft"),
+    # 고른 클립(accent 채움)의 라벨도 on-accent다 — ink는 accent 위에서 4.5:1이 안 된다.
     "on-accent": ("accent", "accent-hover"),
     "on-tier-green": ("tier-green",),
     "on-tier-yellow": ("tier-yellow",),
@@ -251,7 +255,8 @@ def test_token_pairs_hold_contrast(theme_index: int) -> None:
             ratio = _contrast(tokens[mark], tokens[ground])
             assert ratio >= 3.0, (mark, ground, round(ratio, 2))
     # 재생 머리는 양옆 테두리(casing)와 함께 모든 등급 막대 위에서 읽힌다.
-    for fill in ("tier-green", "tier-yellow", "tier-red", "tier-red-deep", "surface-sunken"):
+    fills = ("tier-green", "tier-yellow", "tier-red", "tier-red-deep", "surface-sunken")
+    for fill in (*fills, "clip-fill", "clip-fill-alt", "accent", "caption-chip"):
         best = max(
             _contrast(tokens["playhead"], tokens[fill]),
             _contrast(tokens["playhead-casing"], tokens[fill]),

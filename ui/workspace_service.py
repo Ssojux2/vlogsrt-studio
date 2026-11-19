@@ -492,8 +492,7 @@ SRT_ENGLISH_ID = "vl-srt-english"
 """「영어 SRT로 변환」 칸(W-63, D114) — 한국어 SRT 하나를 영어 SRT로 옮긴다. 내보내기와 따로다."""
 SRT_ENGLISH_PATH_LABEL = "영어로 옮길 한국어 SRT"
 SRT_ENGLISH_PATH_INFO = (
-    "비워 두면 마지막 초안의 가장 새 SRT(draft.srt · SRT만 다시 낸 것)를 옮깁니다 — 최종 편집을"
-    " 저장했으면 편집본 SRT(`edit/final.srt`)입니다."
+    "비워 두면 방금 공유한 타임라인의 자막(SRT)을 옮깁니다."
     " 영어 SRT는 그 옆에 `<이름>.en.srt`로 생기고,"
     " 같은 이름의 다른 파일은 덮지 않습니다."
 )
@@ -4348,8 +4347,7 @@ class RawWorkspaceUi:
                 variant="primary",
                 elem_id="library-approve",
             )
-            self._cancel_button = gr.Button("선택 분석 취소", scale=0)
-            self._cancel_all_button = gr.Button("전체 분석 취소", scale=0, variant="stop")
+            self._cancel_buttons()
             # 「타임라인으로 보내기」(W-71b, D126) — 추천 구간을 렌더 없이 원본 범위 타임라인으로.
             # 「추천만 이어붙여 내보내기」는 은퇴했다(W-91, D161 — 사용자 결정 UI-3): 길은
             # 「타임라인으로 보내기 → 편집 → 공유」 하나다. Final Cut 보내기 둘은 서랍의
@@ -4374,6 +4372,20 @@ class RawWorkspaceUi:
             self._capcut_progress_md = gr.Markdown(self._quick_status(), elem_id="quick-status")
             # 실사용 줄만 따로 — 기록 판 맨 위 고정 줄의 원천이다(CSS로 숨긴다).
             self._usage_md = gr.Markdown(self.usage_line_markdown(), elem_id="vl-usage-src")
+
+    def _cancel_buttons(self) -> None:
+        """명령 줄의 분석 취소 둘 — 평소에는 조용한 단추이고 위험 색은 손을 얹거나 도는 작업이
+        있을 때만 보인다(CSS `.vl-cancel`). 켜고 끄는 길은 그대로다(늘 누를 수 있다)."""
+        self._cancel_button = gr.Button(
+            "선택 분석 취소", scale=0, elem_id="vl-cancel-selected", elem_classes=["vl-cancel"]
+        )
+        self._cancel_all_button = gr.Button(
+            "전체 분석 취소",
+            scale=0,
+            variant="stop",
+            elem_id="vl-cancel-all",
+            elem_classes=["vl-cancel"],
+        )
 
     def _review_stage(self) -> None:
         """V2 영상 작업대 — 목록 · 재생기 · 패널 · 타임라인 · 상태 줄, 그리고 분석 견적 한 칸.

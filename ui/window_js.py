@@ -561,9 +561,27 @@ def window_css() -> str:
 #{STAGE_ID} {{ position: relative; }}
 .vl-split {{ position: absolute; z-index: 5; touch-action: none; }}
 .vl-split[hidden] {{ display: none; }}
-.vl-split[aria-orientation="vertical"] {{ width: 8px; margin-left: -4px; cursor: col-resize; }}
-.vl-split[aria-orientation="horizontal"] {{ height: 8px; margin-top: -4px; cursor: row-resize; }}
+/* 손잡이는 무대(그라디오 줄)의 바로 아래 자식이라 그라디오의 `min-width: min(160px, 100%)`를
+   받아 160px로 부풀었다 — 「분석」 탭과 뷰어 왼쪽 가장자리를 덮어 누름을 가로챘다. 8px로 묶는다. */
+#{STAGE_ID} > .vl-split[aria-orientation="vertical"] {{ width: 8px; min-width: 0 !important;
+  flex: 0 0 8px; margin-left: -4px; cursor: col-resize; }}
+#{STAGE_ID} > .vl-split[aria-orientation="horizontal"] {{ height: 8px; min-height: 0 !important;
+  margin-top: -4px; cursor: row-resize; }}
+.vl-split::after {{ content: ""; position: absolute; background: transparent;
+  pointer-events: none; }}
+.vl-split[aria-orientation="vertical"]::after {{ top: 0; bottom: 0; left: 3px; width: 2px; }}
+.vl-split[aria-orientation="horizontal"]::after {{ left: 0; right: 0; top: 3px; height: 2px; }}
 .vl-split:hover {{ background: var(--vl-accent-soft); }}
+.vl-split:hover::after {{ background: var(--vl-accent-ink); }}
+/* 뷰어 표지(U7) — 지금 보이는 쪽이 원본인지 타임라인인지. 표시만 한다(누름을 받지 않는다). */
+#{VIEWER_ID} {{ position: relative; }}
+#{VIEWER_ID}:has(#visual-video[src])::before,
+#{STAGE_ID}[data-vl-viewer="{PROGRAM}"] #{VIEWER_ID}::before {{ content: "원본";
+  position: absolute; top: 8px; left: 8px; z-index: 4; padding: 2px 8px; border-radius: 4px;
+  pointer-events: none; font-size: 12px; font-weight: 600; line-height: 16px;
+  background: var(--vl-video-overlay); color: var(--vl-on-video-overlay); }}
+#{STAGE_ID}[data-vl-viewer="{PROGRAM}"] #{VIEWER_ID}::before {{ content: "타임라인"; }}
+#{STAGE_ID}[data-vl-viewer="{PROGRAM}"] #visual-note {{ display: none; }}
 /* 화면 맞춤(W-86c, D150) — 덱 머리의 단추. 켜면(넓은 화면, 타임라인이 있을 때) 무대를
    화면 높이에 묶고 위 덱(재생기 줄)과 아래 덱을 토큰 비율로 나눈다 — 덱과 뷰어는 제 칸
    안에서 스크롤·맞춤한다. */

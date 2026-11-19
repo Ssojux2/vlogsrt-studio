@@ -80,6 +80,16 @@ def test_the_summary_names_what_was_left_out_and_escapes_it() -> None:
     assert timeline_summary_html(None) == ""
 
 
+def test_the_summary_is_one_line_when_nothing_was_left_out() -> None:
+    """디자인 점검(U1) — 아래 덱이 14인치 화면 한 화면에 들도록 안내 글은 title로만 · 빠진 것이
+    없으면 목록(`<ul>`)도 내지 않는다. 빠진 것이 있으면 이름은 그대로 보인다(규칙 9)."""
+    page = timeline_summary_html(_model())
+    assert "<ul" not in page and "<li" not in page
+    assert f'title="{timeline_cell.NEXT_STEP_TEXT}"' in page
+    noted = timeline_summary_html(_model(seed={"unseeded": [{"name": "D.mp4"}]}))
+    assert "<li>추천 구간이 없어 넣지 않은 원본: D.mp4</li>" in noted
+
+
 def test_a_successful_send_stays_in_the_window_with_the_timeline_deck(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

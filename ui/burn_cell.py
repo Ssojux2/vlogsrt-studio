@@ -30,21 +30,18 @@ BURN_ID = "vl-burn"
 BURN_JOB_LABEL = "자막 입히기"
 TITLE_TEXT = (
     "**자막 입히기** — 영상에 한국어·영어 자막을 Pretendard로 새겨 `<이름>.burned.mp4`를"
-    " 만듭니다(원본은 그대로)."
+    " 만듭니다(원본은 그대로). 파일을 고르지 않으면 방금 공유한 타임라인의 영상·자막을 씁니다."
 )
+PATHS_LABEL = "파일 직접 고르기(고급)"
+"""세 경로 칸을 접어 두는 칸 — 비워 두는 것이 기본 길이라 단추가 칸 아래로 밀리지 않게 한다."""
+ACTIONS_ID = f"{BURN_ID}-actions"
+"""「미리보기」·「자막 입혀 내보내기」 줄 — 승인 칸이 스크롤해도 칸 아래에 붙는다(CSS)."""
 VIDEO_LABEL = "영상"
-VIDEO_INFO = (
-    "비워 두면 마지막 초안의 draft.mp4입니다 — 최종 편집을 저장했으면 그 컷대로 잘라 이어 입힙니다."
-)
+VIDEO_INFO = "비워 두면 방금 공유한 타임라인의 영상을 씁니다."
 KOREAN_LABEL = "한국어 SRT"
-KOREAN_INFO = (
-    "비워 두면 마지막 초안의 SRT입니다 — 최종 편집을 저장했으면 편집본 SRT(`edit/final.srt`)입니다."
-)
+KOREAN_INFO = "비워 두면 방금 공유한 타임라인의 자막을 씁니다."
 ENGLISH_LABEL = "영어 SRT"
-ENGLISH_INFO = (
-    "비워 두면 한국어 SRT 옆의 `<이름>.en.srt`(없으면 한글만)입니다 — 최종 편집이면 지금 편집본"
-    " 글을 옮긴 것만 씁니다."
-)
+ENGLISH_INFO = "비워 두면 한국어 SRT 옆의 `<이름>.en.srt`를 씁니다(없으면 한글만)."
 BROWSE_LABEL = "고르기"
 POSITION_LABEL = "위치"
 POSITION_CHOICES = [("아래", "bottom"), ("위", "top")]
@@ -139,11 +136,7 @@ class BurnCell:
         style = self.owner.raw.subtitle_burn_style()
         with gr.Group(elem_id=BURN_ID):
             gr.Markdown(TITLE_TEXT, elem_id=f"{BURN_ID}-title")
-            self.video, self.video_browse = self._path_row(VIDEO_LABEL, VIDEO_INFO, "video")
-            self.korean, self.korean_browse = self._path_row(KOREAN_LABEL, KOREAN_INFO, "korean")
-            self.english, self.english_browse = self._path_row(
-                ENGLISH_LABEL, ENGLISH_INFO, "english"
-            )
+            self._path_rows()
             self.position = gr.Radio(
                 POSITION_CHOICES,
                 value=style.position,
@@ -160,13 +153,23 @@ class BurnCell:
             self.color = gr.ColorPicker(
                 style.text_color, label=COLOR_LABEL, elem_id=f"{BURN_ID}-color"
             )
-            with gr.Row():
+            # 결과는 단추 줄 위에 선다 — 단추 줄이 칸 아래에 붙어 결과를 가리지 않는다.
+            self.preview_html = gr.HTML("", elem_id=f"{BURN_ID}-preview")
+            self.result = gr.Markdown("", elem_id=f"{BURN_ID}-result")
+            with gr.Row(elem_id=ACTIONS_ID):
                 self.preview_button = gr.Button(
                     PREVIEW_LABEL, size="sm", elem_id=f"{BURN_ID}-preview-run"
                 )
                 self.export_button = gr.Button(EXPORT_LABEL, size="sm", elem_id=f"{BURN_ID}-run")
-            self.preview_html = gr.HTML("", elem_id=f"{BURN_ID}-preview")
-            self.result = gr.Markdown("", elem_id=f"{BURN_ID}-result")
+
+    def _path_rows(self) -> None:
+        """세 경로 칸 — 비우는 것이 기본 길이라 접어 둔다(칸·처리기는 그대로다)."""
+        with gr.Accordion(PATHS_LABEL, open=False, elem_id=f"{BURN_ID}-paths"):
+            self.video, self.video_browse = self._path_row(VIDEO_LABEL, VIDEO_INFO, "video")
+            self.korean, self.korean_browse = self._path_row(KOREAN_LABEL, KOREAN_INFO, "korean")
+            self.english, self.english_browse = self._path_row(
+                ENGLISH_LABEL, ENGLISH_INFO, "english"
+            )
 
     def _path_row(self, label: str, info: str, name: str) -> tuple[Any, Any]:
         box = gr.Textbox(value="", label=label, info=info, elem_id=f"{BURN_ID}-{name}")

@@ -512,8 +512,8 @@ def test_the_timeline_index_lists_clips_and_cues_and_filters_errors() -> None:
     """W-86c(D150) — Final Cut 「인덱스」: 클립 · 자막(「오류 보기」) 목록, 누르면 그 자리로."""
     page = timeline_player_html(client_model("sig", "tok", _opened(), _media(), TIERS))
     for needle in ('id="tl-index-toggle"', 'id="tl-index"', 'id="tl-index-errors"',
-                   'data-tl="index-clips"', 'data-tl="index-cues"', ">블레이드</button>",
-                   ">실행 취소</button>", ">실행 복귀</button>"):  # fmt: skip
+                   'data-tl="index-clips"', 'data-tl="index-cues"', ">자르기</button>",
+                   ">실행 취소</button>", ">다시 실행</button>", ">목록</button>"):  # fmt: skip
         assert needle in page, needle
     for action in ("index", "index-clips", "index-cues"):
         assert re.search(rf'"{re.escape(action)}": ', PLAYER_JS) or f"{action}: " in PLAYER_JS
@@ -630,3 +630,35 @@ def test_make_english_without_a_connection_answers_why(
     for needle in ("laneSafeGap(), seqTicks(), laneTotal());",
                    "ticks - drag.origin, laneSafeGap(), laneTotal());"):  # fmt: skip
         assert needle in PLAYER_JS, needle
+
+
+def test_the_deck_reads_at_a_glance_after_the_design_audit() -> None:
+    """디자인 점검(U1·U3·U4·U5·U6·U8·U9) — 그리기·표시만 바꾼다(문서·키 뜻은 그대로).
+
+    맞춤을 재다 물러서도 덱 스크롤 자리를 지킨다 · 세 캔버스의 플레이헤드는 하나의 모양(빨강은 오류
+    몫이라 자막 끝 가장자리는 노랑 ink) · 시간 눈금 · 클립 채움 토큰 · 키 입력 창 표지 · 저장 표지 ·
+    「공유」가 주 동작이고 쉬운 이름을 쓴다."""
+    css = timeline_player.TIMELINE_PLAYER_CSS
+    page = timeline_player_html(client_model("sig", "tok", _opened(), _media(), TIERS))
+    fit = PLAYER_JS[PLAYER_JS.index("function fitDeck()") :].split("S.fitDeck = fitDeck;")[0]
+    assert "var kept = deck ? deck.scrollTop : 0;" in fit and fit.count("scrollTop = kept") == 2
+    assert '"transport head" "strip body" "range body" "lane body"' in css
+    for painter in ("function paintStrip()", "function paintSource()", "function paintLane()"):
+        body = PLAYER_JS[PLAYER_JS.index(painter) :].split("\n  }\n")[0]
+        assert "paintHead(" in body and '"--vl-danger"' not in body, painter
+    head = PLAYER_JS[PLAYER_JS.index("function paintHead(") :].split("\n  }\n")[0]
+    assert '"--vl-playhead-casing"' in head and '"--vl-playhead"' in head
+    cues = PLAYER_JS[PLAYER_JS.index("function paintLaneCues(") :].split("\n  }\n")[0]
+    assert '"--vl-tier-yellow-ink"' in cues and '"--vl-danger"' not in cues
+    assert "paintRuler(g, w, 0, 0," in PLAYER_JS and "paintRuler(ctx, width, band," in PLAYER_JS
+    assert "paintSourceEnds(g, w, h, source.frames * seconds);" in PLAYER_JS
+    assert '"--vl-clip-fill"' in PLAYER_JS and '"--vl-clip-fill-alt"' in PLAYER_JS
+    assert 'chosen && ready ? "--vl-on-accent" : "--vl-ink"' in PLAYER_JS
+    assert 'content: "키 입력"' in css and "0 0 0 2px var(--vl-accent-ink)" in css
+    assert ".tl-cue-row.is-current { background: var(--vl-surface-hover); }" in css
+    assert 'id="tl-save"' in page and "S.saving = true;\n    paintSaveChip();" in PLAYER_JS
+    for needle in ('class="tl-divider"', 'id="tl-render" class="tl-primary"',
+                   '영상에 넣을 자막 <select id="tl-burn"'):  # fmt: skip
+        assert needle in page, needle
+    for old in (">블레이드<", ">실행 복귀<", ">인덱스<", "번인 캡션 <select"):
+        assert old not in page, old

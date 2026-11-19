@@ -380,7 +380,7 @@ def test_final_cut_import_and_export_live_only_in_the_drawers(
 
 
 def test_flow_steps_and_empty_states_talk_about_folders(tmp_path: Path) -> None:
-    assert ui_facade.FLOW_STEP_LABELS == ("폴더 불러오기", "분석 승인", "검토", "내보내기")
+    assert ui_facade.FLOW_STEP_LABELS == ("폴더 불러오기", "분석 승인", "검토", "편집 · 공유")
     exported = ui_facade.flow_steps(
         ui_facade.FlowCounts(imported=2, analysed=2, proposals=1, exported=True)
     )
