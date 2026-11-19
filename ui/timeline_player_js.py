@@ -83,6 +83,9 @@ PLAYER_APP_JS = r"""
     if (!same) {
       S.playhead = 0; S.sel = 0; S.cursor = null; S.status = ""; S.statusError = false;
       S.cue = null; S.picked = []; S.anchor = null; S.english = null;
+      // 파형 레인의 보기는 그 문서의 틱 단위다 — 다른 타임라인(레이트가 다르면 틱도 다르다)을 열면
+      // 처음 줌으로 돌린다(W-97 — 29.97 문서가 30 문서의 보기를 물려받아 엉뚱하게 확대됐다).
+      S.lane = null;
     }
     bindDom();
     restoreTranslation();
@@ -1078,8 +1081,15 @@ PLAYER_APP_JS = r"""
     var above = root.getBoundingClientRect().top - deck.getBoundingClientRect().top +
       deck.scrollTop;
     var pad = parseFloat(getComputedStyle(deck).paddingBottom) || 0;
-    var want = Math.max(S.settings.cueListMinPx, Math.floor(deck.clientHeight - above - pad));
-    root.style.height = want + "px";
+    root.style.height = Math.floor(deck.clientHeight - above - pad) + "px";
+    // 고정 줄을 빼고 파형 레인이 최소 높이를 못 받으면(위 덱이 원본 타임라인을 펼친 때) 예전처럼
+    // 쌓고 덱이 스크롤한다 — 레인을 0으로 잘라 숨기지 않는다.
+    var lane = $("tl-lane");
+    if (!lane || lane.clientHeight < S.settings.fitLaneMinPx) {
+      root.classList.remove("is-fit");
+      root.style.height = "";
+    }
+    if (lane) { requestLane(); }
   }
   S.fitDeck = fitDeck;
   function paintCues() {
@@ -1706,7 +1716,9 @@ PLAYER_APP_JS = r"""
     if (hit.part === "body") { seek(frameAtTicks(ticks)); paint(); return; }
     var clip = S.doc.clips[hit.index];
     var side = hit.part === "start" ? TL.SIDE_START : TL.SIDE_END;
-    S.clipDrag = { index: hit.index, side: side, base: S.doc, origin: ticks,
+    var span = S.spans[hit.index];
+    var at = (side === TL.SIDE_START ? span.outStart : span.outStart + span.outFrames) * seqTicks();
+    S.clipDrag = { index: hit.index, side: side, base: S.doc, origin: ticks, at: at,
       edge: side === TL.SIDE_START ? clip[1] : clip[2], frame: null };
     laneCanvas().setPointerCapture(ev.pointerId);
     paint();
@@ -1716,7 +1728,8 @@ PLAYER_APP_JS = r"""
   // 문서에 남는다(규칙 9 — 다시 늘리면 돌아온다).
   function clipBandMove(ev) {
     var drag = S.clipDrag;
-    var ticks = LN.ticksAt(laneView(), laneX(ev));
+    // 붙는 것은 가장자리다 — 누른 자리와 가장자리의 차이만큼 옮겨 잰다.
+    var ticks = drag.at + LN.ticksAt(laneView(), laneX(ev)) - drag.origin;
     if (!ev.shiftKey && !S.snapOff) {
       var snaps = [S.playhead * seqTicks()];
       TL.layout(drag.base).forEach(function (span, i) {
@@ -1725,7 +1738,7 @@ PLAYER_APP_JS = r"""
       ticks = LN.snap(ticks, snaps, S.settings.snapPx * laneView().tpp);
     }
     var clip = drag.base.clips[drag.index];
-    var want = LN.trimFrame(drag.edge, ticks - drag.origin,
+    var want = LN.trimFrame(drag.edge, ticks - drag.at,
       TL.sourceFrameTicks(drag.base.facts, clip[0]));
     var frame = TL.clampEdge(drag.base, drag.index, drag.side, want, S.settings);
     if (frame === drag.frame) { return; }
@@ -1784,11 +1797,12 @@ PLAYER_APP_JS = r"""
       drag.neighbor = paired ? paired.neighbor : -1;
       drag.neighborValue = paired ? paired.neighborValue : null;
       drag.value = paired ? paired.value : LN.edge(cues, drag.index, drag.part, snapped,
-        laneMinGap(), seqTicks(), laneTotal());
+        laneSafeGap(), seqTicks(), laneTotal());
     } else if (drag.part === "many") {
-      drag.value = LN.bodyMany(cues, drag.indices, ticks - drag.origin, laneMinGap(), laneTotal());
+      drag.value = LN.bodyMany(cues, drag.indices, ticks - drag.origin, laneSafeGap(),
+        laneTotal());
     } else if (drag.part === "body") {
-      drag.value = LN.body(cues, drag.index, ticks - drag.origin, laneMinGap(), laneTotal());
+      drag.value = LN.body(cues, drag.index, ticks - drag.origin, laneSafeGap(), laneTotal());
     } else {
       drag.value = LN.range(drag.origin, ticks, laneTotal());
       S.laneSel = drag.value;
@@ -1878,7 +1892,7 @@ PLAYER_APP_JS = r"""
   function laneShiftTo(id, ticks) {
     var index = S.proj.cues.map(function (cue) { return cue[0]; }).indexOf(id);
     if (index < 0) { say("컷에 가려진 자막은 옮기지 않습니다.", true); return; }
-    var delta = LN.body(S.proj.cues, index, ticks - S.proj.cues[index][2], laneMinGap(),
+    var delta = LN.body(S.proj.cues, index, ticks - S.proj.cues[index][2], laneSafeGap(),
       laneTotal());
     laneShift(id, delta, "자막 옮기기(⌥)");
   }
@@ -1967,7 +1981,9 @@ PLAYER_APP_JS = r"""
     var payload = { signature: S.signature, token: S.token, timelineId: S.timelineId,
       revision: S.baseRevision };
     if (W.__vlServer) { W.__vlServer.wake(true); }
-    S.server.tl_translate(payload).then(function (got) {
+    S.server.tl_translate(payload).catch(function () {
+      return { ok: false, error: "영어 만들기를 걸지 못했습니다 — 서버가 답하지 않았습니다." };
+    }).then(function (got) {
       if (!got || !got.ok) {
         say((got && got.error) || "영어 만들기를 걸지 못했습니다.", true);
         return;
@@ -2016,7 +2032,7 @@ PLAYER_APP_JS = r"""
         if (W.__vlWindow && W.__vlWindow.showInspector) { W.__vlWindow.showInspector("share"); }
         // 새 초안의 저장된 영어가 생겼을 수 있다 — 번역 모드면 다시 찾는다.
         S.english = null;
-        if (S.translation) { askEnglish(); }
+        askEnglish();
       });
     }, POLL_MS);
   }
@@ -2058,6 +2074,8 @@ PLAYER_APP_JS = r"""
   }
   function saveNow(force) {
     if (S.saveTimer) { W.clearTimeout(S.saveTimer); S.saveTimer = null; }
+    // 클립 띠를 끄는 동안의 문서는 미리 그리기다(D169) — 놓은 뒤 기록과 함께 저장한다.
+    if (S.clipDrag) { scheduleSave(); return; }
     if (!S.dirty || S.saving || !S.doc) { return; }
     S.saving = true;
     var sent = S.doc;
@@ -2279,7 +2297,8 @@ PLAYER_APP_JS = r"""
     var indices = pickedIds().map(function (id) { return ids.indexOf(id); })
       .filter(function (i) { return i >= 0; });
     if (!indices.length) { return false; }
-    var delta = LN.bodyMany(S.proj.cues, indices, frames * seqTicks(), laneMinGap(), laneTotal());
+    var delta = LN.bodyMany(S.proj.cues, indices, frames * seqTicks(), laneSafeGap(),
+      laneTotal());
     if (!delta) {
       say("더 밀 자리가 없습니다 — 이웃 자막 · 최소 간격 · 타임라인 끝.", true);
       return true;
@@ -2423,6 +2442,13 @@ PLAYER_APP_JS = r"""
     if (deckEl && !deckEl.__tlFitBound && W.ResizeObserver) {
       deckEl.__tlFitBound = true;
       new W.ResizeObserver(function () { if (S.doc) { fitDeck(); } }).observe(deckEl);
+      // 작업공간(「자막」 — 목록이 덱 밖으로)·맞춤·뷰어가 바뀌면 덱 크기가 그대로여도 다시 잰다.
+      var stageEl = deckEl.closest("[id=visual-stage]");
+      if (stageEl && W.MutationObserver) {
+        new W.MutationObserver(function () { if (S.doc) { fitDeck(); } }).observe(stageEl, {
+          attributes: true,
+          attributeFilter: ["data-vl-workspace", "data-vl-fit", "data-vl-viewer"] });
+      }
     }
     // 자막 겹의 크기는 화면 틀 크기에 따른다(W-98) — 틀이 바뀌면 다시 그린다.
     var overlay = $("tl-overlay");

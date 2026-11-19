@@ -341,7 +341,7 @@ TIMELINE_PLAYER_CSS = """
    스크롤하지 않고 자막 목록 하나만 스크롤한다. 인덱스를 열었거나 목록이 덱 밖(「자막」
    작업공간)이면 달지 않는다. */
 @media (min-width: 1051px) {
-  .tl-root.is-fit { display: grid; gap: 6px 10px; margin-bottom: 0; overflow: hidden;
+  .tl-root.is-fit { display: grid; gap: 6px 10px; margin-bottom: 0;
     grid-template-columns: minmax(0, 1fr) minmax(320px, 38%);
     grid-template-rows: auto auto auto auto minmax(0, 1fr);
     grid-template-areas: "transport body" "strip body" "range body" "head body" "lane body"; }
@@ -544,7 +544,8 @@ class TimelinePlayer:
             if missing:
                 owner.raw.start_source_preview(root, asset_ids=missing)
             return {"ok": True, "started": list(missing)}
-        except (self.service_error, ValueError, TypeError, KeyError, OSError) as error:
+        except (self.service_error, gr.Error, ValueError, TypeError, KeyError, OSError) as error:
+            # gr.Error — 「영어 만들기」의 연결 없음(키 없음) 같은 화면 글도 값으로 돌려준다.
             return fail(error)
 
     def _save(

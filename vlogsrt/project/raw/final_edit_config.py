@@ -33,8 +33,8 @@ class FinalEditSettings:
       `snap_px`: 스냅이 붙는 거리(파형 자막 레인의 가장자리 잡는 거리도 같다, W-87b).
     - `lane_px_per_s`: 파형 자막 레인(W-87b)이 처음 보이는 1초의 화소 폭 — 줌 범위 안.
     - `lane_clip_px`: 파형 레인 위쪽 클립 띠(W-100, D169)의 높이 — 끝을 끌어 클립 길이를 고친다.
-    - `cue_list_min_px`: 한 화면 맞춤(W-102, D175)에서 아래 덱이 스크롤하지 않게 자막 목록을 남은
-      높이에 맞출 때의 최소 높이 — 이보다 좁으면 덱이 스크롤한다.
+    - `fit_lane_min_px`: 한 화면 맞춤(W-102, D175)의 두 열 격자에서 파형 레인이 받아야 하는 최소
+      높이 — 못 받으면(위 덱이 원본 타임라인을 펼친 때) 예전처럼 쌓고 덱이 스크롤한다.
     - `big_step_frames`: Shift+화살표·Shift+밀기의 프레임 수.
     - `shuttle_rates`: L을 거듭 누를 때의 배속.
     - `caption_step_ms`·`caption_small_step_ms`: 자막 창의 ←/→ · ⌥←/→ 한 걸음(Subtitle Edit 기본
@@ -62,7 +62,7 @@ class FinalEditSettings:
     snap_px: int = 8
     lane_px_per_s: int = 100
     lane_clip_px: int = 26
-    cue_list_min_px: int = 96
+    fit_lane_min_px: int = 96
     big_step_frames: int = 10
     shuttle_rates: tuple[int, ...] = (1, 2, 4, 8)
     caption_step_ms: int = 1000
@@ -74,7 +74,7 @@ class FinalEditSettings:
             self.min_clip_frames, self.max_text_chars, self.max_cues, self.autosave_ms,
             self.new_cue_ms, self.reverse_tick_ms, self.waveform_rate, self.waveform_bin_ms,
             self.zoom_min_px_per_s, self.big_step_frames, self.caption_step_ms, self.lane_clip_px,
-            self.cue_list_min_px,
+            self.fit_lane_min_px,
             self.caption_small_step_ms,
         )  # fmt: skip
         if min(positive) <= 0 or self.min_gap_ms < 0 or self.coalesce_ms < 0 or self.snap_px < 0:
@@ -114,7 +114,7 @@ def client_settings(settings: FinalEditSettings = FINAL_EDIT_SETTINGS) -> dict[s
         "snapPx": settings.snap_px,
         "lanePxPerS": settings.lane_px_per_s,
         "laneClipPx": settings.lane_clip_px,
-        "cueListMinPx": settings.cue_list_min_px,
+        "fitLaneMinPx": settings.fit_lane_min_px,
         "bigStepFrames": settings.big_step_frames,
         "shuttleRates": list(settings.shuttle_rates),
         "captionStepMs": settings.caption_step_ms,

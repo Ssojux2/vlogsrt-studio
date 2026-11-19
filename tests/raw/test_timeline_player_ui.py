@@ -588,12 +588,45 @@ def test_make_english_needs_the_token_and_translates_that_revisions_srt(
 
 def test_one_screen_is_the_default_and_the_keys_live_in_the_top_bar_sheet() -> None:
     """W-102(D175, 사용자 지시 「한화면에서 보이도록 · 단축키는 오른쪽 위 단추에 몰아서」) — 맞춤은
-    기억이 없으면 켜지고, 맞춤이면 자막 목록이 남은 높이를 받아 아래 덱이 따로 스크롤하지 않는다.
-    재생기 안에는 단축키 시트가 없다."""
+    기억이 없으면 켜지고, 맞춤이면 재생기가 두 열로 덱 남은 높이를 받는다 — 파형 레인이 최소
+    높이를 못 받으면 예전처럼 쌓는다(0으로 잘라 숨기지 않는다). 재생기 안에는 단축키 시트가 없다."""
     from ui import keymap, ui_facade, window_js
 
     page = timeline_player_html(client_model("sig", "tok", _opened(), _media(), TIERS))
     assert 'class="tl-keys"' not in page and "<details" not in page
     assert keymap.keysheet_sections_html() in ui_facade.keysheet_html()
     assert "return stored === null || stored === CFG.fitOn;" in window_js.window_bind_js()
-    assert "function fitDeck()" in PLAYER_JS and "S.settings.cueListMinPx" in PLAYER_JS
+    assert "function fitDeck()" in PLAYER_JS and "S.settings.fitLaneMinPx" in PLAYER_JS
+    fallback = (
+        'lane.clientHeight < S.settings.fitLaneMinPx) {\n      root.classList.remove("is-fit");'
+    )
+    assert fallback in PLAYER_JS
+    # 끄는 동안 미리 그린 문서는 저장하지 않는다(D169) · 공유 뒤 영어는 모드와 상관없이 찾는다.
+    assert "if (S.clipDrag) { scheduleSave(); return; }" in PLAYER_JS
+    assert "S.english = null;\n        askEnglish();" in PLAYER_JS
+
+
+def test_make_english_without_a_connection_answers_why(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W-99(D174) — 키가 없어 연결을 못 만들면(화면 글 `gr.Error`) 값으로 까닭을 돌려준다(조용히
+    실패하지 않는다). 파형 레인 끌기도 반올림 여유를 둔 간격을 쓴다(W-101, D170)."""
+    import gradio as gr
+
+    server, _root, signature = _server(tmp_path)
+    player = server._timeline_player
+    monkeypatch.setattr(server.raw, "timeline_korean_srt", lambda *_a: tmp_path / "k.srt")
+    monkeypatch.setattr(server.raw, "srt_translation_cached", lambda _r, _s: False)
+
+    def no_key() -> Any:
+        raise gr.Error("키가 없다")
+
+    monkeypatch.setattr(server, "_live_transport_for_action", no_key)
+    payload = {"signature": signature, "token": server._visual_lifetime_token,
+               "timelineId": "t1", "revision": 1}  # fmt: skip
+    got = player.action(payload, "translate")
+    assert got["ok"] is False and "키가 없다" in str(got["error"])
+    assert "S.server.tl_translate(payload).catch(" in PLAYER_JS
+    for needle in ("laneSafeGap(), seqTicks(), laneTotal());",
+                   "ticks - drag.origin, laneSafeGap(), laneTotal());"):  # fmt: skip
+        assert needle in PLAYER_JS, needle
