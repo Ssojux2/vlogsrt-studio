@@ -584,3 +584,16 @@ def test_make_english_needs_the_token_and_translates_that_revisions_srt(
     page = timeline_player_html(client_model("sig", "tok", _opened(), _media(), TIERS))
     assert 'data-tl="translate"' in page and ">영어 만들기</button>" in page
     assert "translate: translate" in PLAYER_JS and "watchTranslate(got.jobId)" in PLAYER_JS
+
+
+def test_one_screen_is_the_default_and_the_keys_live_in_the_top_bar_sheet() -> None:
+    """W-102(D175, 사용자 지시 「한화면에서 보이도록 · 단축키는 오른쪽 위 단추에 몰아서」) — 맞춤은
+    기억이 없으면 켜지고, 맞춤이면 자막 목록이 남은 높이를 받아 아래 덱이 따로 스크롤하지 않는다.
+    재생기 안에는 단축키 시트가 없다."""
+    from ui import keymap, ui_facade, window_js
+
+    page = timeline_player_html(client_model("sig", "tok", _opened(), _media(), TIERS))
+    assert 'class="tl-keys"' not in page and "<details" not in page
+    assert keymap.keysheet_sections_html() in ui_facade.keysheet_html()
+    assert "return stored === null || stored === CFG.fitOn;" in window_js.window_bind_js()
+    assert "function fitDeck()" in PLAYER_JS and "S.settings.cueListMinPx" in PLAYER_JS

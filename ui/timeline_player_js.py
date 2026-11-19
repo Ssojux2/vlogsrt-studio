@@ -91,6 +91,7 @@ PLAYER_APP_JS = r"""
     // 뷰어 하나(W-86b) — 화면(.tl-stage)을 위 덱 뷰어 칸으로 옮긴다(노드째, 청취자 그대로).
     if (W.__vlWindow && W.__vlWindow.adoptProgram) { W.__vlWindow.adoptProgram(S.rootEl); }
     showDeck();
+    fitDeck();
     seek(S.playhead);
     if (anyPreparing()) { poll(S.pollGen); }
   }
@@ -1055,6 +1056,32 @@ PLAYER_APP_JS = r"""
   function warnText(id) {
     return (S.warns[id] || []).map(function (k) { return WARN_LABEL[k] || k; }).join(" · ");
   }
+  // 한 화면 맞춤(W-102, D175) — 덱이 맞춤이고 넓은 화면이면 재생기를 두 열(`is-fit`)로 두고
+  // 덱의 남은 높이를 준다(덱은 스크롤하지 않고 자막 목록 하나만 스크롤한다). 인덱스를 열었거나
+  // 자막 목록이 덱 밖(「자막」 작업공간)이면 예전 모양이다.
+  function fitDeck() {
+    var root = S.rootEl;
+    if (!root || !root.closest) { return; }
+    var deck = root.closest("#vl-timeline-deck");
+    var body = root.querySelector(".tl-cues-body");
+    var index = $("tl-index");
+    var wide = W.matchMedia ? W.matchMedia("(min-width: 1051px)").matches : true;
+    var on = !!deck && !!deck.closest("[data-vl-fit]") && wide && !!body &&
+      getComputedStyle(deck).overflowY !== "visible" && !(index && !index.hidden);
+    if (!on) {
+      root.classList.remove("is-fit");
+      root.style.height = "";
+      return;
+    }
+    root.classList.add("is-fit");
+    // 덱 안에서 재생기 위에 놓인 것(요약 · 도구)과 아래 여백을 뺀 높이가 재생기 몫이다.
+    var above = root.getBoundingClientRect().top - deck.getBoundingClientRect().top +
+      deck.scrollTop;
+    var pad = parseFloat(getComputedStyle(deck).paddingBottom) || 0;
+    var want = Math.max(S.settings.cueListMinPx, Math.floor(deck.clientHeight - above - pad));
+    root.style.height = want + "px";
+  }
+  S.fitDeck = fitDeck;
   function paintCues() {
     if (!S.doc) { return; }
     paintCueList();
@@ -1401,7 +1428,7 @@ PLAYER_APP_JS = r"""
     if (!S.index) { S.index = { open: false, tab: "clips", errors: false }; }
     return S.index;
   }
-  function toggleIndex() { indexState().open = !indexState().open; paintIndex(); }
+  function toggleIndex() { indexState().open = !indexState().open; paintIndex(); fitDeck(); }
   function indexTab(tab) { indexState().tab = tab; paintIndex(); }
   function paintIndex() {
     var box = $("tl-index");
@@ -2391,6 +2418,11 @@ PLAYER_APP_JS = r"""
       lane.addEventListener("wheel", onLaneWheel, { passive: false });
       lane.addEventListener("contextmenu", onLaneMenu);
       if (W.ResizeObserver) { new W.ResizeObserver(requestLane).observe(lane); }
+    }
+    var deckEl = S.rootEl && S.rootEl.closest ? S.rootEl.closest("#vl-timeline-deck") : null;
+    if (deckEl && !deckEl.__tlFitBound && W.ResizeObserver) {
+      deckEl.__tlFitBound = true;
+      new W.ResizeObserver(function () { if (S.doc) { fitDeck(); } }).observe(deckEl);
     }
     // 자막 겹의 크기는 화면 틀 크기에 따른다(W-98) — 틀이 바뀌면 다시 그린다.
     var overlay = $("tl-overlay");

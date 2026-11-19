@@ -350,7 +350,11 @@ _BIND_JS = r"""
   });
   // ─── 화면 맞춤(W-86c) — 켜면 무대를 화면 높이에 묶고 위·아래 덱을 토큰 비율로 나눈다 ───
   function readFit() {
-    try { return W.localStorage.getItem(CFG.fitKey) === CFG.fitOn; } catch (error) { return false; }
+    // 처음(기억 없음)에는 켠다 — 한 화면이 기본이다(W-102, D175). 끄면 그 브라우저가 기억한다.
+    try {
+      var stored = W.localStorage.getItem(CFG.fitKey);
+      return stored === null || stored === CFG.fitOn;
+    } catch (error) { return true; }
   }
   function writeFit(on) {
     try { W.localStorage.setItem(CFG.fitKey, on ? CFG.fitOn : ""); } catch (error) { /* 편의 */ }

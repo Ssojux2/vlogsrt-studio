@@ -183,7 +183,8 @@ def timeline_player_html(model: dict[str, Any] | None) -> str:
             '<div class="tl-source-bar"><canvas id="tl-source-canvas"'
             ' aria-label="고른 클립의 원본 범위 — 손잡이를 끌어 앞뒤를 조정"></canvas></div></div>'
         )
-        + f"{_cue_panel_html()}{keymap.keysheet_html()}</div>"
+        # 단축키 시트는 머리줄 「단축키」 판 하나다(W-102, D175).
+        + f"{_cue_panel_html()}</div>"
     )
 
 
@@ -335,6 +336,25 @@ TIMELINE_PLAYER_CSS = """
 .tl-cue-list { position: relative; flex: 1 1 60%; min-width: 0; max-height: 260px;
   overflow-y: auto;
   border: 1px solid var(--vl-line); border-radius: 6px; background: var(--vl-surface-sunken); }
+/* 한 화면 맞춤(W-102, D175) — 실행본이 덱 남은 높이를 재 `is-fit`과 높이를 단다. 왼쪽은
+   이동 막대 · 클립 띠 · 원본 띠 · 파형 레인(남은 높이), 오른쪽은 자막 목록 · 편집 칸이다. 덱은
+   스크롤하지 않고 자막 목록 하나만 스크롤한다. 인덱스를 열었거나 목록이 덱 밖(「자막」
+   작업공간)이면 달지 않는다. */
+@media (min-width: 1051px) {
+  .tl-root.is-fit { display: grid; gap: 6px 10px; margin-bottom: 0; overflow: hidden;
+    grid-template-columns: minmax(0, 1fr) minmax(320px, 38%);
+    grid-template-rows: auto auto auto auto minmax(0, 1fr);
+    grid-template-areas: "transport body" "strip body" "range body" "head body" "lane body"; }
+  .tl-root.is-fit > .tl-transport { grid-area: transport; }
+  .tl-root.is-fit > .tl-strip { grid-area: strip; }
+  .tl-root.is-fit > .tl-range { grid-area: range; }
+  .tl-root.is-fit > .tl-cues { display: contents; }
+  .tl-root.is-fit .tl-cues-head { grid-area: head; }
+  .tl-root.is-fit .tl-lane { grid-area: lane; height: 100%; min-height: 0; }
+  .tl-root.is-fit .tl-cues-body { grid-area: body; flex-direction: column; min-height: 0; }
+  .tl-root.is-fit .tl-cue-list { flex: 1 1 auto; max-height: none; min-height: 0; }
+  .tl-root.is-fit .tl-cue-edit { flex: none; }
+}
 /* Subtitle Edit식 표(W-87, D146) — # · 시작 · 끝 · 길이 · 텍스트 · 간격 · 문자/초.
    머리는 목록 위에 붙는다. */
 .tl-cue-row, .tl-cue-grid-head { display: grid; column-gap: 8px; padding: 3px 8px;
