@@ -616,3 +616,23 @@ def test_transcription_identity_view_pins_the_analysis_model() -> None:
     assert transcription_identity_view(_claude_config()) == pinned
     online = replace(_claude_config(), network_mode="online")
     assert transcription_identity_view(online) == replace(pinned, network_mode="online")
+
+
+def test_output_format_is_4k_at_2997_in_the_shot_orientation() -> None:
+    """W-97(D172, 사용자 결정 2026-11-19 「4k · 29.97 · 세로는 세로로 가로는 가로로」)."""
+    from fractions import Fraction
+
+    from vlogsrt.project.raw.config import OUTPUT_FORMAT, OutputFormatSettings
+
+    assert OUTPUT_FORMAT.size("landscape") == (3840, 2160)
+    assert OUTPUT_FORMAT.size("portrait") == (2160, 3840)
+    assert OUTPUT_FORMAT.frame_duration == Fraction(1001, 30000)
+    for bad in (
+        {"long_edge": 2160, "short_edge": 3840},
+        {"long_edge": 3841},
+        {"frame_duration": Fraction(1, 7)},
+    ):
+        with pytest.raises(ValueError):
+            OutputFormatSettings(**bad)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        OUTPUT_FORMAT.size("square")

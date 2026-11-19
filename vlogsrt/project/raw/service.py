@@ -4088,9 +4088,11 @@ class RawWorkspaceService:
         """「타임라인으로 보내기」(W-71b, D126) — 추천 조각을 렌더하지 않고 원본 범위 타임라인으로
         만들어 새 `timeline/<시각>/`에 쓰는 작업. 원본 조사(ffprobe)만 하고 무료 로컬이다."""
         from vlogsrt.project.raw import timeline_edit_io
+        from vlogsrt.project.raw.config import OUTPUT_FORMAT
 
         def body(context: JobContext) -> None:
-            timeline_edit_io.create_timeline(self, root, context)
+            # 새 타임라인은 4K · 29.97fps, 방향은 남긴 길이가 많은 쪽(D172).
+            timeline_edit_io.create_timeline(self, root, context, output=OUTPUT_FORMAT)
 
         return self.submit_job(root, TIMELINE_EXPORT_JOB_KIND, "timeline_export/create", body)
 

@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Any
 
 from vlogsrt import oscompat
 from vlogsrt.project.raw import render_export, render_plan, timeline_edit
-from vlogsrt.project.raw.config import RENDER_SETTINGS, RenderSettings
+from vlogsrt.project.raw.config import RENDER_SETTINGS, OutputFormatSettings, RenderSettings
 from vlogsrt.project.raw.final_edit_config import (
     FINAL_EDIT_SETTINGS,
     FinalEditSettings,
@@ -99,12 +99,16 @@ def create_timeline(
     *,
     settings: RenderSettings = RENDER_SETTINGS,
     edit_settings: FinalEditSettings = FINAL_EDIT_SETTINGS,
+    output: OutputFormatSettings | None = None,
     now: Callable[[], datetime] = _utc_now,
 ) -> CreatedTimeline:
-    """추천 조각 → 원본 범위 타임라인 → 새 `timeline/<시각>/timeline.json`. 렌더하지 않는다."""
+    """추천 조각 → 원본 범위 타임라인 → 새 `timeline/<시각>/timeline.json`. 렌더하지 않는다.
+
+    `output`이 있으면 시퀀스는 그 고정 크기·레이트(D172 — 화면의 「타임라인으로 보내기」는
+    `OUTPUT_FORMAT`을 넘긴다), 없으면 렌더 계획이 고른 시퀀스 그대로다."""
     gathered = render_export.gather_sources(service, root, context)
     plan = render_export._build(gathered, settings)
-    facts = timeline_edit.facts_from_plan(plan, [item.source for item in gathered])
+    facts = timeline_edit.facts_from_plan(plan, [item.source for item in gathered], output)
     clips = tuple(
         timeline_edit.Clip(part.source_id, part.start_frame, part.end_frame) for part in plan.parts
     )
