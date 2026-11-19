@@ -47,3 +47,8 @@ def test_client_settings_carry_every_number_for_the_browser() -> None:
     assert (sent["captionStepMs"], sent["captionSmallStepMs"]) == (1000, 500)
     assert sent["minDurationMs"] == 850
     assert all(isinstance(value, (int, list)) for value in sent.values())
+
+
+def test_clip_band_height_reaches_the_browser() -> None:
+    # 파형 레인 위 클립 띠(W-100, D169) — 높이는 설정에서만 온다.
+    assert client_settings()["laneClipPx"] == FINAL_EDIT_SETTINGS.lane_clip_px > 0

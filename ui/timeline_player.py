@@ -184,8 +184,8 @@ def _cue_panel_html() -> str:
         ' title="번역 모드 전환 — 렌더한 초안의 저장된 영어를 한국어 글로 찾아 보인다'
         '(사지 않는다)">번역 모드</button></div>'
         '<canvas id="tl-lane" class="tl-lane" tabindex="-1"'
-        ' aria-label="파형 자막 레인 — 블록을 끌어 시각을 고치고,'
-        ' 빈 곳을 끌어 새 선택(Enter로 넣기)">'
+        ' aria-label="파형 자막 레인 — 위 클립 띠의 끝을 끌어 클립 길이를 고치고,'
+        ' 자막 블록을 끌어 시각을 고치고, 빈 곳을 끌어 새 선택(Enter로 넣기)">'
         "</canvas>"
         '<div class="tl-cues-body"><div id="tl-cue-list" class="tl-cue-list" role="listbox"'
         ' aria-label="보이는 자막 — 누르면 고르고 그 시작으로 간다"></div>'
@@ -303,7 +303,7 @@ TIMELINE_PLAYER_CSS = """
   .tl-root > #tl-index { grid-area: index; contain: size; min-height: 0; }
   .tl-root > #tl-index .tl-index-list { flex: 1 1 auto; min-height: 0; max-height: none; }
 }
-.tl-lane { display: block; width: 100%; height: 96px; border-radius: 6px;
+.tl-lane { display: block; width: 100%; height: 124px; border-radius: 6px;
   touch-action: none; }
 .tl-cues-body { display: flex; gap: 8px; align-items: stretch; }
 .tl-cue-list { position: relative; flex: 1 1 60%; min-width: 0; max-height: 260px;

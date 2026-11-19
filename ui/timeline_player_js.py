@@ -1451,18 +1451,48 @@ PLAYER_APP_JS = r"""
     var head = S.playhead * seqTicks();
     if (S.playing) { S.lane = LN.follow(laneView(), head, width); }
     var view = laneView();
+    var band = S.settings.laneClipPx;
     ctx.fillStyle = cssVar("--vl-surface-sunken");
     ctx.fillRect(0, 0, width, height);
-    paintLaneWave(ctx, view, width, height);
-    paintLaneCues(ctx, view, height);
+    paintLaneClips(ctx, view, width, band);
+    ctx.save();
+    ctx.translate(0, band);
+    paintLaneWave(ctx, view, width, height - band);
+    paintLaneCues(ctx, view, height - band);
     if (S.laneSel) {
       ctx.fillStyle = cssVar("--vl-accent-soft");
       var a = LN.x(view, S.laneSel[0]);
-      ctx.fillRect(a, 0, LN.x(view, S.laneSel[1]) - a, height);
+      ctx.fillRect(a, 0, LN.x(view, S.laneSel[1]) - a, height - band);
     }
+    ctx.restore();
     var ph = LN.x(view, head);
     ctx.fillStyle = cssVar("--vl-playhead");
     ctx.fillRect(Math.round(ph), 0, 1, height);
+  }
+  // 클립 띠(W-100, D169) — Final Cut 스토리라인처럼 클립마다 블록, 끝을 끌어 길이를 고친다.
+  function paintLaneClips(ctx, view, width, band) {
+    var seq = seqTicks();
+    var rate = laneRate();
+    S.spans.forEach(function (span, i) {
+      var xs = LN.x(view, span.outStart * seq);
+      var xe = LN.x(view, (span.outStart + span.outFrames) * seq);
+      if (xe < 0 || xs > width) { return; }
+      var chosen = i === S.sel;
+      ctx.globalAlpha = chosen ? 0.8 : 0.5;
+      ctx.fillStyle = cssVar(chosen ? "--vl-accent" : "--vl-caption-chip");
+      ctx.fillRect(xs + 1, 1, Math.max(1, xe - xs - 2), band - 2);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = cssVar(chosen ? "--vl-ink" : "--vl-ink-muted");
+      ctx.fillRect(xs + 1, 1, 2, band - 2);
+      ctx.fillRect(xe - 3, 1, 2, band - 2);
+      if (xe - xs > 48) {
+        ctx.fillStyle = cssVar("--vl-ink");
+        ctx.font = "11px " + cssVar("--vl-font-sans");
+        var seconds = span.outFrames * seq / rate;
+        ctx.fillText("#" + (i + 1) + " " + nameOf(span.sourceId) + " · " +
+          seconds.toFixed(1) + "초", xs + 6, band / 2 + 4, xe - xs - 12);
+      }
+    });
   }
   function paintLaneWave(ctx, view, width, height) {
     var unit = TL.msTicks(S.doc.facts);
@@ -1531,9 +1561,11 @@ PLAYER_APP_JS = r"""
     var view = laneView();
     var x = laneX(ev);
     var ticks = clamp(LN.ticksAt(view, x), 0, laneTotal());
+    if (S.rootEl) { S.rootEl.focus({ preventScroll: true }); }
+    var y = ev.clientY - laneCanvas().getBoundingClientRect().top;
+    if (y < S.settings.laneClipPx) { clipBandDown(ev, x, ticks); return; }
     var mod = ev.metaKey || ev.ctrlKey;
     var target = S.cue || targetCue();
-    if (S.rootEl) { S.rootEl.focus({ preventScroll: true }); }
     if (ev.shiftKey && !mod && target) {
       cueOp("start", target, undefined, frameAtTicks(ticks));
       return;
@@ -1567,12 +1599,84 @@ PLAYER_APP_JS = r"""
     paintCues();
     requestLane();
   }
+  // 클립 띠를 누르면 키 창은 「타임라인」이다(D154 — ⌫는 클립) · 고른 자막은 풀린다.
+  function clipBandDown(ev, x, ticks) {
+    var hit = LN.clipHit(S.spans, laneView(), x, S.settings.snapPx, seqTicks());
+    if (S.playing) { stopPlayback(); }
+    commitText();
+    clearPicked();
+    S.laneSel = null;
+    S.pane = "timeline";
+    if (S.rootEl) { S.rootEl.setAttribute("data-tl-pane", "timeline"); }
+    if (!hit) { paint(); return; }
+    S.sel = hit.index;
+    S.cursor = null;
+    if (hit.part === "body") { seek(frameAtTicks(ticks)); paint(); return; }
+    var clip = S.doc.clips[hit.index];
+    var side = hit.part === "start" ? TL.SIDE_START : TL.SIDE_END;
+    S.clipDrag = { index: hit.index, side: side, base: S.doc, origin: ticks,
+      edge: side === TL.SIDE_START ? clip[1] : clip[2], frame: null };
+    laneCanvas().setPointerCapture(ev.pointerId);
+    paint();
+  }
+  // 끄는 동안은 문서를 미리 바꿔 그린다(기록·저장 없음) — 뒤 클립·파형·자막이 함께 밀린다.
+  // 자막은 원본 시각에 붙어 있어 제 말과 함께 움직이고, 컷 밖으로 나간 자막은 가려질 뿐
+  // 문서에 남는다(규칙 9 — 다시 늘리면 돌아온다).
+  function clipBandMove(ev) {
+    var drag = S.clipDrag;
+    var ticks = LN.ticksAt(laneView(), laneX(ev));
+    if (!ev.shiftKey && !S.snapOff) {
+      var snaps = [S.playhead * seqTicks()];
+      TL.layout(drag.base).forEach(function (span, i) {
+        if (i !== drag.index) { snaps.push(span.outStart * seqTicks()); }
+      });
+      ticks = LN.snap(ticks, snaps, S.settings.snapPx * laneView().tpp);
+    }
+    var clip = drag.base.clips[drag.index];
+    var want = LN.trimFrame(drag.edge, ticks - drag.origin,
+      TL.sourceFrameTicks(drag.base.facts, clip[0]));
+    var frame = TL.clampEdge(drag.base, drag.index, drag.side, want, S.settings);
+    if (frame === drag.frame) { return; }
+    drag.frame = frame;
+    S.doc = frame === drag.edge ? drag.base
+      : (drag.side === TL.SIDE_START ? TL.setClipStart(drag.base, drag.index, frame, S.settings)
+        : TL.setClipEnd(drag.base, drag.index, frame, S.settings));
+    relayout();
+    showSourceFrame(clip[0], drag.side === TL.SIDE_START ? frame : frame - 1);
+    paint();
+  }
+  function clipBandUp() {
+    var drag = S.clipDrag;
+    S.clipDrag = null;
+    var moved = S.doc;
+    S.doc = drag.base;
+    relayout();
+    if (moved === drag.base) { paint(); return; }
+    var before = TL.project(drag.base).cues.length;
+    var after = TL.project(moved).cues.length;
+    var verb = drag.side === TL.SIDE_START ? "앞" : "뒤";
+    var label = "클립 " + (drag.index + 1) + " " + verb + " " +
+      (drag.frame - drag.edge > 0 ? "+" : "") + (drag.frame - drag.edge) + "프레임";
+    if (after < before) { label += " · 자막 " + (before - after) + "개 가려짐(늘리면 돌아옴)"; }
+    if (after > before) { label += " · 자막 " + (after - before) + "개 돌아옴"; }
+    change(moved, label);
+    var span = S.spans[drag.index];
+    seek(drag.side === TL.SIDE_START ? span.outStart : span.outStart + span.outFrames - 1);
+  }
   function onLaneMove(ev) {
     var c = laneCanvas();
     var view = laneView();
     var x = laneX(ev);
+    if (S.clipDrag) { clipBandMove(ev); return; }
     var drag = S.laneDrag;
     if (!drag) {
+      var y = ev.clientY - c.getBoundingClientRect().top;
+      if (y < S.settings.laneClipPx) {
+        var clip = S.spans.length ? LN.clipHit(S.spans, view, x, S.settings.snapPx, seqTicks())
+          : null;
+        c.style.cursor = !clip ? "default" : (clip.part === "body" ? "pointer" : "ew-resize");
+        return;
+      }
       var hover = LN.hit(S.proj ? S.proj.cues : [], view, x, S.settings.snapPx);
       c.style.cursor = !hover ? "default" : (hover.part === "body" ? "grab" : "ew-resize");
       return;
@@ -1600,6 +1704,7 @@ PLAYER_APP_JS = r"""
     requestLane();
   }
   function onLaneUp() {
+    if (S.clipDrag) { clipBandUp(); return; }
     var drag = S.laneDrag;
     S.laneDrag = null;
     if (!drag || !drag.moved || drag.value === null) { requestLane(); return; }
