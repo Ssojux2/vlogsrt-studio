@@ -519,3 +519,114 @@ def test_the_timeline_index_lists_clips_and_cues_and_filters_errors() -> None:
         assert re.search(rf'"{re.escape(action)}": ', PLAYER_JS) or f"{action}: " in PLAYER_JS
     assert "!errorsOnly || row.warned" in PLAYER_JS
     assert 'indexList.addEventListener("pointerdown", onIndexDown);' in PLAYER_JS
+
+
+def test_the_model_carries_the_burn_style_for_the_overlay() -> None:
+    """W-98(D173) — 자막 겹은 저장한 번인 모양을 근사한다(모양 · 기준 높이 · 영어 크기 · 여백)."""
+    from ui.timeline_player import burn_model
+    from vlogsrt.project.raw import burn_in
+    from vlogsrt.project.raw.burn_config import BURN_SETTINGS
+
+    style = burn_in.BurnStyle("top", 70, 2, 30, "#FFCC00")
+    model = client_model("sig", "tok", _opened(), _media(), TIERS, burn_model(style, BURN_SETTINGS))
+    assert model["burn"] == {
+        "style": {"position": "top", "font_px": 70, "outline_px": 2, "margin_px": 30,
+                  "text_color": "#FFCC00"},
+        "referenceHeight": 1080, "englishScale": 0.8, "sideMargin": 0.05,
+        "outlineColor": "#000000",
+    }  # fmt: skip
+    assert client_model("sig", "tok", _opened(), _media(), TIERS)["burn"] is None
+    js = PLAYER_JS
+    assert "function paintOverlay()" in js and "S.setBurnStyle = function (style)" in js
+    # 영어 줄은 고친 영어(낡지 않은 것) 또는 저장된 번역만 — 「번역 없음」 같은 표시는 싣지 않는다.
+    assert 'label.kind === "edited" || label.kind === "saved" ? label.text : ""' in js
+    painter = js.split("function overlayCues")[1].split("S.setBurnStyle")[0]
+    assert "line.textContent = text;" in painter and "innerHTML" not in painter
+
+
+def test_make_english_needs_the_token_and_translates_that_revisions_srt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W-99(D174) — 「영어 만들기」는 수명 토큰에 묶인 유료 누름이다. 저장한 리비전의 SRT를
+    「영어 SRT로 변환」과 같은 작업에 넘기고, 이미 옮긴 글이면 연결을 묻지 않는다."""
+    from vlogsrt.project.raw import service as raw_service
+
+    server, _root, signature = _server(tmp_path)
+    player = server._timeline_player
+    srt = tmp_path / "korean-r5.srt"
+    started: list[tuple[Path, object]] = []
+    monkeypatch.setattr(server.raw, "timeline_korean_srt", lambda _r, _t, revision: srt)
+    monkeypatch.setattr(server.raw, "srt_translation_cached", lambda _r, _s: True)
+    monkeypatch.setattr(
+        server,
+        "_live_transport_for_action",
+        lambda: pytest.fail("이미 옮긴 글 — 연결을 묻지 않는다"),
+    )
+
+    def start(_root: Path, path: Path, client: object) -> Any:
+        started.append((path, client))
+        return SimpleNamespace(job_id="e1")
+
+    monkeypatch.setattr(server.raw, "start_srt_translation", start)
+    payload: dict[str, object] = {
+        "signature": signature, "token": "낡은-토큰", "timelineId": "t1", "revision": 5,
+    }  # fmt: skip
+    assert player.action(payload, "translate")["ok"] is False and started == []
+    payload["token"] = server._visual_lifetime_token
+    assert player.action(payload, "translate") == {"ok": True, "jobId": "e1"}
+    assert started == [(srt, None)]
+    assert player.action({**payload, "revision": True}, "translate")["ok"] is False
+    jobs = {"e1": SimpleNamespace(job_id="e1", kind=raw_service.SRT_TRANSLATE_JOB_KIND,
+                                  status="succeeded")}  # fmt: skip
+    monkeypatch.setattr(server.raw, "get_job", lambda _root, job_id: jobs[job_id])
+    assert player.action({"signature": signature, "jobId": "e1"}, "job")["ended"] is True
+    assert "tl_translate" in [f.__name__ for f in player.server_functions()]
+    page = timeline_player_html(client_model("sig", "tok", _opened(), _media(), TIERS))
+    assert 'data-tl="translate"' in page and ">영어 만들기</button>" in page
+    assert "translate: translate" in PLAYER_JS and "watchTranslate(got.jobId)" in PLAYER_JS
+
+
+def test_one_screen_is_the_default_and_the_keys_live_in_the_top_bar_sheet() -> None:
+    """W-102(D175, 사용자 지시 「한화면에서 보이도록 · 단축키는 오른쪽 위 단추에 몰아서」) — 맞춤은
+    기억이 없으면 켜지고, 맞춤이면 재생기가 두 열로 덱 남은 높이를 받는다 — 파형 레인이 최소
+    높이를 못 받으면 예전처럼 쌓는다(0으로 잘라 숨기지 않는다). 재생기 안에는 단축키 시트가 없다."""
+    from ui import keymap, ui_facade, window_js
+
+    page = timeline_player_html(client_model("sig", "tok", _opened(), _media(), TIERS))
+    assert 'class="tl-keys"' not in page and "<details" not in page
+    assert keymap.keysheet_sections_html() in ui_facade.keysheet_html()
+    assert "return stored === null || stored === CFG.fitOn;" in window_js.window_bind_js()
+    assert "function fitDeck()" in PLAYER_JS and "S.settings.fitLaneMinPx" in PLAYER_JS
+    fallback = (
+        'lane.clientHeight < S.settings.fitLaneMinPx) {\n      root.classList.remove("is-fit");'
+    )
+    assert fallback in PLAYER_JS
+    # 끄는 동안 미리 그린 문서는 저장하지 않는다(D169) · 공유 뒤 영어는 모드와 상관없이 찾는다.
+    assert "if (S.clipDrag) { scheduleSave(); return; }" in PLAYER_JS
+    assert "S.english = null;\n        askEnglish();" in PLAYER_JS
+
+
+def test_make_english_without_a_connection_answers_why(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W-99(D174) — 키가 없어 연결을 못 만들면(화면 글 `gr.Error`) 값으로 까닭을 돌려준다(조용히
+    실패하지 않는다). 파형 레인 끌기도 반올림 여유를 둔 간격을 쓴다(W-101, D170)."""
+    import gradio as gr
+
+    server, _root, signature = _server(tmp_path)
+    player = server._timeline_player
+    monkeypatch.setattr(server.raw, "timeline_korean_srt", lambda *_a: tmp_path / "k.srt")
+    monkeypatch.setattr(server.raw, "srt_translation_cached", lambda _r, _s: False)
+
+    def no_key() -> Any:
+        raise gr.Error("키가 없다")
+
+    monkeypatch.setattr(server, "_live_transport_for_action", no_key)
+    payload = {"signature": signature, "token": server._visual_lifetime_token,
+               "timelineId": "t1", "revision": 1}  # fmt: skip
+    got = player.action(payload, "translate")
+    assert got["ok"] is False and "키가 없다" in str(got["error"])
+    assert "S.server.tl_translate(payload).catch(" in PLAYER_JS
+    for needle in ("laneSafeGap(), seqTicks(), laneTotal());",
+                   "ticks - drag.origin, laneSafeGap(), laneTotal());"):  # fmt: skip
+        assert needle in PLAYER_JS, needle

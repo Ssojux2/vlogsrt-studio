@@ -1901,7 +1901,10 @@ class RawWorkspaceUi:
         )
         # 원본 범위 타임라인 재생기(W-71c) — 타임라인 요약 아래, 원본마다 미리보기를 튼다.
         self._timeline_player = TimelinePlayer(
-            self, raw_service.RawWorkspaceError, raw_service.RENDER_EXPORT_JOB_KIND
+            self,
+            raw_service.RawWorkspaceError,
+            raw_service.RENDER_EXPORT_JOB_KIND,
+            raw_service.SRT_TRANSLATE_JOB_KIND,
         )
         self._status_sent: tuple[gr.State, ...] = ()
         self._choose_event: Any = None

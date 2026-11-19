@@ -44,12 +44,26 @@ def _rational(row: dict[str, Any]) -> tuple[int, int]:
     return int(row["num"]), int(row["den"])
 
 
+def burn_model(style: Any, settings: Any) -> dict[str, Any]:
+    """자막 겹(W-98, D173)이 번인 모양을 근사하는 재료 — 저장한 모양과 번인 설정의 비율들.
+    (화면 계층은 프로젝트 계층을 import하지 않는다 — 받은 값의 칸만 읽는다.)"""
+    keys = ("position", "font_px", "outline_px", "margin_px", "text_color")
+    return {
+        "style": {key: getattr(style, key) for key in keys},
+        "referenceHeight": settings.reference_height,
+        "englishScale": float(settings.english_scale),
+        "sideMargin": float(settings.side_margin_ratio),
+        "outlineColor": settings.outline_color,
+    }
+
+
 def client_model(
     signature: str,
     token: str,
     opened: dict[str, Any],
     media: dict[str, Any],
     tiers: dict[str, Any],
+    burn: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """브라우저가 받는 재료 — 문서는 브라우저 핵심(`__vlTL`)의 모양 그대로다."""
     facts = opened["facts"]
@@ -87,6 +101,7 @@ def client_model(
         "media": media["sources"],
         "tiers": tiers,
         "settings": opened["settings"],
+        "burn": burn,
     }
 
 
@@ -168,7 +183,8 @@ def timeline_player_html(model: dict[str, Any] | None) -> str:
             '<div class="tl-source-bar"><canvas id="tl-source-canvas"'
             ' aria-label="고른 클립의 원본 범위 — 손잡이를 끌어 앞뒤를 조정"></canvas></div></div>'
         )
-        + f"{_cue_panel_html()}{keymap.keysheet_html()}</div>"
+        # 단축키 시트는 머리줄 「단축키」 판 하나다(W-102, D175).
+        + f"{_cue_panel_html()}</div>"
     )
 
 
@@ -180,12 +196,17 @@ def _cue_panel_html() -> str:
         '<button type="button" data-tl="cue-insert"'
         ' title="플레이헤드에 빈 자막 넣기 (⌥C)">새 자막 ⌥C</button>'
         # 번역 모드(W-87d, D153) — Subtitle Edit 「번역 모드 전환」: 영어 열을 붙인다(읽기만).
+        # 「영어 만들기」(W-99, D174) — 저장한 리비전의 자막을 Gemini로 옮긴다(유료 · 누름이 승인).
+        '<button type="button" data-tl="translate" id="tl-translate"'
+        ' title="저장한 자막을 영어로 옮긴다(Gemini · 유료 · 누름이 승인) —'
+        ' 같은 글은 다시 사지 않고, 한국어를 고친 뒤 다시 누르면 지금 글을 옮긴다">'
+        "영어 만들기</button>"
         '<button type="button" data-tl="translation" id="tl-translation" aria-pressed="false"'
         ' title="번역 모드 전환 — 렌더한 초안의 저장된 영어를 한국어 글로 찾아 보인다'
         '(사지 않는다)">번역 모드</button></div>'
         '<canvas id="tl-lane" class="tl-lane" tabindex="-1"'
-        ' aria-label="파형 자막 레인 — 블록을 끌어 시각을 고치고,'
-        ' 빈 곳을 끌어 새 선택(Enter로 넣기)">'
+        ' aria-label="파형 자막 레인 — 위 클립 띠의 끝을 끌어 클립 길이를 고치고,'
+        ' 자막 블록을 끌어 시각을 고치고, 빈 곳을 끌어 새 선택(Enter로 넣기)">'
         "</canvas>"
         '<div class="tl-cues-body"><div id="tl-cue-list" class="tl-cue-list" role="listbox"'
         ' aria-label="보이는 자막 — 누르면 고르고 그 시작으로 간다"></div>'
@@ -225,6 +246,12 @@ TIMELINE_PLAYER_CSS = """
   font-weight: 600; color: var(--vl-on-video-overlay);
   text-shadow: 0 0 3px var(--vl-video-well), 0 0 3px var(--vl-video-well),
     0 0 6px var(--vl-video-well); }
+/* 번인 모양을 따르는 자막 겹(W-98, D173) — 크기·색·외곽선·자리는 실행본이 저장한 모양으로 단다. */
+.tl-overlay.is-styled { text-shadow: none; line-height: 1.2; display: flex;
+  flex-direction: column; align-items: center; justify-content: flex-end; gap: 0.1em;
+  font-family: "Pretendard", var(--vl-font-sans); }
+.tl-overlay.is-styled.is-top { justify-content: flex-start; }
+.tl-overlay.is-styled > div { paint-order: stroke fill; overflow-wrap: anywhere; }
 .tl-transport { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; }
 .tl-transport button { font: inherit; font-size: 12px; padding: 2px 8px; border-radius: 4px;
   cursor: pointer; border: 1px solid var(--vl-line-strong); background: var(--vl-surface-raised);
@@ -303,12 +330,31 @@ TIMELINE_PLAYER_CSS = """
   .tl-root > #tl-index { grid-area: index; contain: size; min-height: 0; }
   .tl-root > #tl-index .tl-index-list { flex: 1 1 auto; min-height: 0; max-height: none; }
 }
-.tl-lane { display: block; width: 100%; height: 96px; border-radius: 6px;
+.tl-lane { display: block; width: 100%; height: 124px; border-radius: 6px;
   touch-action: none; }
 .tl-cues-body { display: flex; gap: 8px; align-items: stretch; }
 .tl-cue-list { position: relative; flex: 1 1 60%; min-width: 0; max-height: 260px;
   overflow-y: auto;
   border: 1px solid var(--vl-line); border-radius: 6px; background: var(--vl-surface-sunken); }
+/* 한 화면 맞춤(W-102, D175) — 실행본이 덱 남은 높이를 재 `is-fit`과 높이를 단다. 왼쪽은
+   이동 막대 · 클립 띠 · 원본 띠 · 파형 레인(남은 높이), 오른쪽은 자막 목록 · 편집 칸이다. 덱은
+   스크롤하지 않고 자막 목록 하나만 스크롤한다. 인덱스를 열었거나 목록이 덱 밖(「자막」
+   작업공간)이면 달지 않는다. */
+@media (min-width: 1051px) {
+  .tl-root.is-fit { display: grid; gap: 6px 10px; margin-bottom: 0;
+    grid-template-columns: minmax(0, 1fr) minmax(320px, 38%);
+    grid-template-rows: auto auto auto auto minmax(0, 1fr);
+    grid-template-areas: "transport body" "strip body" "range body" "head body" "lane body"; }
+  .tl-root.is-fit > .tl-transport { grid-area: transport; }
+  .tl-root.is-fit > .tl-strip { grid-area: strip; }
+  .tl-root.is-fit > .tl-range { grid-area: range; }
+  .tl-root.is-fit > .tl-cues { display: contents; }
+  .tl-root.is-fit .tl-cues-head { grid-area: head; }
+  .tl-root.is-fit .tl-lane { grid-area: lane; height: 100%; min-height: 0; }
+  .tl-root.is-fit .tl-cues-body { grid-area: body; flex-direction: column; min-height: 0; }
+  .tl-root.is-fit .tl-cue-list { flex: 1 1 auto; max-height: none; min-height: 0; }
+  .tl-root.is-fit .tl-cue-edit { flex: none; }
+}
 /* Subtitle Edit식 표(W-87, D146) — # · 시작 · 끝 · 길이 · 텍스트 · 간격 · 문자/초.
    머리는 목록 위에 붙는다. */
 .tl-cue-row, .tl-cue-grid-head { display: grid; column-gap: 8px; padding: 3px 8px;
@@ -357,10 +403,18 @@ TIMELINE_PLAYER_CSS = """
 class TimelinePlayer:
     """칸 하나 — 「최종 편집」 탭 머리에서 타임라인 요약 아래에 선다."""
 
-    def __init__(self, owner: Any, service_error: type[Exception], render_job_kind: str) -> None:
+    def __init__(
+        self,
+        owner: Any,
+        service_error: type[Exception],
+        render_job_kind: str,
+        translate_job_kind: str | None = None,
+    ) -> None:
         self.owner = owner
         self.service_error = service_error
         self.render_job_kind = render_job_kind
+        # 「영어 만들기」(W-99, D174)가 거는 번역 작업 — 재생기가 그 끝을 묻는다.
+        self.translate_job_kind = translate_job_kind
         self.block: Any = None
 
     def build(self) -> None:
@@ -393,7 +447,9 @@ class TimelinePlayer:
             return timeline_error_html(f"타임라인 재생기를 열지 못했습니다 — {error}")
         token = self.owner._visual_lifetime_token
         # 등급 띠는 고른 클립의 원본만 그때 묻는다(`tl_tiers`) — 원본 104개면 그리기마다 0.9초였다.
-        return timeline_player_html(client_model(signature, token, opened, media, {}))
+        raw = self.owner.raw
+        burn = burn_model(raw.subtitle_burn_style(root), raw.subtitle_burn_settings())
+        return timeline_player_html(client_model(signature, token, opened, media, {}, burn))
 
     # ── 서버 함수(클라이언트 `server.tl_*`) ──────────────────────────
 
@@ -425,6 +481,9 @@ class TimelinePlayer:
         def tl_english(payload: dict[str, object]) -> dict[str, object]:
             return self.action(payload, "english")
 
+        def tl_translate(payload: dict[str, object]) -> dict[str, object]:
+            return self.action(payload, "translate")
+
         return [
             tl_media,
             tl_prepare,
@@ -435,6 +494,7 @@ class TimelinePlayer:
             tl_job,
             tl_wave,
             tl_english,
+            tl_translate,
         ]
 
     def action(self, payload: dict[str, object], kind: str) -> dict[str, object]:
@@ -446,7 +506,7 @@ class TimelinePlayer:
 
         try:
             root = owner._require_current_selection(owner._serve_str(payload, "signature") or None)
-            if kind in ("prepare", "save", "render", "add"):
+            if kind in ("prepare", "save", "render", "add", "translate"):
                 owner._require_workbench_token(payload, owner._visual_lifetime_token, TAB_LABEL)
         except gr.Error as error:
             return fail(error, stale=True)
@@ -460,6 +520,8 @@ class TimelinePlayer:
                 return self._add(root, timeline_id, payload)
             if kind == "job":
                 return self._job(root, payload)
+            if kind == "translate":
+                return self._translate(root, timeline_id, payload)
             if kind == "wave":
                 source_id = owner._serve_str(payload, "sourceId")
                 wave = owner.raw.timeline_waveform(root, source_id)
@@ -482,7 +544,8 @@ class TimelinePlayer:
             if missing:
                 owner.raw.start_source_preview(root, asset_ids=missing)
             return {"ok": True, "started": list(missing)}
-        except (self.service_error, ValueError, TypeError, KeyError, OSError) as error:
+        except (self.service_error, gr.Error, ValueError, TypeError, KeyError, OSError) as error:
+            # gr.Error — 「영어 만들기」의 연결 없음(키 없음) 같은 화면 글도 값으로 돌려준다.
             return fail(error)
 
     def _save(
@@ -514,9 +577,29 @@ class TimelinePlayer:
     def _job(self, root: Any, payload: dict[str, object]) -> dict[str, object]:
         """재생기가 건 렌더 작업의 상태(W-71h) — 렌더 작업만 답한다. 읽기만 한다."""
         job = self.owner.raw.get_job(root, self.owner._serve_str(payload, "jobId"))
-        if job.kind != self.render_job_kind:
-            raise ValueError("렌더 작업이 아닙니다.")
+        if job.kind not in (self.render_job_kind, self.translate_job_kind):
+            raise ValueError("재생기가 건 작업(렌더 · 영어 만들기)이 아닙니다.")
         return {"ok": True, "status": job.status, "ended": job.status in JOB_ENDED}
+
+    def _translate(
+        self, root: Any, timeline_id: str | None, payload: dict[str, object]
+    ) -> dict[str, object]:
+        """저장한 리비전의 자막을 영어로 옮기는 작업을 건다(W-99, D174) — 누름이 승인이다(D110).
+
+        리비전의 SRT를 타임라인 폴더에 쓰고 「영어 SRT로 변환」과 같은 작업에 넘긴다. 같은 글을 이미
+        옮겼으면 저장된 번역을 쓰고(무료) 연결을 묻지 않는다."""
+        revision = payload.get("revision")
+        if timeline_id is None or not isinstance(revision, int) or isinstance(revision, bool):
+            raise ValueError("영어 만들기 요청의 모양이 틀렸습니다(타임라인 · 리비전).")
+        raw = self.owner.raw
+        srt = raw.timeline_korean_srt(root, timeline_id, revision)
+        client = None
+        if not raw.srt_translation_cached(root, srt):
+            client = self.owner._live_transport_for_action().semantic_client(
+                raw.translation_model()
+            )
+        handle = raw.start_srt_translation(root, srt, client)
+        return {"ok": True, "jobId": handle.job_id}
 
     def _render(
         self, root: Any, timeline_id: str | None, payload: dict[str, object]

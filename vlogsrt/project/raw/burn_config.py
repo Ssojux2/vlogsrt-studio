@@ -1,7 +1,8 @@
 """자막 입히기(번인, W-65 D116)의 설정 — 순수 조판(`burn_in`)과 입출력(`burn_export`)이 읽는다.
 
 **모든 값이 외부 근거 없는 조정 대상이다**(규칙 8). 글자 크기·외곽선·여백은 1080p 기준 픽셀로 적고
-영상 높이에 비례해 늘리거나 줄인다 — 영화 자막처럼 화면 높이의 약 1/20 글자, 4px 검은 외곽선,
+영상의 짧은 변(가로 영상은 높이, 세로 영상은 너비 — D171)에 비례해 늘리거나 줄인다 —
+영화 자막처럼 화면 높이의 약 1/20 글자, 4px 검은 외곽선,
 아래 여백 60px가 기본이다. 영어 줄은 한글 줄의 4/5 크기로 그 아래에 쌓는다(사용자 선택 2026-11-12).
 글꼴은 강의자료가 쓰는 Pretendard의 SemiBold 한 벌을 꾸러미에 싣는다(SIL OFL 1.1 — `data/fonts/`).
 어느 지문·캐시 열쇠·승인·견적·등급에도 없다 — 바꾸면 다음 번인만 달라진다.
@@ -22,7 +23,7 @@ HEX_COLOR = re.compile(r"#[0-9A-Fa-f]{6}")
 
 @dataclass(frozen=True)
 class BurnSettings:
-    """번인 설정 — `*_px`는 `reference_height`(1080p) 기준 픽셀이다.
+    """번인 설정 — `*_px`는 `reference_height`(1080p) 기준 픽셀이다(영상의 짧은 변으로 잰다, D171).
 
     - `font_file`·`font_name`: 꾸러미 `vlogsrt/project/raw/data/fonts/`의 파일과 libass가 찾는
       전체 이름. 실측 libass 0.17.5가 `fontselect: (Pretendard SemiBold, 400, 0) ->

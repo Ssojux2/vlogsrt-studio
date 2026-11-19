@@ -32,6 +32,7 @@ from dataclasses import dataclass, replace
 from fractions import Fraction
 
 from vlogsrt.project.raw import render_plan
+from vlogsrt.project.raw.config import OutputFormatSettings
 from vlogsrt.project.raw.final_edit import text_chars, valid_cue_id
 from vlogsrt.project.raw.final_edit_config import FINAL_EDIT_SETTINGS, FinalEditSettings
 from vlogsrt.project.raw.models import RawWorkspaceError
@@ -200,14 +201,25 @@ def _ms_half_down(ticks: int, unit: int) -> int:
 
 
 def facts_from_plan(
-    plan: render_plan.RenderPlan, sources: Sequence[render_plan.RenderSource]
+    plan: render_plan.RenderPlan,
+    sources: Sequence[render_plan.RenderSource],
+    output: OutputFormatSettings | None = None,
 ) -> TimelineFacts:
-    """계획이 고른 시퀀스와 계획이 받는 원본(격자를 증명한 것) — 남긴 조각이 없는 원본도 싣는다."""
+    """계획이 고른 시퀀스와 계획이 받는 원본(격자를 증명한 것) — 남긴 조각이 없는 원본도 싣는다.
+
+    `output`이 있으면 시퀀스는 계획의 방향(D66)에 그 고정 크기·레이트다(D172).
+    없으면 계획 그대로다."""
     if plan.sequence is None:
         raise TimelineEditError("남길 조각이 하나도 없어 시퀀스 포맷을 정할 수 없다")
     kept = [s for s in sources if render_plan.excluded_reason(s) is None]
+    sequence = plan.sequence
+    if output is not None:
+        width, height = output.size(sequence.orientation)
+        sequence = render_plan.SequenceFormat(
+            sequence.orientation, width, height, output.frame_duration
+        )
     return TimelineFacts(
-        sequence=plan.sequence,
+        sequence=sequence,
         sources=tuple(
             TimelineSource(s.source_id, s.clock.frame_duration, s.clock.frame_count) for s in kept
         ),

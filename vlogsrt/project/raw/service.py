@@ -1776,6 +1776,15 @@ class RawWorkspaceService:
             return burn_in.default_style()
         return burn_export.saved_style(self, root)
 
+    def save_subtitle_burn_style(self, root: Path, values: Any) -> Any:
+        """손잡이를 바꾸면 바로 저장한다(W-98, D173) — 공유의 번인이 화면에 보인 모양을 쓰게.
+        검사해서 저장하고 저장한 모양을 돌려준다(범위 밖이면 `RawWorkspaceError` — 저장 안 함)."""
+        from vlogsrt.project.raw import burn_export
+
+        style = self.subtitle_burn_style(values=values)
+        burn_export.save_style(self, root, style)
+        return style
+
     def prepare_subtitle_burn(
         self, root: Path, video: Path | None, korean: Path | None, english: Path | None
     ) -> Any:
@@ -4088,9 +4097,11 @@ class RawWorkspaceService:
         """「타임라인으로 보내기」(W-71b, D126) — 추천 조각을 렌더하지 않고 원본 범위 타임라인으로
         만들어 새 `timeline/<시각>/`에 쓰는 작업. 원본 조사(ffprobe)만 하고 무료 로컬이다."""
         from vlogsrt.project.raw import timeline_edit_io
+        from vlogsrt.project.raw.config import OUTPUT_FORMAT
 
         def body(context: JobContext) -> None:
-            timeline_edit_io.create_timeline(self, root, context)
+            # 새 타임라인은 4K · 29.97fps, 방향은 남긴 길이가 많은 쪽(D172).
+            timeline_edit_io.create_timeline(self, root, context, output=OUTPUT_FORMAT)
 
         return self.submit_job(root, TIMELINE_EXPORT_JOB_KIND, "timeline_export/create", body)
 
@@ -4138,6 +4149,13 @@ class RawWorkspaceService:
         from vlogsrt.project.raw import source_waveform
 
         return source_waveform.waveform(self._workspace(root), source_id)
+
+    def timeline_korean_srt(self, root: Path, timeline_id: str, revision: int) -> Path:
+        """저장한 리비전의 자막 SRT(W-99, D174) — 「영어 만들기」가 `start_srt_translation`에
+        넘긴다. 무료(파일 하나). 화면의 리비전이 지금 저장본과 다르면 거부한다."""
+        from vlogsrt.project.raw import timeline_edit_io
+
+        return timeline_edit_io.korean_srt(root, timeline_id, revision)
 
     def timeline_english(self, root: Path, timeline_id: str) -> dict[str, str]:
         """타임라인 자막의 영어 열(W-87d) — 렌더한 초안들의 저장된 번역을 한국어 글로.

@@ -36,6 +36,53 @@ CAPTION_LANE_JS = r"""
     });
     return best ? { index: best.index, id: best.id, part: best.part } : null;
   };
+  // 클립 띠(W-100, D169) — 레인 위쪽에 클립마다 블록. 맞힌 클립과 자리(start · end · body).
+  // 가장자리는 edgePx 안에서 가까운 쪽이 이기고, 같으면 x를 몸통에 담은 클립이 이긴다(맞닿은
+  // 두 클립 사이에서는 누른 쪽 클립의 가장자리). spans는 배치 줄({outStart, outFrames})이다.
+  L.clipHit = function (spans, view, x, edgePx, seqTicks) {
+    var best = null;
+    spans.forEach(function (span, index) {
+      var xs = L.x(view, span.outStart * seqTicks);
+      var xe = L.x(view, (span.outStart + span.outFrames) * seqTicks);
+      var inside = xs <= x && x < xe;
+      [["start", Math.abs(x - xs)], ["end", Math.abs(x - xe)]].forEach(function (pair) {
+        if (pair[1] > edgePx) { return; }
+        var better = !best || pair[1] < best.distance ||
+          (pair[1] === best.distance && inside && !best.inside);
+        if (better) { best = { index: index, part: pair[0], distance: pair[1], inside: inside }; }
+      });
+      if (!best && inside) { best = { index: index, part: "body", distance: edgePx + 1 }; }
+    });
+    return best ? { index: best.index, part: best.part } : null;
+  };
+  // 클립 가장자리 끌기 — 끈 틱만큼 원본 프레임을 옮긴다(가장 가까운 프레임). 갈 수 있는 자리는
+  // 재생기가 문서 규칙으로 다시 막는다.
+  L.trimFrame = function (edgeFrame, deltaTicks, sourceFrameTicks) {
+    return edgeFrame + Math.round(deltaTicks / sourceFrameTicks);
+  };
+  // 자막 간격(W-101, D170) — 이웃 자막에 붙는 스냅 자리는 가장자리 그대로가 아니라 최소 간격만큼
+  // 띄운 자리다: 시작은 앞 자막 끝 + minGap, 끝은 뒤 자막 시작 − minGap.
+  L.gapSnaps = function (cues, index, part, minGap) {
+    var near = part === "start" ? cues[index - 1] : cues[index + 1];
+    if (!near) { return []; }
+    return [part === "start" ? near[3] + minGap : near[2] - minGap];
+  };
+  // 새 선택을 이웃 자막과 최소 간격을 둔 빈칸 안으로 — 선택 시작이 든 빈칸이다. 시작이 자막
+  // 안이거나 남는 길이가 minLength보다 짧으면 null(넣지 않는다). 보이는 자막(투영)만 본다.
+  // [floor, ceiling]은 시작이 든 클립의 처음·끝이다 — 새 자막은 컷을 넘지 않는다.
+  L.fitGap = function (cues, a, b, minGap, minLength, floor, ceiling) {
+    var lo = floor;
+    var hi = ceiling;
+    for (var i = 0; i < cues.length; i += 1) {
+      var cue = cues[i];
+      if (cue[2] < a && a < cue[3]) { return null; }
+      if (cue[3] <= a) { lo = Math.max(lo, cue[3] + minGap); }
+      else if (cue[2] >= a) { hi = Math.min(hi, cue[2] - minGap); }
+    }
+    var start = Math.max(a, lo);
+    var end = Math.min(b, hi);
+    return end - start >= minLength ? [Math.round(start), Math.round(end)] : null;
+  };
   // 가까운 스냅 자리(컷 경계 등)로 — snapTicks 안에 없으면 그대로.
   L.snap = function (ticks, snaps, snapTicks) {
     var chosen = ticks;

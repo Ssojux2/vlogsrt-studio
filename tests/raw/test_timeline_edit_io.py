@@ -458,3 +458,16 @@ def test_edited_cues_are_saved_reopened_and_carried_into_the_srt(trip: Folder) -
     srt = timeline_edit.srt_text(back)
     assert "앞 반" in srt and "뒤 반" in srt and "고친 글" not in srt
     assert "새 자막" in srt
+
+
+def test_the_revision_srt_for_english_is_that_revisions_text(trip: Folder) -> None:
+    """W-99(D174) — 「영어 만들기」의 재료는 저장한 리비전의 SRT다(렌더한 `draft.srt`와 같다)."""
+    created = _create(trip, datetime(2026, 11, 19, 0, 0, 0, tzinfo=UTC))
+    name = created.folder.name
+    path = timeline_edit_io.korean_srt(trip.root, name, 1)
+    assert path == created.folder / "korean-r1.srt"
+    assert path.read_bytes() == timeline_edit.srt_text(created.document).encode("utf-8")
+    assert timeline_edit_io.korean_srt(trip.root, name, 1) == path  # 같은 리비전은 그대로
+    assert timeline_edit_io.korean_srts(trip.root, name) == [path]
+    with pytest.raises(TimelineEditError):
+        timeline_edit_io.korean_srt(trip.root, name, 2)  # 화면이 본 리비전이 아니다

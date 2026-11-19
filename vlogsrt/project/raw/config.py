@@ -1848,6 +1848,45 @@ RENDER_SETTINGS = RenderSettings()
 
 
 @dataclass(frozen=True, slots=True)
+class OutputFormatSettings:
+    """새 원본 범위 타임라인의 출력 포맷(W-97, D172) — 사용자 결정 2026-11-19 「최종 mp4는 4K ·
+    29.97fps, 세로 영상은 세로로 가로 영상은 가로로」.
+
+    방향은 계획의 규칙 그대로다(D66 — 남긴 길이가 많은 쪽). 크기는 그 방향의 4K UHD(긴 변 ×
+    짧은 변), 레이트는 `frame_duration` 하나 — 화면비가 다른 클립은 렌더의 `pad`, 레이트가 다른
+    클립은 `fps_convert`가 맞춘다. 4K보다 작은 원본은 키워서 낸다(화질은 원본보다 나아지지 않는다).
+    「타임라인으로 보내기」가 문서를 만들 때 한 번 정하고 문서에 남는다 — 이미 만든 타임라인은
+    그대로다. 크기·레이트는 사용자 결정이고 어느 지문·캐시 열쇠·승인·견적에도 없다.
+    """
+
+    long_edge: int = 3840
+    short_edge: int = 2160
+    frame_duration: Fraction = Fraction(1001, 30000)
+
+    def __post_init__(self) -> None:
+        from vlogsrt.project.fcp_tables import FRAME_RATE_TAGS
+
+        if not 0 < self.short_edge <= self.long_edge:
+            raise ValueError("출력 포맷의 짧은 변은 0보다 크고 긴 변 이하여야 한다")
+        if self.long_edge % 2 or self.short_edge % 2:
+            raise ValueError("출력 포맷의 변은 짝수여야 한다(yuv420p)")
+        if self.frame_duration not in FRAME_RATE_TAGS:
+            raise ValueError(f"Final Cut 레이트가 아니다: {self.frame_duration}")
+
+    def size(self, orientation: str) -> tuple[int, int]:
+        """(너비, 높이) — 가로는 긴 변이 너비, 세로는 긴 변이 높이다."""
+        if orientation == ORIENTATION_LANDSCAPE:
+            return self.long_edge, self.short_edge
+        if orientation == ORIENTATION_PORTRAIT:
+            return self.short_edge, self.long_edge
+        raise ValueError(f"모르는 방향이다: {orientation!r}")
+
+
+OUTPUT_FORMAT = OutputFormatSettings()
+"""지금 쓰는 새 타임라인 출력 포맷 — 4K UHD · 29.97fps."""
+
+
+@dataclass(frozen=True, slots=True)
 class TranslationSettings:
     """한국어 SRT → 영어 SRT(W-63, D114 — D105에서 왔다) — SRT 큐 글을 Gemini로 영어로 옮기는 설정.
 

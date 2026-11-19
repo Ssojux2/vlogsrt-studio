@@ -270,9 +270,15 @@ def keysheet_html() -> str:
         f"<dt>{_kbd_html(keys)}</dt><dd>{html.escape(meaning)}</dd>"
         for keys, meaning in SHORTCUT_SHEET
     )
+    from ui import keymap
+
+    # 재생기(타임라인 · 자막)의 키도 여기 하나에 모은다(W-102, D175) — 재생기 안의 시트는 없다.
     return (
         '<div id="vl-keysheet" class="vl-keysheet-pop" role="dialog" aria-label="단축키" hidden>'
+        '<h3 class="vl-keysheet-title">원본 보기</h3>'
         f'<dl class="vl-keysheet">{rows}</dl>'
+        '<h3 class="vl-keysheet-title">타임라인 · 자막 — 마지막으로 누른 창이 정한다</h3>'
+        f'<div class="tl-keys vl-keysheet-player">{keymap.keysheet_sections_html()}</div>'
         '<p class="vl-keysheet-note">입력 칸에 글을 쓰는 중에는 단축키가 동작하지 않습니다.</p>'
         "</div>"
     )
@@ -1292,7 +1298,13 @@ _SHELL_CSS = """
   border-radius: 6px; box-shadow: var(--vl-shadow-pop); color: var(--vl-ink);
 }
 .vl-keysheet-pop[hidden], .vl-activity-log[hidden], .vl-activity-empty[hidden] { display: none; }
-.vl-keysheet-pop { width: min(440px, calc(100vw - 32px)); padding: 16px; }
+.vl-keysheet-pop { width: min(720px, calc(100vw - 32px)); padding: 16px;
+  max-height: calc(100vh - 80px); overflow-y: auto; }
+.vl-keysheet-title { margin: 0 0 6px; font-size: 13px; }
+.vl-keysheet + .vl-keysheet-title { margin-top: 12px; }
+.vl-keysheet-player { columns: 2 280px; column-gap: 24px; }
+.vl-keysheet-player h4 { break-after: avoid; }
+.vl-keysheet-player dl { break-inside: avoid-column; }
 .vl-keysheet {
   display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 14px; align-items: center;
   margin: 0; font-size: 13px; line-height: 18px; }

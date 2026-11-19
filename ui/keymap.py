@@ -193,6 +193,14 @@ def keymap_js() -> str:
 
 def keysheet_html(platform: str | None = None) -> str:
     """재생기의 단축키 시트 — 창마다 묶고 같은 동작의 키를 한 줄에 모은다(표에서 짓는다)."""
+    return (
+        '<details class="tl-keys"><summary>단축키 — 마지막으로 누른 창이 정한다</summary>'
+        f"{keysheet_sections_html(platform)}</details>"
+    )
+
+
+def keysheet_sections_html(platform: str | None = None) -> str:
+    """시트의 몸(창마다 제목 + 표) — 머리줄 「단축키」 판이 싣는다(W-102, D175)."""
     parts = []
     for pane in (ANY, TIMELINE, CAPTIONS):
         merged: dict[str, list[str]] = {}
@@ -211,7 +219,4 @@ def keysheet_html(platform: str | None = None) -> str:
         for _code, _pane, label, keys in window_js.PANE_KEYS
     )
     parts.append(f"<h4>창 옮기기</h4><dl>{windows}</dl>")
-    return (
-        '<details class="tl-keys"><summary>단축키 — 마지막으로 누른 창이 정한다</summary>'
-        f"{''.join(parts)}</details>"
-    )
+    return "".join(parts)
