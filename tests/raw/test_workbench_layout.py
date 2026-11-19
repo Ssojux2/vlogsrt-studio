@@ -78,7 +78,7 @@ def _media_block(css: str, query: str) -> str:
 def test_flow_steps_report_live_counts_and_never_gate_the_send() -> None:
     """네 단계의 수와 상태 — 「검토」의 제외 제안 수는 정보다(보내기를 막지 않는다, D56)."""
     empty = ui_facade.flow_steps(ui_facade.FlowCounts())
-    assert [s.label for s in empty] == ["폴더 불러오기", "분석 승인", "검토", "내보내기"]
+    assert [s.label for s in empty] == ["폴더 불러오기", "분석 승인", "검토", "편집 · 공유"]
     assert [s.state for s in empty] == ["cur", "todo", "todo", "todo"]
     assert all(s.sub == "" for s in empty)
     analysing = ui_facade.flow_steps(ui_facade.FlowCounts(imported=18, analysed=6))

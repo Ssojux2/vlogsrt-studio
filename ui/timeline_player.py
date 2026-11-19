@@ -134,10 +134,12 @@ def timeline_player_html(model: dict[str, Any] | None) -> str:
             ' title="재생 · 멈춤 (Space)">▶</button>'
             '<button type="button" data-tl="next-cut" title="다음 컷 (↓)">⏭</button>'
             '<span id="tl-timecode" class="tl-timecode">00:00:00:00</span>'
+            # 저장 표지(디자인 점검 U8) — 폭 고정, 글은 실행본이 S.dirty · S.saving으로 단다.
+            '<span id="tl-save" class="tl-save is-saved" hidden>✓ 저장됨</span>'
             '<span id="tl-source" class="tl-source"></span>'
             '<span class="tl-gap"></span>'
             '<button type="button" data-tl="blade"'
-            ' title="플레이헤드에서 클립 자르기 (⌘B)">블레이드</button>'
+            ' title="플레이헤드에서 클립 자르기 — Final Cut 「블레이드」 (⌘B)">자르기</button>'
             '<button type="button" data-tl="delete-clip"'
             ' title="고른 클립 지우기 — 뒤가 당겨 온다 (⌫)">삭제</button>'
             '<button type="button" data-tl="join"'
@@ -145,21 +147,23 @@ def timeline_player_html(model: dict[str, Any] | None) -> str:
             '<button type="button" data-tl="undo" id="tl-undo"'
             ' title="실행 취소 (⌘Z)">실행 취소</button>'
             '<button type="button" data-tl="redo" id="tl-redo"'
-            ' title="실행 복귀 (⌘⇧Z)">실행 복귀</button>'
+            ' title="다시 실행 (⌘⇧Z)">다시 실행</button>'
             '<button type="button" data-tl="force-save" id="tl-force" hidden>'
             "내 편집으로 덮기</button>"
             '<button type="button" data-tl="prepare" id="tl-prepare" hidden>미리보기 준비</button>'
+            # 편집 단추 묶음과 출력 묶음 사이 가름(디자인 점검 U9).
+            '<span class="tl-divider" aria-hidden="true"></span>'
             # 「공유」(W-88, D147) — Final Cut 공유 패널의 「번인 캡션:」(없음 · 언어)을 옮겼다.
             '<label class="tl-burn" title="공유할 때 영상에 입힐 자막(Final Cut 「번인 캡션」)">'
-            '번인 캡션 <select id="tl-burn" aria-label="번인 캡션">'
+            '영상에 넣을 자막 <select id="tl-burn" aria-label="영상에 넣을 자막">'
             '<option value="none">없음 — 렌더만</option>'
             '<option value="ko">한국어</option>'
             '<option value="ko-en">한국어 + 영어</option></select></label>'
-            '<button type="button" data-tl="render" id="tl-render"'
+            '<button type="button" data-tl="render" id="tl-render" class="tl-primary"'
             ' title="저장한 타임라인을 원본에서 한 번 렌더하고, 고르면 자막을 입힌다(무료 로컬)">'
             "공유</button>"
             '<button type="button" data-tl="index" id="tl-index-toggle" aria-pressed="false"'
-            ' title="타임라인 인덱스 — 클립 · 자막 목록 (⇧⌘2)">인덱스</button>'
+            ' title="타임라인 목록 — 클립 · 자막 목록, Final Cut 「인덱스」 (⇧⌘2)">목록</button>'
             '<span id="tl-status" class="tl-status" aria-live="polite"></span></div>'
             # 타임라인 인덱스(W-86c, D150) — Final Cut 「인덱스」: 클립 · 자막(「오류 보기」) 목록.
             '<div id="tl-index" class="tl-index" hidden><div class="tl-index-head">'
@@ -224,6 +228,10 @@ def timeline_error_html(text: str) -> str:
 
 TIMELINE_PLAYER_CSS = """
 #vl-timeline-player { padding: 0; }
+/* 「타임라인으로 보내기」 요약(U1) — 한 줄 · 빠진 원본 목록만 줄을 더한다(안내 글은 title). */
+.vl-timeline-summary { font-size: 12px; line-height: 18px; color: var(--vl-ink-muted); }
+.vl-timeline-summary strong { color: var(--vl-ink); }
+.vl-timeline-summary ul { margin: 2px 0 0; padding-left: 18px; }
 .tl-root { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; outline: none;
   font-family: var(--vl-font-sans); color: var(--vl-ink); }
 .tl-root:focus-visible { box-shadow: 0 0 0 2px var(--vl-accent); border-radius: 6px; }
@@ -255,9 +263,20 @@ TIMELINE_PLAYER_CSS = """
 .tl-transport { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; }
 .tl-transport button { font: inherit; font-size: 12px; padding: 2px 8px; border-radius: 4px;
   cursor: pointer; border: 1px solid var(--vl-line-strong); background: var(--vl-surface-raised);
-  color: var(--vl-ink); }
+  color: var(--vl-ink); height: 24px; box-sizing: border-box; }
 .tl-transport button[hidden] { display: none; }
 .tl-timecode { font-family: var(--vl-font-mono); font-size: 14px; }
+/* 저장 표지(디자인 점검 U8) — 폭 고정이라 글이 바뀌어도 옆 칸이 움직이지 않는다. */
+.tl-save { display: inline-block; width: 7.5em; white-space: nowrap; font-size: 12px; }
+.tl-save[hidden] { display: none; }
+.tl-save.is-dirty { color: var(--vl-tier-yellow-ink); }
+.tl-save.is-saving { color: var(--vl-ink-muted); }
+.tl-save.is-saved { color: var(--vl-tier-green-ink); }
+/* 편집 단추 묶음 | 출력 묶음(디자인 점검 U9) — 「공유」가 이 줄의 주 동작이다. */
+.tl-divider { align-self: stretch; width: 1px; margin: 2px 2px; background: var(--vl-line-strong); }
+.tl-transport button.tl-primary { background: var(--vl-accent); border-color: var(--vl-accent);
+  color: var(--vl-on-accent); font-weight: 600; }
+.tl-transport button.tl-primary:hover:not(:disabled) { background: var(--vl-accent-hover); }
 .tl-source { color: var(--vl-ink-muted); }
 .tl-gap { flex: 1 1 auto; }
 .tl-status { color: var(--vl-ink-muted); flex: 1 0 100%; min-height: 1.4em; white-space: nowrap;
@@ -275,12 +294,14 @@ TIMELINE_PLAYER_CSS = """
   border-radius: 6px; background: var(--vl-surface-sunken); overflow: hidden; }
 .tl-source-bar canvas { position: absolute; inset: 0; width: 100%; height: 100%;
   touch-action: none; }
-.tl-transport button:disabled { opacity: 0.5; cursor: default; }
+.tl-transport button:disabled { opacity: 1 !important; filter: none !important; cursor: default;
+  color: var(--vl-ink-faint); border-color: var(--vl-line); background: transparent; }
 .tl-strip canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: pointer;
   touch-action: none; }
 .tl-burn { display: inline-flex; gap: 4px; align-items: center; font-size: 12px;
   color: var(--vl-ink-muted); }
-.tl-burn select { font: inherit; font-size: 12px; }
+.tl-burn select { font: inherit; font-size: 12px; height: 24px; box-sizing: border-box;
+  padding: 0 4px; }
 /* 오른쪽 누름 메뉴(Subtitle Edit) — 문서 위에 뜬다(재생기 밖, 누른 자리). */
 .tl-menu { position: fixed; z-index: 1000; display: flex; flex-direction: column; min-width: 180px;
   padding: 4px 0; background: var(--vl-surface-raised); border: 1px solid var(--vl-line-strong);
@@ -294,10 +315,24 @@ TIMELINE_PLAYER_CSS = """
 .tl-cues button { font: inherit; font-size: 12px; padding: 1px 8px; border-radius: 4px;
   cursor: pointer; border: 1px solid var(--vl-line-strong); background: var(--vl-surface-raised);
   color: var(--vl-ink); }
-.tl-cues button:disabled { opacity: 0.5; cursor: default; }
-/* 키를 받을 창(W-89, D154) — 마지막으로 누른 창을 옅게 표시한다(⌫ 등 뜻이 창마다 다르다). */
-.tl-root[data-tl-pane="captions"] .tl-cues,
-.tl-root[data-tl-pane="timeline"] .tl-strip { box-shadow: 0 0 0 1px var(--vl-accent-soft); }
+.tl-cues button:disabled { opacity: 1 !important; filter: none !important; cursor: default;
+  color: var(--vl-ink-faint); border-color: var(--vl-line); background: transparent; }
+/* 키를 받을 창(W-89, D154) — 마지막으로 누른 창(⌫ 등 뜻이 창마다 다르다). 옅은 1px 고리는
+   1.2:1로 안 보였다(디자인 점검 U6) — 2px accent-ink 고리와 머리의 「키 입력」 표지다.
+   맞춤(is-fit)에서 `.tl-cues`는 `display: contents`라 그림자가 없으므로 상자가 있는
+   자막 머리 · 레인 · 목록에 단다. */
+.tl-root[data-tl-pane="captions"] .tl-cues-head,
+.tl-root[data-tl-pane="captions"] .tl-lane,
+.tl-root[data-tl-pane="captions"] .tl-cue-list,
+.tl-root[data-tl-pane="timeline"] .tl-strip,
+.tl-root[data-tl-pane="timeline"] .tl-lane { box-shadow: 0 0 0 2px var(--vl-accent-ink); }
+.tl-root[data-tl-pane="captions"] .tl-cues-head { border-radius: 4px; }
+.tl-root[data-tl-pane="captions"] .tl-cues-head::before,
+.tl-root[data-tl-pane="timeline"] .tl-strip::before { content: "키 입력"; font-size: 11px;
+  line-height: 14px; padding: 0 5px; border-radius: 3px; white-space: nowrap;
+  color: var(--vl-accent-ink); background: var(--vl-accent-soft); }
+.tl-root[data-tl-pane="timeline"] .tl-strip::before { position: absolute; right: 4px; bottom: 2px;
+  z-index: 1; pointer-events: none; }
 .tl-keys { font-size: 12px; color: var(--vl-ink-muted); }
 .tl-keys h4 { margin: 6px 0 2px; font-size: 12px; color: var(--vl-ink); }
 .tl-keys dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 10px; margin: 0; }
@@ -337,19 +372,21 @@ TIMELINE_PLAYER_CSS = """
   overflow-y: auto;
   border: 1px solid var(--vl-line); border-radius: 6px; background: var(--vl-surface-sunken); }
 /* 한 화면 맞춤(W-102, D175) — 실행본이 덱 남은 높이를 재 `is-fit`과 높이를 단다. 왼쪽은
-   이동 막대 · 클립 띠 · 원본 띠 · 파형 레인(남은 높이), 오른쪽은 자막 목록 · 편집 칸이다. 덱은
-   스크롤하지 않고 자막 목록 하나만 스크롤한다. 인덱스를 열었거나 목록이 덱 밖(「자막」
-   작업공간)이면 달지 않는다. */
+   이동 막대 · 클립 띠 · 원본 띠 · 파형 레인(남은 높이), 오른쪽은 자막 머리 · 자막 목록 ·
+   편집 칸이다. 자막 머리는 이동 막대 옆 오른쪽 열에 서서 왼쪽 열에 줄을 하나 덜 쓴다
+   (디자인 점검 U1 — 14인치 1512×900에서 레인이 최소 높이를 못 받아 맞춤이 걸리지 않았다).
+   덱은 스크롤하지 않고 자막 목록 하나만 스크롤한다. 인덱스를 열었거나 목록이 덱 밖
+   (「자막」 작업공간)이면 달지 않는다. */
 @media (min-width: 1051px) {
   .tl-root.is-fit { display: grid; gap: 6px 10px; margin-bottom: 0;
     grid-template-columns: minmax(0, 1fr) minmax(320px, 38%);
-    grid-template-rows: auto auto auto auto minmax(0, 1fr);
-    grid-template-areas: "transport body" "strip body" "range body" "head body" "lane body"; }
+    grid-template-rows: auto auto auto minmax(0, 1fr);
+    grid-template-areas: "transport head" "strip body" "range body" "lane body"; }
   .tl-root.is-fit > .tl-transport { grid-area: transport; }
   .tl-root.is-fit > .tl-strip { grid-area: strip; }
   .tl-root.is-fit > .tl-range { grid-area: range; }
   .tl-root.is-fit > .tl-cues { display: contents; }
-  .tl-root.is-fit .tl-cues-head { grid-area: head; }
+  .tl-root.is-fit .tl-cues-head { grid-area: head; align-self: end; flex-wrap: wrap; }
   .tl-root.is-fit .tl-lane { grid-area: lane; height: 100%; min-height: 0; }
   .tl-root.is-fit .tl-cues-body { grid-area: body; flex-direction: column; min-height: 0; }
   .tl-root.is-fit .tl-cue-list { flex: 1 1 auto; max-height: none; min-height: 0; }
@@ -376,8 +413,17 @@ TIMELINE_PLAYER_CSS = """
   text-align: right; }
 .tl-cues .is-bad { background: var(--vl-danger-soft); color: var(--vl-danger); }
 .tl-cue-row:last-child { border-bottom: none; }
-.tl-cue-row.is-current { background: var(--vl-accent-soft); }
-.tl-cue-row.is-selected { box-shadow: inset 3px 0 0 var(--vl-accent); }
+/* 재생 중인 줄과 고른 줄을 가른다(디자인 점검 U6) — 재생 중은 hover 바탕 + ▶(줄 밖 흐름에
+   두어 격자 칸을 밀지 않는다), 고른 줄은 accent-soft 바탕 + 3px accent 막대 + ink 글자.
+   둘은 함께 설 수 있다. */
+.tl-cue-row { position: relative; }
+.tl-cue-row.is-current { background: var(--vl-surface-hover); }
+.tl-cue-row.is-current::before { content: "▶"; position: absolute; left: 4px; top: 50%;
+  transform: translateY(-50%); font-size: 9px; line-height: 1; color: var(--vl-accent-ink);
+  pointer-events: none; }
+.tl-cue-row.is-selected { background: var(--vl-accent-soft); color: var(--vl-ink);
+  box-shadow: inset 3px 0 0 var(--vl-accent); }
+.tl-cue-row.is-selected .tl-cue-time, .tl-cue-row.is-selected .tl-cue-n { color: var(--vl-ink); }
 .tl-cue-row .tl-cue-time { font-family: var(--vl-font-mono); color: var(--vl-ink-muted);
   flex: none; }
 .tl-cue-row .tl-cue-words { min-width: 0; overflow: hidden; text-overflow: ellipsis;

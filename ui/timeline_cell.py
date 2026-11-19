@@ -84,8 +84,11 @@ def timeline_summary_html(model: dict[str, Any] | None) -> str:
         f" · 자막 {int(summary['visible_cues'])}/{int(summary['cues'])}줄 보임"
         f" · {_seconds(model):.1f}초"
     )
-    items = "".join(f"<li>{note}</li>" for note in [*_notes(model), html.escape(NEXT_STEP_TEXT)])
-    return f'<div class="vl-timeline-summary">{head}<ul>{items}</ul></div>'
+    # 아래 덱이 한 화면에 들도록(W-102) 안내 글은 마우스를 올릴 때만 · 빠진 것이 없으면 목록도 없다.
+    notes = "".join(f"<li>{note}</li>" for note in _notes(model))
+    listing = f"<ul>{notes}</ul>" if notes else ""
+    hint = html.escape(NEXT_STEP_TEXT, quote=True)
+    return f'<div class="vl-timeline-summary" title="{hint}">{head}{listing}</div>'
 
 
 class TimelineCell:

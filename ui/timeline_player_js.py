@@ -430,6 +430,7 @@ PLAYER_APP_JS = r"""
       status.title = S.status;
       status.classList.toggle("is-error", S.statusError);
     }
+    paintSaveChip();
     var undoButton = $("tl-undo");
     if (undoButton) { undoButton.disabled = !S.history.past.length; }
     var redoButton = $("tl-redo");
@@ -443,6 +444,21 @@ PLAYER_APP_JS = r"""
       prep.hidden = !waiting.length;
       prep.textContent = "미리보기 준비(" + waiting.length + "개 · 무료)";
     }
+  }
+  // 저장 표지(디자인 점검 U8) — 있는 상태(S.dirty · S.saving)만 읽는다. 폭이 고정이라 글이 바뀌어도
+  // 이동 막대가 움직이지 않는다.
+  var SAVE_CHIP = {
+    saving: ["저장 중…", "is-saving"],
+    dirty: ["● 저장 안 됨", "is-dirty"],
+    saved: ["✓ 저장됨", "is-saved"],
+  };
+  function paintSaveChip() {
+    var chip = $("tl-save");
+    if (!chip) { return; }
+    var row = SAVE_CHIP[S.saving ? "saving" : S.dirty ? "dirty" : "saved"];
+    chip.hidden = !S.doc;
+    if (chip.textContent !== row[0]) { chip.textContent = row[0]; }
+    chip.className = "tl-save " + row[1];
   }
   function paintMissing() {
     var box = $("tl-missing");
@@ -533,46 +549,97 @@ PLAYER_APP_JS = r"""
     }).map(function (cue) { return cue[4]; }).join("\n");
   }
   function cssVar(name) { return getComputedStyle(S.rootEl).getPropertyValue(name).trim(); }
-  function paintStrip() {
-    var c = $("tl-canvas");
-    if (!c || !S.rootEl) { return; }
+  // ─── 캔버스 공통(디자인 점검 U4 · U5) — 세 캔버스가 같은 플레이헤드 · 같은 시간 눈금 ─────
+  // 눈금 간격은 글자가 적어도 RULER_MIN_GAP_PX 떨어지는 가장 작은 걸음이다(그리기만 — 문서·시각과
+  // 무관하다). 빨강은 오류 몫이라 플레이헤드는 `--vl-playhead` + 양옆 1px `--vl-playhead-casing`.
+  var RULER_PX = 14;
+  var RULER_MIN_GAP_PX = 60;
+  var RULER_STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600];
+  var HEAD_PX = 8;
+  var CANVAS_FONT_PX = 12;
+  var RULER_FONT_PX = 11;
+  function canvas2d(c) {
     var w = c.clientWidth;
     var h = c.clientHeight;
-    if (!w || !h) { return; }
+    if (!w || !h) { return null; }
     var ratio = W.devicePixelRatio || 1;
     if (c.width !== Math.round(w * ratio)) { c.width = Math.round(w * ratio); }
     if (c.height !== Math.round(h * ratio)) { c.height = Math.round(h * ratio); }
     var g = c.getContext("2d");
     g.setTransform(ratio, 0, 0, ratio, 0, 0);
     g.clearRect(0, 0, w, h);
-    var total = Math.max(S.total, 1);
-    var tones = [cssVar("--vl-accent-soft"), cssVar("--vl-surface-raised")];
-    var tone = 0;
-    g.font = "11px " + cssVar("--vl-font-sans");
+    return g;
+  }
+  function clockText(seconds) {
+    var whole = Math.max(0, Math.floor(seconds + 1e-6));
+    var rest = whole % 60;
+    return Math.floor(whole / 60) + ":" + (rest < 10 ? "0" : "") + rest;
+  }
+  function rulerStep(pxPerSecond) {
+    for (var i = 0; i < RULER_STEPS.length; i++) {
+      if (RULER_STEPS[i] * pxPerSecond >= RULER_MIN_GAP_PX) { return RULER_STEPS[i]; }
+    }
+    return RULER_STEPS[RULER_STEPS.length - 1];
+  }
+  // 띠 하나(top부터 RULER_PX) — x = (t − t0) · pxPerSecond. 큰 눈금에 m:ss, 사이에 짧은 눈금.
+  function paintRuler(g, width, top, t0, pxPerSecond) {
+    if (!(pxPerSecond > 0)) { return; }
+    var step = rulerStep(pxPerSecond);
+    var line = cssVar("--vl-line-strong");
+    g.fillStyle = cssVar("--vl-surface-raised");
+    g.fillRect(0, top, width, RULER_PX);
+    g.fillStyle = line;
+    g.fillRect(0, top + RULER_PX - 1, width, 1);
+    g.font = RULER_FONT_PX + "px " + cssVar("--vl-font-mono");
     g.textBaseline = "middle";
-    S.spans.forEach(function (span, i) {
-      if (i > 0 && span.sourceId !== S.spans[i - 1].sourceId) { tone = 1 - tone; }
-      var x = span.outStart / total * w;
-      var width = Math.max(1, span.outFrames / total * w);
-      g.fillStyle = mediaOf(span.sourceId) ? tones[tone] : cssVar("--vl-warn-soft");
-      g.fillRect(x, 4, width - 1, h - 8);
-      g.fillStyle = cssVar("--vl-line-strong");
-      g.fillRect(x, 4, 1, h - 8);
-      if (i === S.sel) {
-        g.strokeStyle = cssVar("--vl-accent");
-        g.lineWidth = 2;
-        g.strokeRect(x + 1, 5, width - 3, h - 10);
+    var half = step / 2;
+    for (var t = Math.ceil(t0 / half) * half; (t - t0) * pxPerSecond <= width; t += half) {
+      var x = Math.round((t - t0) * pxPerSecond);
+      var major = Math.abs(t / step - Math.round(t / step)) < 1e-6;
+      g.fillStyle = line;
+      g.fillRect(x, top + RULER_PX - (major ? 6 : 3), 1, major ? 6 : 3);
+      if (major) {
+        g.fillStyle = cssVar("--vl-ink-muted");
+        g.fillText(clockText(t), x + 3, top + RULER_PX / 2 - 1);
       }
-      if (width > 60) {
-        g.fillStyle = cssVar("--vl-ink");
-        g.save();
-        g.beginPath();
-        g.rect(x + 3, 4, width - 6, h - 8);
-        g.clip();
-        g.fillText(nameOf(span.sourceId), x + 4, h / 2);
-        g.restore();
-      }
-    });
+    }
+  }
+  // 플레이헤드 — 2px 선 · 양옆 1px 테두리 · 위에 8px 아래 삼각형 머리(세 캔버스가 같다).
+  function paintHead(g, x, h) {
+    var px = Math.round(x);
+    var tip = HEAD_PX / 2;
+    g.fillStyle = cssVar("--vl-playhead-casing");
+    g.fillRect(px - 2, 0, 4, h);
+    g.beginPath();
+    g.moveTo(px - tip - 1, 0); g.lineTo(px + tip + 1, 0); g.lineTo(px, tip + 2);
+    g.closePath(); g.fill();
+    g.fillStyle = cssVar("--vl-playhead");
+    g.fillRect(px - 1, 0, 2, h);
+    g.beginPath();
+    g.moveTo(px - tip, 0); g.lineTo(px + tip, 0); g.lineTo(px, tip);
+    g.closePath(); g.fill();
+  }
+  // 칸에 맞춰 줄인다 — 다 안 들면 말줄임, 한 글자도 안 들면 빈 글(그리지 않는다).
+  function fitText(g, text, room) {
+    if (g.measureText(text).width <= room) { return text; }
+    var cut = text;
+    while (cut.length > 1 && g.measureText(cut + "…").width > room) { cut = cut.slice(0, -1); }
+    return cut.length > 1 ? cut + "…" : "";
+  }
+  function seqSeconds(frames) {
+    var seq = S.doc.facts.sequence;
+    return frames * seq.num / seq.den;
+  }
+  function paintStrip() {
+    var c = $("tl-canvas");
+    if (!c || !S.rootEl || !S.doc) { return; }
+    var g = canvas2d(c);
+    if (!g) { return; }
+    var w = c.clientWidth;
+    var h = c.clientHeight;
+    var total = Math.max(S.total, 1);
+    paintRuler(g, w, 0, 0, w / Math.max(seqSeconds(total), 1e-9));
+    paintStripClips(g, w, h, total);
     var marked = rangeOf();
     if (marked) {
       g.globalAlpha = 0.3;
@@ -583,10 +650,48 @@ PLAYER_APP_JS = r"""
       g.fillRect(marked[0] / total * w, 0, 2, h);
       g.fillRect(marked[1] / total * w - 2, 0, 2, h);
     }
-    var px = S.playhead / total * w;
-    g.fillStyle = cssVar("--vl-danger");
-    g.fillRect(Math.round(px) - 1, 0, 2, h);
+    paintHead(g, S.playhead / total * w, h);
     paintSource();
+  }
+  // 클립 띠(디자인 점검 U3) — 원본이 바뀔 때마다 두 채움을 번갈아 · 왼쪽 1px 어두운 가름 ·
+  // 고른 클립은 accent 채움 + 2px ink 테두리(파형 레인의 클립 띠와 같다).
+  function paintStripClips(g, w, h, total) {
+    var top = RULER_PX + 2;
+    var height = h - top - 2;
+    var fills = [cssVar("--vl-clip-fill"), cssVar("--vl-clip-fill-alt")];
+    var tone = 0;
+    g.font = CANVAS_FONT_PX + "px " + cssVar("--vl-font-sans");
+    g.textBaseline = "middle";
+    S.spans.forEach(function (span, i) {
+      if (i > 0 && span.sourceId !== S.spans[i - 1].sourceId) { tone = 1 - tone; }
+      var x = span.outStart / total * w;
+      var width = Math.max(1, span.outFrames / total * w);
+      var ready = !!mediaOf(span.sourceId);
+      var chosen = i === S.sel;
+      var fill = !ready ? cssVar("--vl-warn-soft") : chosen ? cssVar("--vl-accent") : fills[tone];
+      g.fillStyle = fill;
+      g.fillRect(x, top, width, height);
+      g.fillStyle = cssVar("--vl-video-well");
+      g.fillRect(x, top, 1, height);
+      if (chosen) {
+        g.strokeStyle = cssVar("--vl-ink");
+        g.lineWidth = 2;
+        g.strokeRect(x + 1, top + 1, Math.max(1, width - 2), height - 2);
+      }
+      stripLabel(g, span, i, x, width, top + height / 2,
+        chosen && ready ? "--vl-on-accent" : "--vl-ink");
+    });
+  }
+  // 라벨은 파형 레인의 클립 띠와 같다 — `#3 C_tall · 2.4초`, 좁으면 길이 → 이름 차례로 줄인다.
+  function stripLabel(g, span, i, x, width, mid, token) {
+    var room = width - 10;
+    if (room < 2 * CANVAS_FONT_PX) { return; }
+    var head = "#" + (i + 1) + " " + nameOf(span.sourceId).replace(/\.[^.]+$/, "");
+    var full = head + " · " + seqSeconds(span.outFrames).toFixed(1) + "초";
+    var text = g.measureText(full).width <= room ? full : fitText(g, head, room);
+    if (!text) { return; }
+    g.fillStyle = cssVar(token);
+    g.fillText(text, x + 5, mid);
   }
 
   // ─── 범위 조정(W-71d): 고른 클립의 원본 전체 띠 ─────────────────
@@ -621,15 +726,10 @@ PLAYER_APP_JS = r"""
         ((end - start) * seconds).toFixed(2) + "초) / 원본 " +
         (source.frames * seconds).toFixed(1) + "초";
     }
+    var g = canvas2d(c);
+    if (!g) { return; }
     var w = c.clientWidth;
     var h = c.clientHeight;
-    if (!w || !h) { return; }
-    var ratio = W.devicePixelRatio || 1;
-    if (c.width !== Math.round(w * ratio)) { c.width = Math.round(w * ratio); }
-    if (c.height !== Math.round(h * ratio)) { c.height = Math.round(h * ratio); }
-    var g = c.getContext("2d");
-    g.setTransform(ratio, 0, 0, ratio, 0, 0);
-    g.clearRect(0, 0, w, h);
     function xOf(frame) { return frame / Math.max(source.frames, 1) * w; }
     if (S.tiers[clip[0]] === undefined) { askTiers(clip[0]); }
     g.globalAlpha = 0.35;
@@ -650,11 +750,23 @@ PLAYER_APP_JS = r"""
     g.fillRect(xOf(start), h / 4, Math.max(2, xOf(end) - xOf(start)), h / 2);
     g.fillStyle = cssVar("--vl-ink");
     [start, end].forEach(function (frame) { g.fillRect(xOf(frame) - 2, 0, 4, h); });
+    paintSourceEnds(g, w, h, source.frames * seconds);
     var at = sourceCursor();
-    if (at !== null) {
-      g.fillStyle = cssVar("--vl-danger");
-      g.fillRect(Math.round(xOf(at)) - 1, 0, 2, h);
-    }
+    if (at !== null) { paintHead(g, xOf(at), h); }
+  }
+  // 원본 띠의 양끝(디자인 점검 U5) — 왼쪽 0:00 · 오른쪽 원본 길이. 등급 띠 위에서도 읽히게 바닥색
+  // 받침을 깐다.
+  function paintSourceEnds(g, w, h, seconds) {
+    g.font = RULER_FONT_PX + "px " + cssVar("--vl-font-mono");
+    g.textBaseline = "bottom";
+    [[clockText(0), 2], [clockText(seconds), null]].forEach(function (row) {
+      var width = g.measureText(row[0]).width;
+      var x = row[1] === null ? w - width - 2 : row[1];
+      g.fillStyle = cssVar("--vl-surface-sunken");
+      g.fillRect(x - 2, h - RULER_FONT_PX - 3, width + 4, RULER_FONT_PX + 3);
+      g.fillStyle = cssVar("--vl-ink-muted");
+      g.fillText(row[0], x, h - 1);
+    });
   }
   // 등급 띠는 그 원본을 처음 고를 때 한 번 묻는다(표시만 — 못 받으면 띠 없이 그린다).
   function askTiers(sourceId) {
@@ -754,7 +866,7 @@ PLAYER_APP_JS = r"""
   // ─── 클립 편집(W-71f): 플레이헤드에서 자르기 · 고른 클립 지우기(리플) · 다음 조각과 합치기 ─
   // 연산은 모델(`TL.clipEdit`)이 하고 거부도 모델의 글 그대로 보인다. 지운 클립의 원본 구간은
   // 문서의 뺀 구간으로 남는다(렌더 보고서 `timeline_cut`) — 되돌리기로 돌아온다.
-  var CLIP_EDIT_LABELS = { blade: "블레이드", "delete": "삭제", join: "합치기" };
+  var CLIP_EDIT_LABELS = { blade: "자르기", "delete": "삭제", join: "합치기" };
   function clipOp(op) {
     if (!S.doc || !S.spans.length) { return; }
     var number = op === "blade" ? TL.sourcePoint(S.doc, Math.min(S.playhead, S.total - 1))[0]
@@ -865,7 +977,7 @@ PLAYER_APP_JS = r"""
     var pick = $("tl-burn");
     if (!pick) { return false; }
     pick.focus();
-    say("공유 — 번인 캡션을 고른 뒤 「공유」를 누르세요.", false);
+    say("공유 — 「영상에 넣을 자막」을 고른 뒤 「공유」를 누르세요.", false);
     return true;
   }
 
@@ -1071,9 +1183,13 @@ PLAYER_APP_JS = r"""
     var wide = W.matchMedia ? W.matchMedia("(min-width: 1051px)").matches : true;
     var on = !!deck && !!deck.closest("[data-vl-fit]") && wide && !!body &&
       getComputedStyle(deck).overflowY !== "visible" && !(index && !index.hidden);
+    // 재어 보느라 `is-fit`을 달았다 떼면 덱 내용이 잠깐 줄어 브라우저가 scrollTop을 0으로 당긴다 —
+    // 잰 뒤 물러서면 사람이 내려 둔 자리로 돌린다(디자인 점검 U1 — 1초마다 맨 위로 튀었다).
+    var kept = deck ? deck.scrollTop : 0;
     if (!on) {
       root.classList.remove("is-fit");
       root.style.height = "";
+      if (deck) { deck.scrollTop = kept; }
       return;
     }
     root.classList.add("is-fit");
@@ -1088,6 +1204,7 @@ PLAYER_APP_JS = r"""
     if (!lane || lane.clientHeight < S.settings.fitLaneMinPx) {
       root.classList.remove("is-fit");
       root.style.height = "";
+      deck.scrollTop = kept;
     }
     if (lane) { requestLane(); }
   }
@@ -1554,22 +1671,24 @@ PLAYER_APP_JS = r"""
     if (S.playing) { S.lane = LN.follow(laneView(), head, width); }
     var view = laneView();
     var band = S.settings.laneClipPx;
+    // 클립 띠 아래 시간 눈금(디자인 점검 U5) — 파형·자막은 그 아래부터 그린다. 누름 판정은 y가
+    // 클립 띠 위인지만 보므로 눈금 띠는 자막 칸처럼 받는다.
+    var below = band + RULER_PX;
     ctx.fillStyle = cssVar("--vl-surface-sunken");
     ctx.fillRect(0, 0, width, height);
     paintLaneClips(ctx, view, width, band);
+    paintRuler(ctx, width, band, view.start / laneRate(), laneRate() / view.tpp);
     ctx.save();
-    ctx.translate(0, band);
-    paintLaneWave(ctx, view, width, height - band);
-    paintLaneCues(ctx, view, height - band);
+    ctx.translate(0, below);
+    paintLaneWave(ctx, view, width, height - below);
+    paintLaneCues(ctx, view, height - below);
     if (S.laneSel) {
       ctx.fillStyle = cssVar("--vl-accent-soft");
       var a = LN.x(view, S.laneSel[0]);
-      ctx.fillRect(a, 0, LN.x(view, S.laneSel[1]) - a, height - band);
+      ctx.fillRect(a, 0, LN.x(view, S.laneSel[1]) - a, height - below);
     }
     ctx.restore();
-    var ph = LN.x(view, head);
-    ctx.fillStyle = cssVar("--vl-playhead");
-    ctx.fillRect(Math.round(ph), 0, 1, height);
+    paintHead(ctx, LN.x(view, head), height);
   }
   // 클립 띠(W-100, D169) — Final Cut 스토리라인처럼 클립마다 블록, 끝을 끌어 길이를 고친다.
   function paintLaneClips(ctx, view, width, band) {
@@ -1589,7 +1708,7 @@ PLAYER_APP_JS = r"""
       ctx.fillRect(xe - 3, 1, 2, band - 2);
       if (xe - xs > 48) {
         ctx.fillStyle = cssVar("--vl-ink");
-        ctx.font = "11px " + cssVar("--vl-font-sans");
+        ctx.font = CANVAS_FONT_PX + "px " + cssVar("--vl-font-sans");
         var seconds = span.outFrames * seq / rate;
         ctx.fillText("#" + (i + 1) + " " + nameOf(span.sourceId) + " · " +
           seconds.toFixed(1) + "초", xs + 6, band / 2 + 4, xe - xs - 12);
@@ -1642,11 +1761,12 @@ PLAYER_APP_JS = r"""
       ctx.globalAlpha = 1;
       ctx.fillStyle = cssVar("--vl-tier-green-ink");
       ctx.fillRect(xs, 2, 2, height - 4);
-      ctx.fillStyle = cssVar("--vl-danger");
+      // 끝 가장자리는 노랑 ink — 빨강은 오류 몫이다(디자인 점검 U4).
+      ctx.fillStyle = cssVar("--vl-tier-yellow-ink");
       ctx.fillRect(xe - 2, 2, 2, height - 4);
       if (xe - xs > 40) {
         ctx.fillStyle = cssVar("--vl-ink");
-        ctx.font = "11px " + cssVar("--vl-font-sans");
+        ctx.font = CANVAS_FONT_PX + "px " + cssVar("--vl-font-sans");
         ctx.fillText("#" + row.n + " " + row.seconds.toFixed(2) + "초" +
           (row.cps === null ? "" : " · " + row.cps.toFixed(1)), xs + 5, 14, xe - xs - 8);
         ctx.fillText(CG.oneLine(cue[4]), xs + 5, height - 8, xe - xs - 8);
@@ -2078,6 +2198,7 @@ PLAYER_APP_JS = r"""
     if (S.clipDrag) { scheduleSave(); return; }
     if (!S.dirty || S.saving || !S.doc) { return; }
     S.saving = true;
+    paintSaveChip();
     var sent = S.doc;
     var payload = { signature: S.signature, token: S.token, timelineId: S.timelineId,
       baseRevision: S.baseRevision, doc: docPayload(), force: !!force };

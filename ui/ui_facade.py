@@ -135,7 +135,7 @@ def vtt_timecode(total_ms: int) -> str:
 # 재서 작업대 값의 속성으로 싣고, 실행본이 그 값을 머리줄에 옮긴다 — 머리줄을 위한 타이머를
 # 따로 두지 않는다.
 
-FLOW_STEP_LABELS = ("폴더 불러오기", "분석 승인", "검토", "내보내기")
+FLOW_STEP_LABELS = ("폴더 불러오기", "분석 승인", "검토", "편집 · 공유")
 PROJECT_EMPTY_LABEL = "프로젝트 없음"
 SHORTCUT_SEEK_SECONDS = 5
 """J/L이 옮기는 초 — 실행본의 `VL_SEEK_SECONDS`와 같은 값이다(시험이 둘을 맞춰 본다)."""
@@ -1096,7 +1096,7 @@ def visual_player_shell_html(video_src: str | None, note: str) -> str:
         f'<p id="visual-note" class="vl-note">{safe_note}</p></section>'
         '<section id="visual-timeline" aria-label="추천 구간과 영상 타임라인">'
         '<div class="vl-transport">'
-        f"<strong>타임라인</strong>{TIER_LEGEND_HTML}"
+        f"<strong>원본 구간</strong>{TIER_LEGEND_HTML}"
         '<button type="button" id="vl-source-caption-toggle" class="vl-btn"'
         ' aria-pressed="true">재생 자막</button>'
         '<button type="button" id="vl-timeline-mode" class="vl-btn">원본 타임라인</button>'
@@ -1259,7 +1259,7 @@ _SHELL_CSS = """
 }
 .vl-step .no {
   display: inline-grid; place-items: center; box-sizing: border-box; width: 18px; height: 18px;
-  border: 1px solid currentColor; border-radius: 50%; font: 600 11px/1 var(--vl-font-mono);
+  border: 1px solid currentColor; border-radius: 50%; font: 600 12px/1 var(--vl-font-mono);
 }
 .vl-step .no svg { width: 11px; height: 11px; }
 .vl-step.done .no { border-color: var(--vl-success); background: var(--vl-success);
@@ -1268,7 +1268,7 @@ _SHELL_CSS = """
 .vl-step.cur { color: var(--vl-ink); background: var(--vl-surface-raised);
   box-shadow: inset 0 0 0 1px var(--vl-line-strong); }
 .vl-step.cur .no { border-color: var(--vl-accent-ink); color: var(--vl-accent-ink); }
-.vl-step .sub { font: 500 11px/14px var(--vl-font-mono); color: var(--vl-ink-muted); }
+.vl-step .sub { font: 500 12px/16px var(--vl-font-mono); color: var(--vl-ink-muted); }
 .vl-step .sub.r { color: var(--vl-tier-red-ink); }
 .vl-step-sep { flex: none; width: 12px; height: 1px; background: var(--vl-line-strong); }
 .vl-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%);
@@ -1321,6 +1321,14 @@ _SHELL_CSS = """
 #vl-command-bar > #quick-status { display: none; }
 #vl-command-bar > #vl-usage-src { display: none; }
 #vl-activity-block { flex: 1 1 0; min-width: 120px; padding: 0; overflow: visible; }
+/* 분석 취소 둘 — 늘 누를 수 있지만(도는 일을 못 멈추는 일이 없게) 평소에는 조용한 단추다.
+   위험 색은 손을 얹었을 때와 도는 작업이 있을 때(「N개 작업」 배지)만 보인다. */
+#vl-command-bar > button.vl-cancel {
+  background: transparent; border-color: var(--vl-line-strong); color: var(--vl-ink-muted);
+  box-shadow: none; }
+#vl-command-bar > button.vl-cancel:not(:disabled):is(:hover, :focus-visible),
+#vl-command-bar:has(#vl-activity-count:not([hidden])) > button.vl-cancel:not(:disabled) {
+  border-color: var(--vl-tier-red-ink); color: var(--vl-tier-red-ink); }
 .vl-activity {
   position: relative; display: flex; align-items: center; gap: 10px; box-sizing: border-box;
   height: var(--vl-control-h); min-width: 0; padding: 0 4px 0 10px;
@@ -1411,6 +1419,11 @@ _SHELL_CSS = """
 /* 초안 결과 카드(W-46a, D100 §7a) — 승인 칸 아래. 경로는 고정폭 글자로 줄바꿈해 다 보인다.
    빨간 경고는 확인하지 않은 비추천이 빠졌다는 뜻이다(막지 않고 알린다). */
 #vl-export-card { min-width: 0; padding: 0; }
+/* 자막 입히기의 단추 줄(「미리보기」·「자막 입혀 내보내기」) — 승인 칸이 스크롤해도 칸 아래에
+   붙는다. 끈적이는 줄은 조상이 넘침을 자르면 붙지 못하므로 칸 묶음의 `overflow`를 푼다. */
+#vl-burn, #vl-burn > div { overflow: visible !important; }
+#vl-burn-actions { position: sticky; bottom: 0; z-index: 3; margin-top: 4px; padding: 6px 0;
+  background: var(--vl-surface); border-top: 1px solid var(--vl-line); }
 .vl-export { min-width: 0; padding: 8px 10px; border-radius: 6px; font-size: 12px;
   line-height: 16px; border: 1px solid var(--vl-line-strong); background: var(--vl-surface-raised);
   overflow-wrap: anywhere; }
@@ -1988,6 +2001,10 @@ WORKBENCH_CSS = (
   background: var(--vl-surface); border-color: var(--vl-line); color: var(--vl-ink-faint);
   box-shadow: none; cursor: default;
 }
+/* 그라디오의 `.gradio-style button[disabled] { opacity: .5; filter: grayscale(30%) }`가 꺼진
+   단추 글자를 대비 2.3:1까지 흐렸다 — 꺼짐은 위의 옅은 글자·테두리로만 보인다. */
+.vl-btn:disabled, .vl-current-caption:disabled {
+  opacity: 1 !important; filter: none !important; }
 .vl-btn-primary { background: var(--vl-accent); border-color: var(--vl-accent);
   color: var(--vl-on-accent); }
 .vl-btn-primary:hover:not(:disabled) {

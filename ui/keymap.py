@@ -76,9 +76,9 @@ PLAYER_KEYMAP: tuple[PlayerKey, ...] = (
     _k("End", "go-end", "끝으로", "End"),
     # 편집(어디서나)
     _k("KeyZ", "undo", "실행 취소", "⌘Z", mod=True),
-    _k("KeyZ", "redo", "실행 복귀", "⌘⇧Z", mod=True, shift=True),
+    _k("KeyZ", "redo", "다시 실행", "⌘⇧Z", mod=True, shift=True),
     _k("KeyS", "save", "지금 저장", "⌘S", mod=True, in_text=True),
-    _k("Digit2", "index", "타임라인 인덱스", "⇧⌘2", mod=True, shift=True),
+    _k("Digit2", "index", "타임라인 목록", "⇧⌘2", mod=True, shift=True),
     # 보기(어디서나 — Final Cut). ⌘= · ⌘− 는 브라우저 확대와 겹쳐 수식키 없는 짝을 함께 둔다.
     _k("Equal", "zoom-in", "확대", "⌘=", mod=True),
     _k("Equal", "zoom-in", "확대", "="),
@@ -86,9 +86,9 @@ PLAYER_KEYMAP: tuple[PlayerKey, ...] = (
     _k("Minus", "zoom-out", "축소", "−"),
     _k("KeyZ", "zoom-fit", "창에 맞추기", "⇧Z", shift=True),
     _k("KeyN", "snapping", "스내핑 켜기 · 끄기", "N"),
-    _k("KeyE", "share", "공유(번인 캡션 칸으로)", "⌘E", mod=True),
+    _k("KeyE", "share", "공유(영상에 넣을 자막 칸으로)", "⌘E", mod=True),
     # 타임라인 창(클립 — Final Cut)
-    _k("KeyB", "blade", "블레이드(플레이헤드에서 클립 자르기)", "⌘B", TIMELINE, mod=True),
+    _k("KeyB", "blade", "자르기(플레이헤드에서 클립 나누기)", "⌘B", TIMELINE, mod=True),
     _k("Backspace", "delete-clip", "삭제(범위 또는 고른 클립 — 뒤가 당겨 온다)", "⌫", TIMELINE),
     _k("Delete", "delete-clip", "삭제(범위 또는 고른 클립 — 뒤가 당겨 온다)", "⌦", TIMELINE),
     _k("KeyI", "mark-in", "범위 시작 설정(플레이헤드)", "I", TIMELINE),
