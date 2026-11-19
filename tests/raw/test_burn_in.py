@@ -116,6 +116,16 @@ def test_style_scales_with_video_height() -> None:
     assert ko[19] == ko[20] == "192"  # 3840 / 20
 
 
+def test_portrait_style_scales_with_the_short_side() -> None:
+    """W-96(D171) — 세로 영상은 짧은 변(너비)으로 잰다: 2160×3840은 가로 4K와 같은 글자 크기다."""
+    pairing = burn_in.pair_cues(KO, EN)
+    tall = _styles(burn_in.ass_document(pairing, burn_in.default_style(), 2160, 3840))["KO"]
+    assert (tall[2], tall[16], tall[21]) == ("108", "8", "120")
+    assert tall[19] == tall[20] == "108"  # 2160 / 20 — 좌우 여백은 여전히 너비 몫
+    phone = _styles(burn_in.ass_document(pairing, burn_in.default_style(), 1080, 1920))["KO"]
+    assert (phone[2], phone[16], phone[21]) == ("54", "4", "60")
+
+
 def test_top_position_and_colors() -> None:
     style = _style(position="top", text_color="#FF8000")
     ko = _styles(burn_in.ass_document(burn_in.pair_cues(KO, None), style, 1920, 1080))["KO"]

@@ -43,7 +43,8 @@ class BurnInError(ValueError):
 class BurnStyle:
     """사람이 고르는 네 가지 — 자리·글자 크기·외곽선·글자색(+ 자리에서 가장자리까지 여백).
 
-    크기·외곽선·여백은 1080p 기준 픽셀이다(`BurnSettings.reference_height`)."""
+    크기·외곽선·여백은 1080p 기준 픽셀이고 영상의 짧은 변에 비례한다
+    (`BurnSettings.reference_height`, D171)."""
 
     position: str
     font_px: int
@@ -228,7 +229,8 @@ def _document(
 def _style_line(
     name: str, style: BurnStyle, scale: Fraction, width: int, height: int, s: BurnSettings
 ) -> str:
-    unit = Fraction(height, s.reference_height)
+    # 짧은 변으로 잰다(D171) — 높이로 재면 세로 2160×3840에서 글자가 너비의 9%가 된다.
+    unit = Fraction(min(width, height), s.reference_height)
     size = max(1, round(style.font_px * scale * unit))
     outline = round(style.outline_px * scale * unit)
     side = round(width * s.side_margin_ratio)
