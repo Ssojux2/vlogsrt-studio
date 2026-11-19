@@ -44,12 +44,26 @@ def _rational(row: dict[str, Any]) -> tuple[int, int]:
     return int(row["num"]), int(row["den"])
 
 
+def burn_model(style: Any, settings: Any) -> dict[str, Any]:
+    """자막 겹(W-98, D173)이 번인 모양을 근사하는 재료 — 저장한 모양과 번인 설정의 비율들.
+    (화면 계층은 프로젝트 계층을 import하지 않는다 — 받은 값의 칸만 읽는다.)"""
+    keys = ("position", "font_px", "outline_px", "margin_px", "text_color")
+    return {
+        "style": {key: getattr(style, key) for key in keys},
+        "referenceHeight": settings.reference_height,
+        "englishScale": float(settings.english_scale),
+        "sideMargin": float(settings.side_margin_ratio),
+        "outlineColor": settings.outline_color,
+    }
+
+
 def client_model(
     signature: str,
     token: str,
     opened: dict[str, Any],
     media: dict[str, Any],
     tiers: dict[str, Any],
+    burn: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """브라우저가 받는 재료 — 문서는 브라우저 핵심(`__vlTL`)의 모양 그대로다."""
     facts = opened["facts"]
@@ -87,6 +101,7 @@ def client_model(
         "media": media["sources"],
         "tiers": tiers,
         "settings": opened["settings"],
+        "burn": burn,
     }
 
 
@@ -225,6 +240,12 @@ TIMELINE_PLAYER_CSS = """
   font-weight: 600; color: var(--vl-on-video-overlay);
   text-shadow: 0 0 3px var(--vl-video-well), 0 0 3px var(--vl-video-well),
     0 0 6px var(--vl-video-well); }
+/* 번인 모양을 따르는 자막 겹(W-98, D173) — 크기·색·외곽선·자리는 실행본이 저장한 모양으로 단다. */
+.tl-overlay.is-styled { text-shadow: none; line-height: 1.2; display: flex;
+  flex-direction: column; align-items: center; justify-content: flex-end; gap: 0.1em;
+  font-family: "Pretendard", var(--vl-font-sans); }
+.tl-overlay.is-styled.is-top { justify-content: flex-start; }
+.tl-overlay.is-styled > div { paint-order: stroke fill; overflow-wrap: anywhere; }
 .tl-transport { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; }
 .tl-transport button { font: inherit; font-size: 12px; padding: 2px 8px; border-radius: 4px;
   cursor: pointer; border: 1px solid var(--vl-line-strong); background: var(--vl-surface-raised);
@@ -393,7 +414,9 @@ class TimelinePlayer:
             return timeline_error_html(f"타임라인 재생기를 열지 못했습니다 — {error}")
         token = self.owner._visual_lifetime_token
         # 등급 띠는 고른 클립의 원본만 그때 묻는다(`tl_tiers`) — 원본 104개면 그리기마다 0.9초였다.
-        return timeline_player_html(client_model(signature, token, opened, media, {}))
+        raw = self.owner.raw
+        burn = burn_model(raw.subtitle_burn_style(root), raw.subtitle_burn_settings())
+        return timeline_player_html(client_model(signature, token, opened, media, {}, burn))
 
     # ── 서버 함수(클라이언트 `server.tl_*`) ──────────────────────────
 

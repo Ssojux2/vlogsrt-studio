@@ -71,6 +71,7 @@ PLAYER_APP_JS = r"""
     S.media = m.media || {};
     S.tiers = m.tiers || {};
     S.settings = m.settings || {};
+    S.burn = m.burn || null;
     if (!keepLocal) {
       S.doc = m.doc;
       S.baseRevision = m.revision;
@@ -85,6 +86,8 @@ PLAYER_APP_JS = r"""
     }
     bindDom();
     restoreTranslation();
+    // 자막 겹은 번역 모드와 상관없이 영어 줄을 보인다(W-98, D173) — 찾기는 무료 읽기다.
+    if (!S.english) { askEnglish(); }
     // 뷰어 하나(W-86b) — 화면(.tl-stage)을 위 덱 뷰어 칸으로 옮긴다(노드째, 청취자 그대로).
     if (W.__vlWindow && W.__vlWindow.adoptProgram) { W.__vlWindow.adoptProgram(S.rootEl); }
     showDeck();
@@ -458,12 +461,67 @@ PLAYER_APP_JS = r"""
       where.textContent = "클립 " + (S.span + 1) + "/" + S.spans.length + " · " +
         nameOf(S.spans[S.span].sourceId);
     }
-    var overlay = $("tl-overlay");
-    if (overlay) { overlay.textContent = cueText(); }
+    paintOverlay();
     paintStrip();
     paintCueFollow();
     requestLane();
   }
+  // 자막 겹(W-98, D173) — 공유의 번인과 같은 모양을 근사한다: 자리(위·아래) · 여백 · 글자 크기 ·
+  // 외곽선은 1080 기준 px × (화면 틀의 짧은 변 / 1080)(D171), 영어 줄은 한국어 아래 4/5 크기.
+  // 정확한 모양은 「자막 입히기」의 미리보기 한 장(libass)이다 — 여기는 CSS다.
+  function overlayCues() {
+    var t = S.playhead * TL.sequenceFrameTicks(S.doc.facts);
+    return S.proj.cues.filter(function (cue) {
+      return cue[2] === cue[3] ? cue[2] === t : cue[2] <= t && t < cue[3];
+    });
+  }
+  function overlayEnglish(cue) {
+    var label = englishLabel(cue[0], cue[4]);
+    return label.kind === "edited" || label.kind === "saved" ? label.text : "";
+  }
+  function overlayLine(className, text, size, outline, color) {
+    var line = W.document.createElement("div");
+    line.className = className;
+    line.textContent = text;
+    line.style.fontSize = size + "px";
+    line.style.color = color;
+    line.style.webkitTextStroke = outline > 0 ? (2 * outline) + "px " + S.burn.outlineColor : "";
+    return line;
+  }
+  function paintOverlay() {
+    var overlay = $("tl-overlay");
+    if (!overlay) { return; }
+    var cues = overlayCues();
+    if (!S.burn) { overlay.textContent = cueText(); return; }
+    var frame = overlay.parentNode.getBoundingClientRect();
+    var unit = Math.min(frame.width, frame.height) / S.burn.referenceHeight;
+    var style = S.burn.style;
+    var side = frame.width * S.burn.sideMargin;
+    overlay.className = "tl-overlay is-styled is-" + style.position;
+    overlay.style.left = side + "px";
+    overlay.style.right = side + "px";
+    overlay.style.top = style.position === "top" ? style.margin_px * unit + "px" : "";
+    overlay.style.bottom = style.position === "top" ? "" : style.margin_px * unit + "px";
+    overlay.textContent = "";
+    cues.forEach(function (cue) {
+      var english = overlayEnglish(cue);
+      if (cue[4]) {
+        overlay.appendChild(overlayLine("tl-ov-ko", cue[4], style.font_px * unit,
+          style.outline_px * unit, style.text_color));
+      }
+      if (english) {
+        var scale = S.burn.englishScale;
+        overlay.appendChild(overlayLine("tl-ov-en", english, style.font_px * scale * unit,
+          style.outline_px * scale * unit, style.text_color));
+      }
+    });
+  }
+  // 손잡이를 바꾸면(공유 탭 「자막 모양」) 저장과 함께 여기로도 온다 — 다시 그리기만 한다.
+  S.setBurnStyle = function (style) {
+    if (!S.burn || !S.doc) { return; }
+    S.burn.style = style;
+    paintOverlay();
+  };
   function cueText() {
     var t = S.playhead * TL.sequenceFrameTicks(S.doc.facts);
     return S.proj.cues.filter(function (cue) {
@@ -1140,6 +1198,7 @@ PLAYER_APP_JS = r"""
       S.english = got && got.ok ? { pairs: got.pairs || {} } : "error";
       paintCues();
       paintCueEditor(true);
+      paintOverlay();
     });
     paintCues();
   }
@@ -2287,6 +2346,15 @@ PLAYER_APP_JS = r"""
       lane.addEventListener("wheel", onLaneWheel, { passive: false });
       lane.addEventListener("contextmenu", onLaneMenu);
       if (W.ResizeObserver) { new W.ResizeObserver(requestLane).observe(lane); }
+    }
+    // 자막 겹의 크기는 화면 틀 크기에 따른다(W-98) — 틀이 바뀌면 다시 그린다.
+    var overlay = $("tl-overlay");
+    if (overlay && !overlay.__tlBound && overlay.parentNode) {
+      overlay.__tlBound = true;
+      if (W.ResizeObserver) {
+        new W.ResizeObserver(function () { if (S.doc) { paintOverlay(); } })
+          .observe(overlay.parentNode);
+      }
     }
     var list = $("tl-cue-list");
     if (list && !list.__tlBound) {

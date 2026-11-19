@@ -519,3 +519,26 @@ def test_the_timeline_index_lists_clips_and_cues_and_filters_errors() -> None:
         assert re.search(rf'"{re.escape(action)}": ', PLAYER_JS) or f"{action}: " in PLAYER_JS
     assert "!errorsOnly || row.warned" in PLAYER_JS
     assert 'indexList.addEventListener("pointerdown", onIndexDown);' in PLAYER_JS
+
+
+def test_the_model_carries_the_burn_style_for_the_overlay() -> None:
+    """W-98(D173) — 자막 겹은 저장한 번인 모양을 근사한다(모양 · 기준 높이 · 영어 크기 · 여백)."""
+    from ui.timeline_player import burn_model
+    from vlogsrt.project.raw import burn_in
+    from vlogsrt.project.raw.burn_config import BURN_SETTINGS
+
+    style = burn_in.BurnStyle("top", 70, 2, 30, "#FFCC00")
+    model = client_model("sig", "tok", _opened(), _media(), TIERS, burn_model(style, BURN_SETTINGS))
+    assert model["burn"] == {
+        "style": {"position": "top", "font_px": 70, "outline_px": 2, "margin_px": 30,
+                  "text_color": "#FFCC00"},
+        "referenceHeight": 1080, "englishScale": 0.8, "sideMargin": 0.05,
+        "outlineColor": "#000000",
+    }  # fmt: skip
+    assert client_model("sig", "tok", _opened(), _media(), TIERS)["burn"] is None
+    js = PLAYER_JS
+    assert "function paintOverlay()" in js and "S.setBurnStyle = function (style)" in js
+    # 영어 줄은 고친 영어(낡지 않은 것) 또는 저장된 번역만 — 「번역 없음」 같은 표시는 싣지 않는다.
+    assert 'label.kind === "edited" || label.kind === "saved" ? label.text : ""' in js
+    painter = js.split("function overlayCues")[1].split("S.setBurnStyle")[0]
+    assert "line.textContent = text;" in painter and "innerHTML" not in painter

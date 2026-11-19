@@ -1776,6 +1776,15 @@ class RawWorkspaceService:
             return burn_in.default_style()
         return burn_export.saved_style(self, root)
 
+    def save_subtitle_burn_style(self, root: Path, values: Any) -> Any:
+        """손잡이를 바꾸면 바로 저장한다(W-98, D173) — 공유의 번인이 화면에 보인 모양을 쓰게.
+        검사해서 저장하고 저장한 모양을 돌려준다(범위 밖이면 `RawWorkspaceError` — 저장 안 함)."""
+        from vlogsrt.project.raw import burn_export
+
+        style = self.subtitle_burn_style(values=values)
+        burn_export.save_style(self, root, style)
+        return style
+
     def prepare_subtitle_burn(
         self, root: Path, video: Path | None, korean: Path | None, english: Path | None
     ) -> Any:

@@ -71,6 +71,17 @@ WAKE_JS = (
 )
 """내보내기의 앞 단계 — 활동 띠를 바쁜 폴링으로 깨우고 입력을 그대로 넘긴다(D101)."""
 STYLE_KEYS = ("position", "font_px", "outline_px", "margin_px", "text_color")
+OVERLAY_STYLE_JS = """
+(signature, position, font, outline, margin, color) => {
+  const player = window.__vlTimelinePlayer;
+  if (player && player.setBurnStyle) {
+    player.setBurnStyle({ position: position, font_px: Number(font), outline_px: Number(outline),
+      margin_px: Number(margin), text_color: color });
+  }
+  return [signature, position, font, outline, margin, color];
+}
+"""
+"""손잡이를 바꾸면 저장하기 전에 재생기 자막 겹을 다시 그린다(W-98, D173) — 값은 그대로 넘긴다."""
 _SHORT_HEX = re.compile(r"#([0-9A-Fa-f])([0-9A-Fa-f])([0-9A-Fa-f])")
 
 
@@ -203,6 +214,17 @@ class BurnCell:
             self.export_view, inputs, [self.result, status], concurrency_limit=1, js=WAKE_JS
         )
         self.owner._report_activity(exported, status)
+        # 손잡이를 사람이 바꾸면 바로 저장하고 재생기 자막 겹에도 보인다(W-98, D173) — 공유의
+        # 번인이 화면에 보인 모양을 쓴다. `input`은 사람의 손만 — 되살리기(`restore_view`)는 아니다.
+        for knob in self.style_inputs():
+            knob.input(
+                self.save_view,
+                [self.owner._signature_state, *self.style_inputs()],
+                None,
+                js=OVERLAY_STYLE_JS,
+                show_progress="hidden",
+                api_name=False,
+            )
 
     def wire_restore(self, event: Any) -> None:
         """페이지를 열면 그 작업공간에 저장한 모양으로 손잡이를 맞춘다."""
@@ -227,6 +249,15 @@ class BurnCell:
             return tuple(gr.update() for _ in STYLE_KEYS)
         style = self.owner.raw.subtitle_burn_style(root)
         return (style.position, style.font_px, style.outline_px, style.margin_px, style.text_color)
+
+    def save_view(self, signature: str | None, *values: Any) -> None:
+        root = self.owner._snapshot_root()
+        if root is None or not signature or signature != self.owner._signature_for(root):
+            return
+        try:
+            self.owner.raw.save_subtitle_burn_style(root, self._mapping(values))
+        except self.service_error as error:
+            gr.Warning(f"자막 모양을 저장하지 못했습니다 — {error}")
 
     def preview_view(self, signature: str | None, *values: Any) -> tuple[str, str]:
         closed = self.owner._library_first_reply()
@@ -277,8 +308,12 @@ class BurnCell:
             raise self.service_error(f"자막을 입히지 못했습니다 — {record.error}")
         return _done_text(facts[0]) if facts else JOINED_TEXT.format(name=job.video.name)
 
-    def _style(self, values: tuple[Any, ...]) -> Any:
-        """손잡이 값 → 검사한 모양. 색은 `#RRGGBB`로 맞춘 뒤 넘긴다."""
+    def _mapping(self, values: tuple[Any, ...]) -> dict[str, Any]:
+        """손잡이 값 → 모양 사전. 색은 `#RRGGBB`로 맞춘다."""
         mapping = dict(zip(STYLE_KEYS, values, strict=True))
         mapping["text_color"] = normalize_color(mapping["text_color"])
-        return self.owner.raw.subtitle_burn_style(values=mapping)
+        return mapping
+
+    def _style(self, values: tuple[Any, ...]) -> Any:
+        """손잡이 값 → 검사한 모양."""
+        return self.owner.raw.subtitle_burn_style(values=self._mapping(values))
