@@ -74,3 +74,31 @@ def test_the_lookup_never_writes_or_asks(tmp_path: Path, monkeypatch: pytest.Mon
     assert timeline_english.english_by_text(service, root, "t1") == {}
     after = sorted(p.relative_to(ws) for p in ws.rglob("*") if p.is_file())
     assert after == before and srt.read_text(encoding="utf-8") == OLD
+
+
+def test_revision_srts_made_for_english_are_found_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W-99(D174) — 「영어 만들기」가 타임라인 폴더에 쓴 리비전 SRT의 번역도 찾는다. 새 리비전이
+    먼저, 그다음 렌더한 초안이다(같은 글이면 같은 번역 열쇠라 짝이 같다)."""
+    from vlogsrt.project.raw import timeline_edit_io
+
+    service, root = _workspace(tmp_path, monkeypatch, online=False)
+    folder = root / timeline_edit_io.TIMELINE_FOLDER / "t1"
+    folder.mkdir(parents=True)
+    (folder / timeline_edit_io.TIMELINE_NAME).write_text("{}", encoding="utf-8")
+    older = folder / f"{timeline_edit_io.KOREAN_SRT_PREFIX}2.srt"
+    older.write_text(OLD, encoding="utf-8")
+    _translated(service, root, older, {"1": "Hello everyone", "2": "Sea"})
+    newer = folder / f"{timeline_edit_io.KOREAN_SRT_PREFIX}10.srt"
+    newer.write_text(NEW, encoding="utf-8")
+    _translated(service, root, newer, {"1": "Hi all"})
+    ws = service._workspace(root).root
+    draft = _draft(ws, "20261116T000000Z", "t1", "1\n00:00:01,000 --> 00:00:02,000\n산\n")
+    _translated(service, root, draft, {"1": "Mountain"})
+    assert timeline_edit_io.korean_srts(root, "t1") == [newer, older]
+    assert timeline_english.english_by_text(service, root, "t1") == {
+        "안녕하세요 여러분": "Hi all",  # 리비전 10이 2보다 먼저
+        "바다 보러 왔어요": "Sea",
+        "산": "Mountain",  # 초안의 번역도 그대로 찾는다
+    }

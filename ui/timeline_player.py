@@ -195,6 +195,11 @@ def _cue_panel_html() -> str:
         '<button type="button" data-tl="cue-insert"'
         ' title="플레이헤드에 빈 자막 넣기 (⌥C)">새 자막 ⌥C</button>'
         # 번역 모드(W-87d, D153) — Subtitle Edit 「번역 모드 전환」: 영어 열을 붙인다(읽기만).
+        # 「영어 만들기」(W-99, D174) — 저장한 리비전의 자막을 Gemini로 옮긴다(유료 · 누름이 승인).
+        '<button type="button" data-tl="translate" id="tl-translate"'
+        ' title="저장한 자막을 영어로 옮긴다(Gemini · 유료 · 누름이 승인) —'
+        ' 같은 글은 다시 사지 않고, 한국어를 고친 뒤 다시 누르면 지금 글을 옮긴다">'
+        "영어 만들기</button>"
         '<button type="button" data-tl="translation" id="tl-translation" aria-pressed="false"'
         ' title="번역 모드 전환 — 렌더한 초안의 저장된 영어를 한국어 글로 찾아 보인다'
         '(사지 않는다)">번역 모드</button></div>'
@@ -378,10 +383,18 @@ TIMELINE_PLAYER_CSS = """
 class TimelinePlayer:
     """칸 하나 — 「최종 편집」 탭 머리에서 타임라인 요약 아래에 선다."""
 
-    def __init__(self, owner: Any, service_error: type[Exception], render_job_kind: str) -> None:
+    def __init__(
+        self,
+        owner: Any,
+        service_error: type[Exception],
+        render_job_kind: str,
+        translate_job_kind: str | None = None,
+    ) -> None:
         self.owner = owner
         self.service_error = service_error
         self.render_job_kind = render_job_kind
+        # 「영어 만들기」(W-99, D174)가 거는 번역 작업 — 재생기가 그 끝을 묻는다.
+        self.translate_job_kind = translate_job_kind
         self.block: Any = None
 
     def build(self) -> None:
@@ -448,6 +461,9 @@ class TimelinePlayer:
         def tl_english(payload: dict[str, object]) -> dict[str, object]:
             return self.action(payload, "english")
 
+        def tl_translate(payload: dict[str, object]) -> dict[str, object]:
+            return self.action(payload, "translate")
+
         return [
             tl_media,
             tl_prepare,
@@ -458,6 +474,7 @@ class TimelinePlayer:
             tl_job,
             tl_wave,
             tl_english,
+            tl_translate,
         ]
 
     def action(self, payload: dict[str, object], kind: str) -> dict[str, object]:
@@ -469,7 +486,7 @@ class TimelinePlayer:
 
         try:
             root = owner._require_current_selection(owner._serve_str(payload, "signature") or None)
-            if kind in ("prepare", "save", "render", "add"):
+            if kind in ("prepare", "save", "render", "add", "translate"):
                 owner._require_workbench_token(payload, owner._visual_lifetime_token, TAB_LABEL)
         except gr.Error as error:
             return fail(error, stale=True)
@@ -483,6 +500,8 @@ class TimelinePlayer:
                 return self._add(root, timeline_id, payload)
             if kind == "job":
                 return self._job(root, payload)
+            if kind == "translate":
+                return self._translate(root, timeline_id, payload)
             if kind == "wave":
                 source_id = owner._serve_str(payload, "sourceId")
                 wave = owner.raw.timeline_waveform(root, source_id)
@@ -537,9 +556,29 @@ class TimelinePlayer:
     def _job(self, root: Any, payload: dict[str, object]) -> dict[str, object]:
         """재생기가 건 렌더 작업의 상태(W-71h) — 렌더 작업만 답한다. 읽기만 한다."""
         job = self.owner.raw.get_job(root, self.owner._serve_str(payload, "jobId"))
-        if job.kind != self.render_job_kind:
-            raise ValueError("렌더 작업이 아닙니다.")
+        if job.kind not in (self.render_job_kind, self.translate_job_kind):
+            raise ValueError("재생기가 건 작업(렌더 · 영어 만들기)이 아닙니다.")
         return {"ok": True, "status": job.status, "ended": job.status in JOB_ENDED}
+
+    def _translate(
+        self, root: Any, timeline_id: str | None, payload: dict[str, object]
+    ) -> dict[str, object]:
+        """저장한 리비전의 자막을 영어로 옮기는 작업을 건다(W-99, D174) — 누름이 승인이다(D110).
+
+        리비전의 SRT를 타임라인 폴더에 쓰고 「영어 SRT로 변환」과 같은 작업에 넘긴다. 같은 글을 이미
+        옮겼으면 저장된 번역을 쓰고(무료) 연결을 묻지 않는다."""
+        revision = payload.get("revision")
+        if timeline_id is None or not isinstance(revision, int) or isinstance(revision, bool):
+            raise ValueError("영어 만들기 요청의 모양이 틀렸습니다(타임라인 · 리비전).")
+        raw = self.owner.raw
+        srt = raw.timeline_korean_srt(root, timeline_id, revision)
+        client = None
+        if not raw.srt_translation_cached(root, srt):
+            client = self.owner._live_transport_for_action().semantic_client(
+                raw.translation_model()
+            )
+        handle = raw.start_srt_translation(root, srt, client)
+        return {"ok": True, "jobId": handle.job_id}
 
     def _render(
         self, root: Any, timeline_id: str | None, payload: dict[str, object]

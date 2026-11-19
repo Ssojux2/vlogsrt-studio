@@ -5,7 +5,8 @@
 다시 읽어 저장된 번역과 줄 아이디로 맞춰 **한국어 글(공백을 한 칸으로) → 영어** 짝을 만든다. 새
 초안이 먼저다. 글을 고친 줄은 짝이 없다 — 화면이 「번역 없음」으로 보인다.
 
-부르지 않고(사지 않는다 — 번역은 결과 카드의 「영어 SRT로 변환」뿐이다, D114), 쓰지 않는다. 자막·
+부르지 않고(사지 않는다 — 번역은 「영어 SRT로 변환」과 재생기 「영어 만들기」(D174)뿐이다, D114),
+쓰지 않는다. 자막·
 시각·문서·지문·캐시 열쇠 어디에도 들지 않는다.
 """
 
@@ -23,9 +24,19 @@ if TYPE_CHECKING:
 
 
 def english_by_text(service: RawWorkspaceService, root: Path, timeline_id: str) -> dict[str, str]:
-    """이 타임라인을 렌더한 초안들의 저장된 번역 — {한국어 한 줄: 영어}, 새 초안의 것이 이긴다."""
+    """이 타임라인을 렌더한 초안들과 「영어 만들기」로 옮긴 리비전 SRT(D174)의 저장된 번역 —
+    {한국어 한 줄: 영어}. 리비전 SRT가 먼저(새 리비전부터), 그다음 새 초안의 것이 이긴다."""
+    from vlogsrt.project.raw import timeline_edit_io
+
     pairs: dict[str, str] = {}
     workspace_root = service._workspace(root).root
+    try:
+        revisions = timeline_edit_io.korean_srts(root, timeline_id)
+    except RawWorkspaceError:
+        revisions = []  # 그 타임라인 폴더가 없다 — 초안에서만 찾는다
+    for srt in revisions:
+        for korean, english in _pairs(service, root, srt).items():
+            pairs.setdefault(korean, english)
     for folder in render_export.report_folders(workspace_root):
         if _timeline_of(folder) != timeline_id:
             continue

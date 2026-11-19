@@ -542,3 +542,45 @@ def test_the_model_carries_the_burn_style_for_the_overlay() -> None:
     assert 'label.kind === "edited" || label.kind === "saved" ? label.text : ""' in js
     painter = js.split("function overlayCues")[1].split("S.setBurnStyle")[0]
     assert "line.textContent = text;" in painter and "innerHTML" not in painter
+
+
+def test_make_english_needs_the_token_and_translates_that_revisions_srt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W-99(D174) — 「영어 만들기」는 수명 토큰에 묶인 유료 누름이다. 저장한 리비전의 SRT를
+    「영어 SRT로 변환」과 같은 작업에 넘기고, 이미 옮긴 글이면 연결을 묻지 않는다."""
+    from vlogsrt.project.raw import service as raw_service
+
+    server, _root, signature = _server(tmp_path)
+    player = server._timeline_player
+    srt = tmp_path / "korean-r5.srt"
+    started: list[tuple[Path, object]] = []
+    monkeypatch.setattr(server.raw, "timeline_korean_srt", lambda _r, _t, revision: srt)
+    monkeypatch.setattr(server.raw, "srt_translation_cached", lambda _r, _s: True)
+    monkeypatch.setattr(
+        server,
+        "_live_transport_for_action",
+        lambda: pytest.fail("이미 옮긴 글 — 연결을 묻지 않는다"),
+    )
+
+    def start(_root: Path, path: Path, client: object) -> Any:
+        started.append((path, client))
+        return SimpleNamespace(job_id="e1")
+
+    monkeypatch.setattr(server.raw, "start_srt_translation", start)
+    payload: dict[str, object] = {
+        "signature": signature, "token": "낡은-토큰", "timelineId": "t1", "revision": 5,
+    }  # fmt: skip
+    assert player.action(payload, "translate")["ok"] is False and started == []
+    payload["token"] = server._visual_lifetime_token
+    assert player.action(payload, "translate") == {"ok": True, "jobId": "e1"}
+    assert started == [(srt, None)]
+    assert player.action({**payload, "revision": True}, "translate")["ok"] is False
+    jobs = {"e1": SimpleNamespace(job_id="e1", kind=raw_service.SRT_TRANSLATE_JOB_KIND,
+                                  status="succeeded")}  # fmt: skip
+    monkeypatch.setattr(server.raw, "get_job", lambda _root, job_id: jobs[job_id])
+    assert player.action({"signature": signature, "jobId": "e1"}, "job")["ended"] is True
+    assert "tl_translate" in [f.__name__ for f in player.server_functions()]
+    page = timeline_player_html(client_model("sig", "tok", _opened(), _media(), TIERS))
+    assert 'data-tl="translate"' in page and ">영어 만들기</button>" in page
+    assert "translate: translate" in PLAYER_JS and "watchTranslate(got.jobId)" in PLAYER_JS

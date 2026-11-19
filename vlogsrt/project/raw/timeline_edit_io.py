@@ -371,6 +371,44 @@ def open_timeline(
     }
 
 
+KOREAN_SRT_PREFIX = "korean-r"
+"""타임라인 폴더 안의 리비전 한국어 SRT(`korean-r<리비전>.srt`, W-99 · D174) — 영어로 옮길 재료."""
+
+
+def _is_korean_srt(name: str) -> bool:
+    number = name.removeprefix(KOREAN_SRT_PREFIX).removesuffix(".srt")
+    return name == f"{KOREAN_SRT_PREFIX}{number}.srt" and number.isdigit()
+
+
+def korean_srt(root: Path, timeline_id: str, revision: int) -> Path:
+    """저장한 리비전의 자막을 그 타임라인 폴더의 SRT로(W-99, D174) — 「영어 만들기」가 옮긴다.
+
+    화면이 본 리비전이 지금 파일과 다르면 거부한다. 바이트는 `timeline_edit.srt_text` 그대로라
+    그 리비전을 렌더한 `draft.srt`와 같고, 번역 열쇠(큐 글)도 같다 — 공유가 무료로 쓴다. 같은
+    리비전이면 같은 바이트라 이미 있으면 그대로 둔다."""
+    name, current, document = read_document(root, timeline_id)
+    if current != revision:
+        raise TimelineEditError(
+            f"화면의 리비전 {revision}이 지금 저장본({current})과 다릅니다 — 다시 열어 주세요."
+        )
+    folder = _folder_by_id(root, name)
+    path = folder / f"{KOREAN_SRT_PREFIX}{revision}.srt"
+    if not path.is_file():
+        _write_atomic(folder, path.name, timeline_edit.srt_text(document).encode("utf-8"))
+    return path
+
+
+def korean_srts(root: Path, timeline_id: str) -> list[Path]:
+    """그 타임라인 폴더의 리비전 한국어 SRT — 새 리비전부터(영어 열이 찾는다)."""
+    folder = _folder_by_id(root, timeline_id)
+    found = []
+    for path in folder.glob(f"{KOREAN_SRT_PREFIX}*.srt"):
+        number = path.stem.removeprefix(KOREAN_SRT_PREFIX)
+        if number.isdigit():
+            found.append((int(number), path))
+    return [path for _number, path in sorted(found, reverse=True)]
+
+
 def read_document(
     root: Path, timeline_id: str | None = None, settings: FinalEditSettings = FINAL_EDIT_SETTINGS
 ) -> tuple[str, int, TimelineDocument]:
@@ -530,7 +568,8 @@ def _write_record(folder: Path, record: Mapping[str, Any]) -> None:
 
 def _write_atomic(folder: Path, name: str, payload: bytes) -> None:
     """`timeline/<시각>/` 안의 정해진 이름만 — 임시 파일에 다 쓰고 이름을 바꾼다."""
-    if name not in TIMELINE_FILES or folder.parent.name != TIMELINE_FOLDER:
+    allowed = name in TIMELINE_FILES or _is_korean_srt(name)
+    if not allowed or folder.parent.name != TIMELINE_FOLDER:
         raise TimelineEditError(f"타임라인이 쓸 수 없는 자리다: {folder.parent.name}/{name}")
     temporary = folder / f"{name}.tmp"
     descriptor = os.open(temporary, _WRITE_FLAGS, _FILE_MODE)

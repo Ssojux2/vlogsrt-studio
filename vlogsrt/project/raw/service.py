@@ -4150,6 +4150,13 @@ class RawWorkspaceService:
 
         return source_waveform.waveform(self._workspace(root), source_id)
 
+    def timeline_korean_srt(self, root: Path, timeline_id: str, revision: int) -> Path:
+        """저장한 리비전의 자막 SRT(W-99, D174) — 「영어 만들기」가 `start_srt_translation`에
+        넘긴다. 무료(파일 하나). 화면의 리비전이 지금 저장본과 다르면 거부한다."""
+        from vlogsrt.project.raw import timeline_edit_io
+
+        return timeline_edit_io.korean_srt(root, timeline_id, revision)
+
     def timeline_english(self, root: Path, timeline_id: str) -> dict[str, str]:
         """타임라인 자막의 영어 열(W-87d) — 렌더한 초안들의 저장된 번역을 한국어 글로.
 

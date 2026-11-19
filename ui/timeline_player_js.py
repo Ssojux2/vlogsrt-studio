@@ -1923,6 +1923,50 @@ PLAYER_APP_JS = r"""
       watchRender(got.jobId);
     });
   }
+  // 「영어 만들기」(W-99, D174) — 저장한 리비전의 자막을 옮긴다(유료 · 누름이 승인, D110).
+  // 저장 대기 편집을 먼저 보낸다. 끝나면 영어를 다시 찾아 영어 열·자막 겹에 보인다
+  // (같은 글은 다시 사지 않는다).
+  function translate() {
+    commitText();
+    if (S.conflict) {
+      say("저장이 충돌한 채로는 옮기지 않습니다 — 먼저 정리하세요.", true);
+      return;
+    }
+    if (S.dirty || S.saving) {
+      say("편집을 저장한 뒤 영어로 옮깁니다…", false);
+      afterSaved(translate);
+      return;
+    }
+    var payload = { signature: S.signature, token: S.token, timelineId: S.timelineId,
+      revision: S.baseRevision };
+    if (W.__vlServer) { W.__vlServer.wake(true); }
+    S.server.tl_translate(payload).then(function (got) {
+      if (!got || !got.ok) {
+        say((got && got.error) || "영어 만들기를 걸지 못했습니다.", true);
+        return;
+      }
+      say("리비전 " + payload.revision + "의 자막을 영어로 옮깁니다 — 끝나면 영어 열과" +
+        " 화면 자막에 보입니다.", false);
+      watchTranslate(got.jobId);
+    });
+  }
+  function watchTranslate(jobId) {
+    var gen = S.pollGen;
+    W.setTimeout(function () {
+      if (gen !== S.pollGen) { return; }
+      S.server.tl_job({ signature: S.signature, jobId: jobId }).then(function (got) {
+        if (gen !== S.pollGen || !got || !got.ok) { return; }
+        if (!got.ended) { watchTranslate(jobId); return; }
+        if (got.status !== "succeeded") {
+          say("영어를 만들지 못했습니다(" + got.status + ") — 「기록」에서 까닭을 보세요.", true);
+          return;
+        }
+        say("영어를 만들었습니다 — 한국어 아래 영어 줄로 보이고 공유의 「한국어 + 영어」가 씁니다.",
+          false);
+        askEnglish();
+      });
+    }, POLL_MS);
+  }
   // 이 탭이 앞이면 화면 타이머가 쉰다(D134) — 초안 편집 칸의 틱이 새 초안을 못 보므로 재생기가 자기
   // 렌더를 물어 끝나면 그 칸의 숨은 「다시 열기」를 누른다(W-71h). 다른 화면의 렌더는 틱이 맡는다.
   function watchRender(jobId) {
@@ -2257,7 +2301,8 @@ PLAYER_APP_JS = r"""
       "cue-insert": function () { commitText(); cueOp("insert"); },
       "force-save": function () { saveNow(true); }, render: render, index: toggleIndex,
       "index-clips": function () { indexTab("clips"); },
-      "index-cues": function () { indexTab("cues"); }, translation: toggleTranslation };
+      "index-cues": function () { indexTab("cues"); }, translation: toggleTranslation,
+      translate: translate };
     var act = acts[target.getAttribute("data-tl")];
     if (act) { act(); }
   }
