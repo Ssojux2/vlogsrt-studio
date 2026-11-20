@@ -44,6 +44,8 @@ FIT_STORAGE_KEY = "vlogsrt.fitWindow"
 FIT_ON = "on"
 SPLIT_STORAGE_KEY = "vlogsrt.trackSplit"
 CAPTIONS_ID = "vl-captions"
+# 자막 칸이 이 폭(px)보다 좁으면 「끝」·「간격」 열을 접는다(D178 — 화면 배치일 뿐이다).
+CAPTIONS_NARROW_PX = 560
 WORKSPACE_STORAGE_KEY = "vlogsrt.workspace"
 BASIC, CAPTIONS = "basic", "captions"
 WORKSPACES: tuple[tuple[str, str], ...] = ((BASIC, "기본"), (CAPTIONS, "자막"))
@@ -394,9 +396,10 @@ _BIND_JS = r"""
     }
     paintFit();
   }
-  // ─── 작업공간(W-87c, D152) — 「기본」 · 「자막」(Subtitle Edit식). 「자막」이면 재생기의 자막
-  // 목록 · 입력칸(`.tl-cues-body`)을 노드째 브라우저 열의 자막 칸으로 옮기고(청취자 그대로) 뷰어는
-  // 타임라인, 아래 덱의 파형 레인은 키운다. 「기본」으로 오면 제자리(재생기의 자막 칸)로 돌린다.
+  // ─── 작업공간(W-87c D152 → D178) — 재생기의 자막 머리 · 목록 · 입력칸(`.tl-cues-head` ·
+  // `.tl-cues-body`)은 늘 재생기 밖에 둔다(노드째 — 청취자 그대로). 「기본」이면 오른쪽 위
+  // 인스펙터(「분석」 탭, 타임라인 뷰어일 때)에, 「자막」(Subtitle Edit식)이면 왼쪽 브라우저 열에.
+  // 그래서 아래 덱의 타임라인은 화면 폭 전체를 쓴다. 재생기가 다시 그려지면 새 노드를 다시 옮긴다.
   function readWorkspace() {
     try { return W.localStorage.getItem(CFG.workspaceKey) === CFG.captionsMode ? CFG.captionsMode
       : CFG.basicMode; }
@@ -407,33 +410,36 @@ _BIND_JS = r"""
   }
   function captionsHolder() {
     var holder = $(CFG.captions);
-    var stage = $(CFG.stage);
-    if (!holder && stage) {
+    if (!holder) {
       holder = document.createElement("div");
       holder.id = CFG.captions;
       holder.setAttribute("data-vl-own-keys", "");
       holder.setAttribute("aria-label", "자막 목록 · 입력칸");
-      stage.appendChild(holder);
+      if (typeof ResizeObserver === "function") {
+        new ResizeObserver(function () {
+          var width = holder.getBoundingClientRect().width;
+          holder.classList.toggle("is-narrow", width > 0 && width < CFG.captionsNarrowPx);
+        }).observe(holder);
+      }
     }
     return holder;
   }
   function placeCaptions() {
     var key = readWorkspace();
     var stage = $(CFG.stage);
-    if (stage) { stage.setAttribute("data-vl-workspace", key); }
+    if (!stage) { return; }
+    stage.setAttribute("data-vl-workspace", key);
+    var holder = captionsHolder();
+    var target = key === CFG.captionsMode ? stage : ($(CFG.inspector) || stage);
+    if (holder.parentNode !== target) { target.appendChild(holder); }
     var live = "#" + CFG.deck + " .tl-root:not(.tl-empty) ";
     var deckBody = document.querySelector(live + ".tl-cues-body");
-    var holder = $(CFG.captions);
-    if (key === CFG.captionsMode) {
-      holder = captionsHolder();
-      if (holder && deckBody) {
-        while (holder.firstChild) { holder.removeChild(holder.firstChild); }
-        holder.appendChild(deckBody);
-      }
-    } else if (holder && holder.firstChild) {
-      var home = document.querySelector(live + ".tl-cues");
-      var moved = holder.querySelector(".tl-cues-body");
-      if (home && moved && !home.querySelector(".tl-cues-body")) { home.appendChild(moved); }
+    var deckHead = document.querySelector(live + ".tl-cues-head");
+    if (deckBody) {
+      while (holder.firstChild) { holder.removeChild(holder.firstChild); }
+      if (deckHead) { holder.appendChild(deckHead); }
+      holder.appendChild(deckBody);
+    } else if (!document.querySelector("#" + CFG.deck + " .tl-root:not(.tl-empty)")) {
       while (holder.firstChild) { holder.removeChild(holder.firstChild); }
     }
     Array.prototype.forEach.call(document.querySelectorAll("[data-vl-workspace-pick]"),
@@ -521,6 +527,7 @@ def window_bind_js() -> str:
         "fitOn": FIT_ON,
         "splitKey": SPLIT_STORAGE_KEY,
         "captions": CAPTIONS_ID,
+        "captionsNarrowPx": CAPTIONS_NARROW_PX,
         "workspaceKey": WORKSPACE_STORAGE_KEY,
         "basicMode": BASIC,
         "captionsMode": CAPTIONS,
@@ -585,15 +592,53 @@ def window_css() -> str:
 /* 화면 맞춤(W-86c, D150) — 덱 머리의 단추. 켜면(넓은 화면, 타임라인이 있을 때) 무대를
    화면 높이에 묶고 위 덱(재생기 줄)과 아래 덱을 토큰 비율로 나눈다 — 덱과 뷰어는 제 칸
    안에서 스크롤·맞춤한다. */
-/* 「자막」 작업공간(W-87c, D152) — 브라우저 열에 자막 목록 · 입력칸, 파형 레인을 키운다. 재생기가
-   없으면(자막 칸이 비면) 브라우저 그대로다. */
+/* 자막 칸(D178) — 재생기의 자막 머리 · 목록 · 입력칸은 재생기 밖이다. 「기본」이면 인스펙터
+   「분석」 탭(타임라인 뷰어일 때 — 원본 뷰어면 원본 분석 칸이 보인다), 「자막」 작업공간(D152)이면
+   브라우저 열. 아래 덱 타임라인은 화면 폭 전체를 쓴다. 비면(재생기 없음) 보이지 않는다. */
 #{CAPTIONS_ID} {{ display: none; }}
+#{CAPTIONS_ID} .tl-cues-head {{ display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+  flex: none; font-size: 12px; }}
+#{CAPTIONS_ID} .tl-cues-head button, #{CAPTIONS_ID} .tl-cues-body button {{ font: inherit;
+  font-size: 12px; padding: 1px 8px; border-radius: 4px; cursor: pointer;
+  border: 1px solid var(--vl-line-strong); background: var(--vl-surface-raised);
+  color: var(--vl-ink); }}
+#{CAPTIONS_ID} .tl-cues-body {{ display: flex; flex-direction: column; gap: 6px;
+  flex: 1 1 auto; min-height: 0; }}
+#{CAPTIONS_ID} .tl-cue-list {{ flex: 1 1 auto; max-height: 50vh; min-height: 84px; }}
+#{STAGE_ID}[data-vl-fit="{FIT_ON}"] #{CAPTIONS_ID} .tl-cue-list {{ max-height: none; }}
+#{CAPTIONS_ID} .tl-cue-edit {{ flex: none; gap: 3px; }}
+/* 인스펙터에서는 입력칸을 낮게(두 줄) — 목록이 더 많은 줄을 받는다. 끌어 키울 수 있다. */
+#{CAPTIONS_ID} .tl-cue-edit textarea {{ min-height: 40px; height: 44px; }}
+#{CAPTIONS_ID} .tl-cue-edit .tl-cue-warn {{ min-height: 0; }}
+/* 좁은 칸(인스펙터 약 400px)에서는 「끝」·「간격」 열을 접는다 — 시작 · 길이 · 문자/초와 입력칸의
+   시각이 남는다(14인치 1512×900에서 머리가 두 줄로 접혀 한 줄만 보였다). 칸이 넓어지면 다 보인다.
+   그라디오가 `@container`를 걸러 내므로 칸 폭은 실행본이 재 `is-narrow`를 단다. */
+#{CAPTIONS_ID}.is-narrow .tl-cue-row, #{CAPTIONS_ID}.is-narrow .tl-cue-grid-head {{
+  column-gap: 6px; padding: 3px 6px; grid-template-columns: 2em 6.2em 3em minmax(0, 1fr) 3.8em; }}
+#{CAPTIONS_ID}.is-narrow .tl-cue-list.is-translation .tl-cue-row,
+#{CAPTIONS_ID}.is-narrow .tl-cue-list.is-translation .tl-cue-grid-head {{
+  grid-template-columns: 2em 6.2em 3em minmax(0, 1fr) minmax(0, 1fr) 3.8em; }}
+#{CAPTIONS_ID}.is-narrow .tl-cue-row > :nth-child(3),
+#{CAPTIONS_ID}.is-narrow .tl-cue-grid-head > :nth-child(3),
+#{CAPTIONS_ID}.is-narrow .tl-cue-row > :nth-last-child(2),
+#{CAPTIONS_ID}.is-narrow .tl-cue-grid-head > :nth-last-child(2) {{ display: none; }}
+#{CAPTIONS_ID}[data-tl-pane="captions"] .tl-cues-head,
+#{CAPTIONS_ID}[data-tl-pane="captions"] .tl-cue-list {{
+  box-shadow: 0 0 0 2px var(--vl-accent-ink); border-radius: 4px; }}
+#{STAGE_ID}[data-vl-workspace="{BASIC}"][data-vl-viewer="{PROGRAM}"]
+  #{INSPECTOR_ID}[data-vl-inspector="{ANALYSIS}"] #{CAPTIONS_ID}:has(.tl-cues-body) {{
+  display: flex; flex-direction: column; gap: 6px; flex: 1 1 auto; min-height: 0; }}
+/* 타임라인 뷰어의 「분석」 탭은 자막 칸이다 — 원본의 승인 범위는 원본 뷰어에서 보인다. */
+#{STAGE_ID}[data-vl-workspace="{BASIC}"][data-vl-viewer="{PROGRAM}"]
+  #{INSPECTOR_ID}:has(#{CAPTIONS_ID} .tl-cues-body) #vl-approval-mode {{ display: none; }}
+#{STAGE_ID}[data-vl-workspace="{BASIC}"][data-vl-viewer="{PROGRAM}"]
+  #{INSPECTOR_ID}[data-vl-inspector="{ANALYSIS}"]:has(#{CAPTIONS_ID} .tl-cues-body) {{
+  overflow: hidden; max-height: none; display: flex; flex-direction: column; }}
 #{STAGE_ID}[data-vl-workspace="{CAPTIONS}"]:has(#{CAPTIONS_ID} .tl-cues-body) #vl-thumbs {{
   display: none; }}
 #{STAGE_ID}[data-vl-workspace="{CAPTIONS}"] #{CAPTIONS_ID}:has(.tl-cues-body) {{ display: flex;
-  grid-area: thumbs; flex-direction: column; min-width: 0; min-height: 0; overflow: auto; }}
-#{CAPTIONS_ID} .tl-cues-body {{ flex-direction: column; flex: 1 1 auto; min-height: 0; }}
-#{CAPTIONS_ID} .tl-cue-list {{ flex: 1 1 auto; max-height: none; min-height: 160px; }}
+  grid-area: thumbs; flex-direction: column; gap: 6px; min-width: 0; min-height: 0;
+  overflow: auto; }}
 #{STAGE_ID}[data-vl-workspace="{CAPTIONS}"] .tl-lane {{ height: var(--vl-caption-lane-h); }}
 .vl-workspaces {{ display: inline-flex; margin-right: auto; }}
 .vl-workspaces button + button {{ border-left: 0; }}

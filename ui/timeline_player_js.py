@@ -986,8 +986,29 @@ PLAYER_APP_JS = r"""
     requestLane();
     return true;
   }
+  // 가운데 고정 재생(D178) — 이 브라우저가 기억한다(편의 — 못 읽으면 끔).
+  var CENTER_PLAY_KEY = "vlogsrt.centerPlay";
+  function centerPlay() {
+    if (S.centerPlay === undefined) {
+      try { S.centerPlay = W.localStorage.getItem(CENTER_PLAY_KEY) === "on"; }
+      catch (error) { S.centerPlay = false; }
+    }
+    return S.centerPlay;
+  }
+  function toggleCenterPlay() {
+    S.centerPlay = !centerPlay();
+    try { W.localStorage.setItem(CENTER_PLAY_KEY, S.centerPlay ? "on" : ""); }
+    catch (error) { /* 편의 */ }
+    paintTools();
+    say(S.centerPlay ? "가운데 고정 — 재생하면 플레이헤드는 가운데에 서고 타임라인이 흐릅니다."
+      : "넘겨 보기 — 재생하면 플레이헤드가 화면 끝에 닿을 때 한 화면씩 넘깁니다.", false);
+    requestLane();
+    return true;
+  }
   function paintTools() {
     if (S.rootEl) { S.rootEl.setAttribute("data-tl-tool", S.tool); }
+    var center = $("tl-center");
+    if (center) { center.setAttribute("aria-pressed", centerPlay() ? "true" : "false"); }
     var skim = $("tl-skim");
     if (skim) { skim.setAttribute("aria-pressed", S.skimOn ? "true" : "false"); }
     var snap = $("tl-snap");
@@ -1212,11 +1233,14 @@ PLAYER_APP_JS = r"""
     var root = S.rootEl;
     if (!root || !root.closest) { return; }
     var deck = root.closest("#vl-timeline-deck");
-    var body = root.querySelector(".tl-cues-body");
+    // 자막 목록 · 입력칸이 재생기 밖(인스펙터 · 브라우저 열, D178)이면 한 열 — 타임라인이
+    // 덱 폭 전체다.
+    var solo = !root.querySelector(".tl-cues-body");
     var index = $("tl-index");
     var wide = W.matchMedia ? W.matchMedia("(min-width: 1051px)").matches : true;
-    var on = !!deck && !!deck.closest("[data-vl-fit]") && wide && !!body &&
+    var on = !!deck && !!deck.closest("[data-vl-fit]") && wide &&
       getComputedStyle(deck).overflowY !== "visible" && !(index && !index.hidden);
+    root.classList.toggle("is-solo", solo);
     // 재어 보느라 `is-fit`을 달았다 떼면 덱 내용이 잠깐 줄어 브라우저가 scrollTop을 0으로 당긴다 —
     // 잰 뒤 물러서면 사람이 내려 둔 자리로 돌린다(디자인 점검 U1 — 1초마다 맨 위로 튀었다).
     var kept = deck ? deck.scrollTop : 0;
@@ -1703,7 +1727,12 @@ PLAYER_APP_JS = r"""
     var ctx = c.getContext("2d");
     ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
     var head = S.playhead * seqTicks();
-    if (S.playing) { S.lane = LN.follow(laneView(), head, width); }
+    // 재생 중 보기 — 「가운데 고정」이면 플레이헤드를 가운데에 두고 타임라인이 흐른다(D178),
+    // 아니면 플레이헤드가 화면을 벗어날 때만 한 화면씩 넘긴다.
+    if (S.playing) {
+      S.lane = centerPlay() ? LN.centerOn(laneView(), head, width)
+        : LN.follow(laneView(), head, width);
+    }
     var view = laneView();
     var at = laneLayout(height);
     ctx.fillStyle = cssVar("--vl-surface-sunken");
@@ -2154,8 +2183,7 @@ PLAYER_APP_JS = r"""
     commitText();
     clearPicked();
     S.laneSel = null;
-    S.pane = "timeline";
-    if (S.rootEl) { S.rootEl.setAttribute("data-tl-pane", "timeline"); }
+    setPane("timeline");
     if (!hit) { paint(); return; }
     S.sel = hit.index;
     S.cursor = null;
@@ -2622,19 +2650,23 @@ PLAYER_APP_JS = r"""
   // 줄을 고른다. 동작이 false를 돌려주면(할 일이 없다) 기본 동작을 막지 않는다.
   function paneOf(target) {
     if (!target || typeof target.closest !== "function") { return null; }
-    if (target.closest(".tl-cues, .tl-cues-body")) { return "captions"; }
+    if (target.closest(".tl-cues, .tl-cues-head, .tl-cues-body")) { return "captions"; }
     if (target.closest("#tl-index-list")) {
       return indexState().tab === "cues" ? "captions" : "timeline";
     }
     if (target.closest(".tl-strip, .tl-range, .tl-transport, .tl-stage")) { return "timeline"; }
     return null;
   }
+  // 키 창 표지는 재생기와 재생기 밖 자막 칸(D178)에 함께 단다.
+  function setPane(pane) {
+    S.pane = pane;
+    if (S.rootEl) { S.rootEl.setAttribute("data-tl-pane", pane); }
+    var holder = $("vl-captions");
+    if (holder) { holder.setAttribute("data-tl-pane", pane); }
+  }
   function notePane(ev) {
     var pane = paneOf(ev.target);
-    if (pane && pane !== S.pane) {
-      S.pane = pane;
-      if (S.rootEl) { S.rootEl.setAttribute("data-tl-pane", pane); }
-    }
+    if (pane && pane !== S.pane) { setPane(pane); }
   }
   function onKey(ev) {
     if (!S.doc) { return; }
@@ -2857,7 +2889,7 @@ PLAYER_APP_JS = r"""
       "trim-end": function () { trimToCursor(TL.SIDE_END); },
       blade: function () { clipOp("blade"); }, "delete-clip": function () { clipOp("delete"); },
       "tool-select": function () { setTool("select"); }, skimming: toggleSkim,
-      snapping: toggleSnap,
+      snapping: toggleSnap, "center-play": toggleCenterPlay,
       "tool-blade": function () { setTool("blade"); },
       join: function () { clipOp("join"); }, "add-source": addSource,
       "cue-start": function () { cueOp("start", cueTargetOf(target)); },
@@ -2921,6 +2953,18 @@ PLAYER_APP_JS = r"""
     if (S.playing && v === active()) { onFrame(v, v.currentTime, Math.floor); }
   }
   function onVideoClick() { toggle(); }
+  function forwardOutside(part) {
+    part.__tlBound = true;
+    part.addEventListener("keydown", function (ev) {
+      if (S.rootEl && !S.rootEl.contains(part)) { onKey(ev); }
+    });
+    part.addEventListener("click", function (ev) {
+      if (S.rootEl && !S.rootEl.contains(part)) { onClick(ev); }
+    });
+    part.addEventListener("pointerdown", function (ev) {
+      if (S.rootEl && !S.rootEl.contains(part)) { notePane(ev); }
+    }, true);
+  }
   function bindDom() {
     var rootEl = S.rootEl;
     if (!rootEl.__tlBound) {
@@ -2931,19 +2975,12 @@ PLAYER_APP_JS = r"""
     }
     // 「자막」 작업공간(W-87c, D152)이 자막 목록 · 입력칸을 재생기 밖(브라우저 열)으로 옮기면
     // 키·누름이 뿌리까지 오지 않는다 — 밖에 있을 때만 같은 처리로 넘긴다(두 번 돌지 않게).
-    var body = rootEl.querySelector(".tl-cues-body");
-    if (body && !body.__tlBound) {
-      body.__tlBound = true;
-      body.addEventListener("keydown", function (ev) {
-        if (S.rootEl && !S.rootEl.contains(body)) { onKey(ev); }
-      });
-      body.addEventListener("click", function (ev) {
-        if (S.rootEl && !S.rootEl.contains(body)) { onClick(ev); }
-      });
-      body.addEventListener("pointerdown", function (ev) {
-        if (S.rootEl && !S.rootEl.contains(body)) { notePane(ev); }
-      }, true);
-    }
+    // 자막 칸(D178)은 머리 · 목록 · 입력칸을 재생기 밖으로 옮긴다 — 둘 다 같은 처리로 넘긴다.
+    [".tl-cues-head", ".tl-cues-body"].forEach(function (selector) {
+      var part = rootEl.querySelector(selector) ||
+        document.querySelector("#vl-captions " + selector);
+      if (part && !part.__tlBound) { forwardOutside(part); }
+    });
     decks().forEach(function (v) {
       if (v && !v.__tlBound) {
         v.__tlBound = true;

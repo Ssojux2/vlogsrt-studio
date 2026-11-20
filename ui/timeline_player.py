@@ -165,6 +165,10 @@ def timeline_player_html(model: dict[str, Any] | None) -> str:
             ' title="스키밍 — 타임라인에 올린 자리를 뷰어에 보인다 (S)">스키밍</button>'
             '<button type="button" data-tl="snapping" id="tl-snap" aria-pressed="true"'
             ' title="스내핑 — 끄는 끝이 컷 · 플레이헤드에 붙는다 (N)">스내핑</button>'
+            # 가운데 고정 재생(D178) — 플레이헤드는 가운데, 타임라인이 흐른다.
+            '<button type="button" data-tl="center-play" id="tl-center" aria-pressed="false"'
+            ' title="가운데 고정 재생 — 재생하면 플레이헤드가 가운데에 서고 타임라인이 흐른다">'
+            "가운데 고정</button>"
             '<input type="range" id="tl-zoom" min="0" max="1000" step="1"'
             ' aria-label="타임라인 확대" title="타임라인 확대 (⌘= · ⌘− · ⇧Z 맞춤)"></span>'
             # 편집 단추 묶음과 출력 묶음 사이 가름(디자인 점검 U9).
@@ -424,6 +428,9 @@ TIMELINE_PLAYER_CSS = """
   .tl-root.is-fit .tl-cues-body { grid-area: body; flex-direction: column; min-height: 0; }
   .tl-root.is-fit .tl-cue-list { flex: 1 1 auto; max-height: none; min-height: 0; }
   .tl-root.is-fit .tl-cue-edit { flex: none; }
+  /* 자막 칸이 재생기 밖이면(D178) 한 열 — 타임라인이 덱 폭 전체를 쓴다. */
+  .tl-root.is-fit.is-solo { grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "transport" "strip" "range" "lane"; }
 }
 /* Subtitle Edit식 표(W-87, D146) — # · 시작 · 끝 · 길이 · 텍스트 · 간격 · 문자/초.
    머리는 목록 위에 붙는다. */
