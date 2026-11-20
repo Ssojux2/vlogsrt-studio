@@ -254,7 +254,10 @@ TIMELINE_PLAYER_CSS = """
 /* 「타임라인으로 보내기」 요약(U1) — 한 줄 · 빠진 원본 목록만 줄을 더한다(안내 글은 title). */
 .vl-timeline-summary { font-size: 12px; line-height: 18px; color: var(--vl-ink-muted); }
 .vl-timeline-summary strong { color: var(--vl-ink); }
-.vl-timeline-summary ul { margin: 2px 0 0; padding-left: 18px; }
+/* 빠진 것의 짧은 표(D179) — 이름은 마우스를 올리면. 한 줄을 넘지 않는다. */
+.vl-timeline-summary { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vl-timeline-note { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 3px;
+  background: var(--vl-warn-soft); color: var(--vl-warn); cursor: help; }
 .tl-root { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; outline: none;
   font-family: var(--vl-font-sans); color: var(--vl-ink); }
 .tl-root:focus-visible { box-shadow: 0 0 0 2px var(--vl-accent); border-radius: 6px; }

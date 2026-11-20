@@ -1203,6 +1203,11 @@ PLAYER_APP_JS = r"""
     if (pick < 0 || pick >= ids.length) { pick = direction > 0 ? ids.length - 1 : 0; }
     pickCue(ids[pick]);
   }
+  // 고른 자막의 글 칸으로(D180) — 입력칸을 지금 고름으로 먼저 그린 뒤 초점을 둔다.
+  function editPickedText() {
+    paintCueEditor();
+    focusCueText();
+  }
   function focusCueText() {
     var area = $("tl-cue-text");
     if (area) { area.focus(); area.setSelectionRange(area.value.length, area.value.length); }
@@ -1273,6 +1278,9 @@ PLAYER_APP_JS = r"""
     paintCueList();
     paintCueEditor();
   }
+  function pickedKeyOf() {
+    return S.picked.join("\n") + (S.translation ? "\u0001" + englishKey() : "");
+  }
   function paintCueList() {
     var list = $("tl-cue-list");
     var count = $("tl-cue-count");
@@ -1281,7 +1289,7 @@ PLAYER_APP_JS = r"""
       count.textContent = "보이는 " + S.proj.cues.length + "개" + (S.proj.hidden.length
         ? " · 컷에 가려진 " + S.proj.hidden.length + "개(클립을 늘리면 돌아온다)" : "");
     }
-    var pickedKey = S.picked.join("\n") + (S.translation ? "\u0001" + englishKey() : "");
+    var pickedKey = pickedKeyOf();
     if (list.__tlProj === S.proj && list.__tlCue === S.cue && list.__tlPicked === pickedKey) {
       paintCueFollow();
       return;
@@ -1478,13 +1486,41 @@ PLAYER_APP_JS = r"""
     var current = cueUnderPlayhead();
     if (list.__tlCurrent !== current) {
       list.__tlCurrent = current;
+      followCurrent(list, current);
       Array.prototype.forEach.call(list.querySelectorAll(".tl-cue-row"), function (row) {
-        var on = row.getAttribute("data-cue") === current;
+        var id = row.getAttribute("data-cue");
+        var on = id === current;
         row.classList.toggle("is-current", on);
-        if (on && S.playing) { keepInList(list, row); }
+        row.classList.toggle("is-selected", isPicked(id));
+        if (on && (S.playing || id === S.cue)) { keepInList(list, row); }
       });
     }
     paintCueEditor();
+  }
+  // 고름이 플레이헤드를 따른다(D179 — Subtitle Edit): 플레이헤드 아래 자막이 바뀌면 그 줄을 고르고
+  // 입력칸도 그 줄로 바꾼다. 쓰는 중(글 칸에 초점)이거나 여러 줄을 골랐거나, 막 고른 줄 위에
+  // 플레이헤드가 아직 있으면(목록에서 누른 줄은 그 시작으로 간다) 그대로 둔다. 목록은 다시 짓지
+  // 않고 표지만 옮긴다(재생 중 스크롤이 튀지 않게).
+  function followCurrent(list, current) {
+    if (!current || current === S.cue || S.picked.length > 1 || editingText()) { return; }
+    if (!S.playing && S.cue && pickedUnderPlayhead()) { return; }
+    S.cue = current;
+    S.picked = [current];
+    S.anchor = current;
+    list.__tlCue = S.cue;
+    list.__tlPicked = pickedKeyOf();
+    requestLane();
+  }
+  function pickedUnderPlayhead() {
+    var cue = projectedCue(S.cue);
+    if (!cue) { return false; }
+    var a = S.playhead * seqTicks();
+    var b = a + seqTicks();
+    return cue[2] === cue[3] ? a <= cue[2] && cue[2] <= b : cue[2] < b && cue[3] > a;
+  }
+  function editingText() {
+    var active = document.activeElement;
+    return !!active && (active === $("tl-cue-text") || active === $("tl-cue-en-text"));
   }
   // 목록 안에서만 그 줄이 보이게 — scrollIntoView는 페이지까지 움직여 재생 중 영상을 밀어낸다.
   function keepInList(list, row) {
@@ -1501,8 +1537,7 @@ PLAYER_APP_JS = r"""
     var box = $("tl-cue-edit");
     if (!box || !S.doc) { return; }
     var area = $("tl-cue-text");
-    var typing = !!area && (document.activeElement === area ||
-      document.activeElement === $("tl-cue-en-text"));
+    var typing = !!area && editingText();
     var id = targetCue();
     var cue = id ? projectedCue(id) : null;
     var same = box.__tlId === id && (!cue || !!area);
@@ -2356,6 +2391,12 @@ PLAYER_APP_JS = r"""
     if (S.clipDrag) { clipBandUp(); return; }
     var drag = S.laneDrag;
     S.laneDrag = null;
+    // 레인의 자막 블록을 끌지 않고 누르기만 했으면 그 자막의 글 칸으로(D180).
+    if (drag && !drag.moved && drag.part === "body" && drag.id) {
+      requestLane();
+      editPickedText();
+      return;
+    }
     if (!drag || !drag.moved || drag.value === null) { requestLane(); return; }
     if (drag.part === "new") {
       say("새 선택 — Enter로 이 구간에 새 자막을 넣고 Esc로 취소합니다.", false);
@@ -3058,7 +3099,9 @@ PLAYER_APP_JS = r"""
         if (!row || ev.button === 2) { return; }
         ev.preventDefault();
         pickFromList(row.getAttribute("data-cue"), ev);
-        // 누름 기본 동작을 막았으니 키(화살표·Enter·[ ])가 재생기로 오게 초점을 직접 둔다.
+        // 그냥 누르면 그 자막의 글 칸으로 간다(D180 — 사용자 지시). ⇧ · ⌘로 여러 줄을 고를 때는
+        // 키(화살표 · ⌫ · [ ])가 재생기로 오게 초점을 재생기에 둔다.
+        if (!ev.shiftKey && !ev.metaKey && !ev.ctrlKey && !ev.altKey) { editPickedText(); return; }
         if (S.rootEl) { S.rootEl.focus({ preventScroll: true }); }
       });
     }

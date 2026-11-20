@@ -704,3 +704,19 @@ def test_the_storyline_reads_like_final_cut() -> None:
     assert 'function decks() { return [$("tl-deck-a"), $("tl-deck-b")]; }' in PLAYER_JS
     # 스키밍 중 재생은 스키머 자리에서(Final Cut).
     assert "var skimmed = skimFrame();" in PLAYER_JS
+
+
+def test_the_editor_follows_the_list_and_a_click_goes_to_the_text() -> None:
+    """D179 · D180 — 고름이 플레이헤드를 따르고(쓰는 중 · 여러 줄 · 막 고른 줄 위면 그대로), 자막을
+    그냥 누르면(목록 줄 · 레인 블록) 그 자막의 글 칸으로 초점이 간다. ⇧ · ⌘ 누름은 여러 줄 고름이라
+    재생기에 초점을 둔다."""
+    follow = PLAYER_JS[PLAYER_JS.index("function followCurrent(") :].split("\n  }\n")[0]
+    assert "S.picked.length > 1 || editingText()" in follow
+    assert "if (!S.playing && S.cue && pickedUnderPlayhead()) { return; }" in follow
+    assert "followCurrent(list, current);" in PLAYER_JS
+    plain = (
+        "if (!ev.shiftKey && !ev.metaKey && !ev.ctrlKey && !ev.altKey) "
+        "{ editPickedText(); return; }"
+    )
+    assert plain in PLAYER_JS
+    assert 'if (drag && !drag.moved && drag.part === "body" && drag.id) {' in PLAYER_JS
