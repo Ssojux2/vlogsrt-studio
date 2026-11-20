@@ -30,9 +30,6 @@ JOB_TERMINAL = frozenset({"succeeded", "failed", "cancelled"})
 STARTED_TEXT = "타임라인을 만들었습니다 — 클립 {clips}개 · 자막 {cues}줄(렌더하지 않았습니다)."
 CANCELLED_TEXT = "타임라인 만들기를 취소했습니다 — 쓴 파일은 없습니다."
 EMPTY_TEXT = ""
-NEXT_STEP_TEXT = (
-    "아래 재생기는 원본마다 미리보기를 틀고, 원본 띠에서 클립 앞뒤를 고칩니다 — 출력은 다음 단계."
-)
 
 
 def _seconds(model: dict[str, Any]) -> float:
@@ -45,31 +42,46 @@ def _names(rows: list[dict[str, Any]]) -> str:
     return ", ".join(html.escape(str(row.get("name", row.get("source_id", "")))) for row in rows)
 
 
-def _notes(model: dict[str, Any]) -> list[str]:
-    """빠진 것·바뀐 것 — 규칙 9: 조용히 사라지는 원본이 없게 이름을 댄다."""
+def _notes(model: dict[str, Any]) -> list[tuple[str, str]]:
+    """빠진 것·바뀐 것 — (짧은 표, 이름을 댄 설명). 규칙 9: 조용히 사라지는 원본이 없게 표는 늘
+    보이고 이름은 표에 마우스를 올리면 보인다(D179 — 원본 수십 개 이름이 덱 머리를 세 줄씩
+    덮었다)."""
     seed = model.get("seed", {})
-    notes: list[str] = []
+    notes: list[tuple[str, str]] = []
     changed = model.get("changedSources", [])
     if changed:
-        notes.append(
+        notes.append((
+            f"자막 바뀐 원본 {len(changed)}개",
             f"원본 자막이 그 뒤 바뀌었습니다: {_names(changed)}"
-            " — 타임라인은 심을 때의 자막 그대로입니다."
+            " — 타임라인은 심을 때의 자막 그대로입니다.",
+        ))  # fmt: skip
+    unsupported = seed.get("unsupported", [])
+    if unsupported:
+        detail = "; ".join(
+            f"{html.escape(str(row.get('name', '')))}"
+            f" — {html.escape(str(row.get('detail') or row.get('reason', '')))}"
+            for row in unsupported
         )
-    for row in seed.get("unsupported", []):
-        why = row.get("detail") or row.get("reason", "")
-        notes.append(
-            f"지원 밖 원본이라 넣지 않았습니다: {html.escape(str(row.get('name', '')))}"
-            f" — {html.escape(str(why))}"
-        )
+        notes.append((
+            f"지원 밖 원본 {len(unsupported)}개",
+            f"지원 밖 원본이라 넣지 않았습니다: {detail}",
+        ))  # fmt: skip
     unseeded = seed.get("unseeded", [])
     if unseeded:
-        notes.append(f"추천 구간이 없어 넣지 않은 원본: {_names(unseeded)}")
+        notes.append((
+            f"넣지 않은 원본 {len(unseeded)}개",
+            f"추천 구간이 없어 넣지 않은 원본: {_names(unseeded)}"
+            " — 원본 띠의 「원본 넣기」로 넣을 수 있습니다.",
+        ))  # fmt: skip
     if seed.get("empty"):
-        notes.append(f"조판 정리 뒤 빈 자막 {int(seed['empty'])}줄은 심지 않았습니다.")
+        empty = int(seed["empty"])
+        notes.append((f"빈 자막 {empty}줄", f"조판 정리 뒤 빈 자막 {empty}줄은 심지 않았습니다."))
     if seed.get("clamped"):
-        notes.append(
-            f"원본 밖으로 나간 자막 시각 {int(seed['clamped'])}줄을 원본 안으로 넣었습니다."
-        )
+        clamped = int(seed["clamped"])
+        notes.append((
+            f"시각 고친 자막 {clamped}줄",
+            f"원본 밖으로 나간 자막 시각 {clamped}줄을 원본 안으로 넣었습니다.",
+        ))  # fmt: skip
     return notes
 
 
@@ -84,11 +96,12 @@ def timeline_summary_html(model: dict[str, Any] | None) -> str:
         f" · 자막 {int(summary['visible_cues'])}/{int(summary['cues'])}줄 보임"
         f" · {_seconds(model):.1f}초"
     )
-    # 아래 덱이 한 화면에 들도록(W-102) 안내 글은 마우스를 올릴 때만 · 빠진 것이 없으면 목록도 없다.
-    notes = "".join(f"<li>{note}</li>" for note in _notes(model))
-    listing = f"<ul>{notes}</ul>" if notes else ""
-    hint = html.escape(NEXT_STEP_TEXT, quote=True)
-    return f'<div class="vl-timeline-summary" title="{hint}">{head}{listing}</div>'
+    # 한 줄(D179) — 빠진 것은 짧은 표만, 이름은 표의 title에(이미 이스케이프한 글이다).
+    chips = "".join(
+        f' <span class="vl-timeline-note" title="{detail}">⚠ {chip}</span>'
+        for chip, detail in _notes(model)
+    )
+    return f'<div class="vl-timeline-summary">{head}{chips}</div>'
 
 
 class TimelineCell:
