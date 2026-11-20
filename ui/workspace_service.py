@@ -46,7 +46,7 @@ from ui.burn_cell import BURN_JOB_LABEL, BurnCell  # noqa: E402
 from ui.timeline_cell import JOB_LABEL as TIMELINE_JOB_LABEL  # noqa: E402
 from ui.timeline_cell import TimelineCell  # noqa: E402
 from ui.timeline_player import TIMELINE_PLAYER_CSS, TimelinePlayer  # noqa: E402
-from vlogsrt import log, preprocess  # noqa: E402
+from vlogsrt import env, log, preprocess  # noqa: E402
 from vlogsrt.project.raw import service as raw_service  # noqa: E402
 
 STATE_ENV = "VLOGSRT_RAW_UI_STATE"
@@ -94,7 +94,8 @@ NOTICE_TEXT = {
     NOTICE_NOTHING: "분석할 영상이 없습니다 — 모든 영상에 다시 쓸 저장 결과가 있거나 분석 중입니다."
     " 아무것도 시작하지 않았습니다.",
     NOTICE_KEY: "**연결 설정 필요 · 아직 분석하지 않았습니다**\n\n"
-    "`.env`에 `OPENAI_API_KEY`를 넣고 앱을 다시 띄운 뒤 다시 승인하세요.",
+    "`.env`에 `OPENAI_API_KEY`를 넣고 앱을 다시 띄운 뒤 다시 승인하세요"
+    " (`.env`가 없으면 설정 서랍의 「API 키」에 넣으면 바로 연결됩니다).",
     NOTICE_INTERRUPTED: "**중단된 승인 작업이 남아 있습니다 · 아무것도 시작하지 않았습니다**\n\n"
     "이전 실행에서 끝나지 못한 같은 승인이 기록에 남아 있습니다. "
     "앱을 다시 시작하면 중단된 승인을 복구한 뒤 다시 승인할 수 있습니다.",
@@ -168,6 +169,25 @@ FINALCUT_DROP_OFF_TEXT = "꺼짐 — 다음 보내기부터 꺼진 클립까지 
 """「꺼진 클립 빼고 보내기」(D94) — 설정 서랍의 켬·끔. 작업공간 표지에 산다(기본 끔)."""
 TIMING_ENGINE_ID = "vl-timing-engine"
 ANALYSIS_MODEL_PANEL_ID = "analysis-model-panel"
+API_KEY_PANEL_ID = "api-key-panel"
+"""「API 키」 판(W-109, D183) — `.env`가 없을 때만 보이는 키 칸 셋."""
+API_KEY_PANEL_LABEL = "API 키 (.env 없음)"
+API_KEY_NAMES = env.KEY_ENTRY_NAMES
+API_KEY_INFO = (
+    "`.env` 파일이 없어 여기서 키를 넣습니다. 「키 저장」을 누르면 저장소 폴더에 `.env`를"
+    " 새로 만들고(이 컴퓨터 사용자만 읽을 수 있게) 다시 띄우지 않아도 바로 연결합니다."
+    " 넣지 않은 칸은 쓰지 않습니다. `.env`가 있으면 이 판은 나오지 않고 그 파일을 씁니다 —"
+    " 키를 바꾸려면 그 파일을 고치고 앱을 다시 띄우세요."
+)
+API_KEY_MISSING_NOTE = (
+    "`.env` 파일이 없습니다 — 설정 서랍 맨 위 「API 키」에 넣으면 다시 띄우지 않아도 바로"
+    " 연결됩니다."
+)
+API_KEY_HINTS = {
+    env.STT_ROLE_KEY_ENV: "OpenAI — Luna 분석을 쓸 때",
+    env.ANALYSIS_GEMINI_KEY_ENV: "Gemini — 전사(시간 엔진) · 기본 분석 · 영어 번역",
+    env.ANALYSIS_CLAUDE_KEY_ENV: "Claude — Claude 분석 모델을 고를 때",
+}
 """설정 서랍 「분석 모델」 — 모델·전사 엔진 칸과 키 상태 줄. 키 입력 칸은 없다(D102)."""
 GEMINI_TRANSCRIBE_PAID_KEY_NOTE = (
     "결제를 연결한 키만 쓰세요 — 무료 등급 키는 입력(오디오)을 Google 제품 개선에 씁니다."
@@ -4274,6 +4294,71 @@ class RawWorkspaceUi:
         self._startup_claude = raw_service.capture_claude_credentials()
         self._startup_gemini = raw_service.capture_gemini_credentials()
 
+    def _env_file_missing(self) -> bool:
+        """찾을 `.env`가 없는가 — 있으면 그 파일을 쓰고 화면은 키를 받지 않는다(D102 · D183)."""
+        return env.find_env_file() is None
+
+    def _new_env_path(self) -> Path:
+        return env.new_env_path()
+
+    def _api_key_panel(self) -> None:
+        """「API 키」(W-109, D183) — `.env`가 없을 때만 펼쳐 보이는 키 칸 셋과 「키 저장」.
+
+        값은 화면에 다시 싣지 않는다(비밀번호 칸 · 저장하면 비운다). 승인 문(D44 · D110)은
+        그대로다 — 키를 넣는 것은 돈이 드는 일이 아니다."""
+        missing = self._env_file_missing()
+        with gr.Accordion(
+            API_KEY_PANEL_LABEL, open=missing, visible=missing, elem_id=API_KEY_PANEL_ID
+        ) as panel:
+            gr.Markdown(API_KEY_INFO, elem_id=f"{API_KEY_PANEL_ID}-info")
+            fields = [
+                gr.Textbox(
+                    "",
+                    type="password",
+                    label=name,
+                    info=API_KEY_HINTS[name],
+                    elem_id=f"{API_KEY_PANEL_ID}-{name.lower().replace('_', '-')}",
+                )
+                for name in API_KEY_NAMES
+            ]
+            save = gr.Button("키 저장", variant="primary", elem_id=f"{API_KEY_PANEL_ID}-save")
+        self._api_key_panel_box, self._api_key_fields, self._api_key_save = panel, fields, save
+
+    def _wire_api_key_panel(self) -> None:
+        """분석 모델 상태 줄이 지어진 뒤에 잇는다 — 저장하면 그 줄도 「확인됨」으로 바뀐다."""
+        self._api_key_save.click(
+            self.api_keys_save_view,
+            self._api_key_fields,
+            [self._api_key_panel_box, *self._api_key_fields, self._analysis_model_md],
+            show_progress="hidden",
+            api_name=False,
+        )
+
+    def api_keys_save_view(self, *values: str) -> tuple[Any, ...]:
+        """넣은 키로 `.env`를 새로 만들고 바로 연결한다(W-109, D183). 값은 어디에도 다시 싣지
+        않는다. `.env`가 그사이 생겼으면 덮지 않고 거부한다. 잘못된 값은 아무것도 쓰지 않고
+        까닭을 말한다."""
+        if not self._env_file_missing():
+            raise gr.Error(
+                "`.env` 파일이 있습니다 — 그 파일을 씁니다. 키를 바꾸려면 그 파일을 고치고"
+                " 앱을 다시 띄우세요."
+            )
+        try:
+            names = env.write_new_env(
+                dict(zip(API_KEY_NAMES, values, strict=True)), self._new_env_path()
+            )
+        except FileExistsError as error:
+            raise gr.Error(
+                "`.env` 파일이 이미 있어 덮지 않았습니다 — 앱을 다시 띄우면 그 파일을 씁니다."
+            ) from error
+        except (ValueError, OSError) as error:
+            raise gr.Error(f"키를 저장하지 못했습니다 — {error}") from error
+        self._capture_startup_credentials()
+        log.info(f"화면에서 넣은 API 키로 .env를 만들었다: {', '.join(names)}")
+        gr.Info(f"키를 `.env`에 저장하고 연결했습니다 — {', '.join(names)}")
+        blank = tuple("" for _ in values)
+        return (gr.update(visible=False), *blank, self.analysis_model_status())
+
     def _analysis_model_panel(self) -> None:
         """「분석 모델」 — 영상 분석 모델(D54)과 전사 엔진(Gemini, D92·D163)의 키 상태 줄.
 
@@ -4306,6 +4391,7 @@ class RawWorkspaceUi:
             self.analysis_model_controls, None, [analysis_model, analysis_model_md]
         )
         analysis_model_panel.expand(self.timing_engine_status, None, [timing_engine_md])
+        self._wire_api_key_panel()
 
     def _review_tab(self) -> None:
         """정리 탭 — 명령 줄(단추 + 활동 칸) · 무대. 서랍에 든 도구는 `_settings_drawer`가 짓는다.
@@ -4834,6 +4920,7 @@ class RawWorkspaceUi:
         """오른쪽 서랍 — 분석 모델 · 복원 · 고급 도구. 무대 위에 겹칠 뿐 무대를 밀지 않는다."""
         with gr.Sidebar(open=False, position="right", width=560, elem_id="settings-drawer"):
             self._drawer_head("설정 · 고급 도구", "settings-drawer")
+            self._api_key_panel()
             self._analysis_model_panel()
             self._tier_criteria_panel()
             self._finalcut_panel()
@@ -8596,7 +8683,8 @@ class RawWorkspaceUi:
             raw_service.ANALYSIS_GEMINI_KEY_ENV,
             raw_service.ANALYSIS_CLAUDE_KEY_ENV,
         )
-        # 화면은 키를 받지 않는다(D102) — 셋 다 `.env`에서 서버를 띄울 때 한 번 찍는다.
+        # 키는 `.env`에서 서버를 띄울 때 한 번 찍는다(D102). `.env`가 없으면 서랍 맨 위 「API 키」가
+        # 받아 `.env`를 만들고 바로 다시 찍는다(D183).
         openai = (
             f"OpenAI 키(`{openai_env}`) 확인됨 — 값은 표시하지 않습니다."
             if self._startup_credentials is not None
@@ -8616,6 +8704,8 @@ class RawWorkspaceUi:
             " 띄우세요."
         )
         key = f"{openai}\n\n{gemini}\n\n{claude}"
+        if self._env_file_missing():
+            key += f"\n\n{API_KEY_MISSING_NOTE}"
         if root is None:
             return key
         model = self.raw.settings(root).models.luna_model
