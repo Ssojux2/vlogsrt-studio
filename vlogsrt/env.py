@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
 
 TRUTHY = frozenset({"1", "true", "yes", "on"})
@@ -168,6 +169,43 @@ ANALYSIS_KEY_ENV_NAMES = (ANALYSIS_CLAUDE_KEY_ENV, ANALYSIS_GEMINI_KEY_ENV)
 # 적재에 성공한 마지막 역할 이름 — 설정 해석이 실패해도 가림이 두 값을 알게
 # 하는 근원이다(아래 redact_secrets 참조).
 _applied_vision_key_name: str | None = None
+
+
+KEY_ENTRY_NAMES = (STT_ROLE_KEY_ENV, ANALYSIS_GEMINI_KEY_ENV, ANALYSIS_CLAUDE_KEY_ENV)
+"""`.env`가 없을 때 화면에서 받는 키 이름(W-109, D183) — 값은 이 셋뿐이다."""
+_KEY_FORBIDDEN = "\"'"
+
+
+def new_env_path() -> Path:
+    """화면에서 넣은 키를 쓸 `.env` 자리 — `find_env_file`이 마지막에 보는 저장소 루트다."""
+    return PACKAGE_ROOT / DEFAULT_ENV_PATH.name
+
+
+def write_new_env(values: Mapping[str, str], path: Path) -> tuple[str, ...]:
+    """없는 `.env`를 새로 만들고 이 프로세스에도 넣는다(W-109, D183) — 쓴 이름만 돌려준다.
+
+    있는 파일은 덮지 않는다(`FileExistsError`). 이 사용자만 읽고 쓰는 0600으로 만든다. 받는 이름은
+    `KEY_ENTRY_NAMES`뿐, 빈 값은 쓰지 않고, 공백·따옴표가 든 값은 거부한다(`ValueError` — 쓰기 전).
+    """
+    entries: list[tuple[str, str]] = []
+    for name, raw in values.items():
+        if name not in KEY_ENTRY_NAMES:
+            raise ValueError(f"넣을 수 없는 이름입니다: {name}")
+        value = (raw or "").strip()
+        if not value:
+            continue
+        if any(ch.isspace() or ch in _KEY_FORBIDDEN for ch in value):
+            raise ValueError(f"{name} 값에 공백이나 따옴표가 들어 있습니다")
+        entries.append((name, value))
+    if not entries:
+        raise ValueError("넣은 키가 없습니다")
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write("".join(f"{name}={value}\n" for name, value in entries))
+    for name, value in entries:
+        os.environ[name] = value
+    reset_cache()
+    return tuple(name for name, _value in entries)
 
 
 def validate_role_env_names(vision_key_name: str, vision_url_name: str) -> None:
