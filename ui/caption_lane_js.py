@@ -55,6 +55,41 @@ CAPTION_LANE_JS = r"""
     });
     return best ? { index: best.index, part: best.part } : null;
   };
+  // 필름 띠(W-103, D176) — 클립 [xs, xe) 안에 tileW 화소 칸을 클립 처음에 맞춰 늘어놓고 보이는
+  // [0, width)에 걸친 칸만 낸다. mid는 그 칸이 보이는 장면의 자리(칸 가운데, 클립 끝에서 잘린
+  // 마지막 칸은 남은 몫의 가운데)다. 격자가 클립 처음에 붙어 있어 스크롤해도 칸이 미끄러지지
+  // 않는다.
+  L.filmTiles = function (xs, xe, tileW, width) {
+    var tiles = [];
+    if (!(tileW > 0) || xs >= width || xe <= 0) { return tiles; }
+    var first = Math.max(0, Math.floor(-xs / tileW));
+    for (var x = xs + first * tileW; x < xe && x < width; x += tileW) {
+      if (x + tileW > 0) { tiles.push({ x: x, mid: (x + Math.min(x + tileW, xe)) / 2 }); }
+    }
+    return tiles;
+  };
+  // 칸 하나가 덮는 초 이상인 가장 작은 장면 간격(없으면 마지막) — 줌이 바뀌어도 같은 장면을
+  // 다시 쓴다.
+  L.filmBucket = function (secondsPerTile, steps) {
+    for (var i = 0; i < steps.length; i += 1) {
+      if (steps[i] >= secondsPerTile) { return steps[i]; }
+    }
+    return steps[steps.length - 1];
+  };
+  L.filmKey = function (sourceId, seconds, bucket) {
+    return sourceId + ":" + Math.round(seconds / bucket) * bucket;
+  };
+  // 전체 보기 띠 — 레인 보기(폭 laneWidth)가 덮는 자리를 navWidth 화소 띠(총 total 틱) 위에.
+  L.navWindow = function (view, laneWidth, total, navWidth) {
+    var scale = navWidth / Math.max(1, total);
+    var a = Math.max(0, Math.min(navWidth, view.start * scale));
+    var b = Math.max(0, Math.min(navWidth, (view.start + laneWidth * view.tpp) * scale));
+    return [a, b];
+  };
+  // ticks를 폭 width 보기의 가운데에 둔다(배율 그대로).
+  L.centerOn = function (view, ticks, width) {
+    return { start: ticks - (width / 2) * view.tpp, tpp: view.tpp };
+  };
   // 클립 가장자리 끌기 — 끈 틱만큼 원본 프레임을 옮긴다(가장 가까운 프레임). 갈 수 있는 자리는
   // 재생기가 문서 규칙으로 다시 막는다.
   L.trimFrame = function (edgeFrame, deltaTicks, sourceFrameTicks) {

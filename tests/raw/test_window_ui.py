@@ -16,7 +16,7 @@ pytest.importorskip(
 )
 
 from tests.raw.test_timeline_player_ui import _ancestor_elem_ids, _server  # noqa: E402
-from ui import window_js, workspace_service  # noqa: E402
+from ui import timeline_player, window_js, workspace_service  # noqa: E402
 from ui.timeline_player_js import PLAYER_APP_JS  # noqa: E402
 
 needs_node = pytest.mark.skipif(shutil.which("node") is None, reason="node가 없는 환경")
@@ -182,17 +182,27 @@ def test_the_index_stands_left_of_the_timeline_on_wide_screens() -> None:
 
 
 def test_the_captions_workspace_moves_the_caption_panes_not_copies_them() -> None:
-    """W-87c(D152) — 「자막」 작업공간은 재생기의 자막 목록 · 입력칸을 노드째 브라우저 열로 옮기고
-    「기본」이면 제자리로 돌린다(지우거나 새로 짓지 않는다). 고른 작업공간은 이 브라우저에만."""
+    """W-87c(D152) → D178 — 자막 머리 · 목록 · 입력칸은 노드째(지우거나 새로 짓지 않는다) 재생기
+    밖으로 옮긴다: 「기본」이면 인스펙터(「분석」 탭, 타임라인 뷰어일 때), 「자막」이면 브라우저 열.
+    그래서 아래 덱 타임라인은 한 열(덱 폭 전체)이다. 고른 작업공간은 이 브라우저에만."""
     js = window_js.window_bind_js()
     config = json.loads(js[js.index("var CFG = ") + 10 : js.index(";\n  if (WIN.bound")])
     assert config["workspaces"] == [["basic", "기본"], ["captions", "자막"]]
     assert config["captions"] == window_js.CAPTIONS_ID
-    assert "holder.appendChild(deckBody)" in js and "home.appendChild(moved)" in js
+    assert "holder.appendChild(deckBody)" in js and "holder.appendChild(deckHead)" in js
+    assert "key === CFG.captionsMode ? stage : ($(CFG.inspector) || stage)" in js
     assert ".remove()" not in js and "cloneNode" not in js
     assert 'holder.setAttribute("data-vl-own-keys", "")' in js
     css = window_js.window_css()
     assert '#visual-stage[data-vl-workspace="captions"] .tl-lane' in css
+    inspector = (
+        '#visual-stage[data-vl-workspace="basic"][data-vl-viewer="program"]\n'
+        '  #vl-quote[data-vl-inspector="analysis"] #vl-captions:has(.tl-cues-body)'
+    )
+    assert inspector in css
+    assert 'grid-template-areas: "transport" "strip" "range" "lane"' in (
+        timeline_player.TIMELINE_PLAYER_CSS
+    )
     assert "var(--vl-caption-lane-h)" in css
     from ui import design_tokens
 
@@ -201,10 +211,10 @@ def test_the_captions_workspace_moves_the_caption_panes_not_copies_them() -> Non
 
 def test_moved_caption_panes_still_reach_the_player_keys_once() -> None:
     """옮긴 칸의 키·누름은 뿌리까지 오지 않으니 밖에 있을 때만 같은 처리로 넘긴다."""
-    bind = PLAYER_APP_JS[PLAYER_APP_JS.index("function bindDom() {") :]
-    assert 'var body = rootEl.querySelector(".tl-cues-body");' in bind
-    assert "if (S.rootEl && !S.rootEl.contains(body)) { onKey(ev); }" in bind
-    assert "if (S.rootEl && !S.rootEl.contains(body)) { onClick(ev); }" in bind
+    bind = PLAYER_APP_JS[PLAYER_APP_JS.index("function forwardOutside(part) {") :]
+    assert '[".tl-cues-head", ".tl-cues-body"].forEach' in bind
+    assert "if (S.rootEl && !S.rootEl.contains(part)) { onKey(ev); }" in bind
+    assert "if (S.rootEl && !S.rootEl.contains(part)) { onClick(ev); }" in bind
 
 
 def test_many_picked_cues_move_and_delete_as_one_change() -> None:

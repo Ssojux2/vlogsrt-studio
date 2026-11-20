@@ -138,8 +138,16 @@ def timeline_player_html(model: dict[str, Any] | None) -> str:
             '<span id="tl-save" class="tl-save is-saved" hidden>✓ 저장됨</span>'
             '<span id="tl-source" class="tl-source"></span>'
             '<span class="tl-gap"></span>'
+            # 도구(W-103, D176 — Final Cut 「선택」 A · 「블레이드」 B): 스토리라인 누름의 뜻.
+            '<span class="tl-tools" role="group" aria-label="스토리라인 도구">'
+            '<button type="button" data-tl="tool-select" id="tl-tool-select" aria-pressed="true"'
+            ' title="선택 도구 — 클립을 고르고 끝을 끌어 길이를 고친다 (A)">↖ 선택</button>'
+            '<button type="button" data-tl="tool-blade" id="tl-tool-blade" aria-pressed="false"'
+            ' title="자르기 도구 — 스토리라인에서 누른 자리로 클립을 자른다 (B)">✂ 자르기</button>'
+            "</span>"
             '<button type="button" data-tl="blade"'
-            ' title="플레이헤드에서 클립 자르기 — Final Cut 「블레이드」 (⌘B)">자르기</button>'
+            ' title="플레이헤드에서 클립 자르기 — Final Cut 「블레이드」 (⌘B)">'
+            "플레이헤드 자르기</button>"
             '<button type="button" data-tl="delete-clip"'
             ' title="고른 클립 지우기 — 뒤가 당겨 온다 (⌫)">삭제</button>'
             '<button type="button" data-tl="join"'
@@ -151,6 +159,18 @@ def timeline_player_html(model: dict[str, Any] | None) -> str:
             '<button type="button" data-tl="force-save" id="tl-force" hidden>'
             "내 편집으로 덮기</button>"
             '<button type="button" data-tl="prepare" id="tl-prepare" hidden>미리보기 준비</button>'
+            # 보기(W-103, D176 — Final Cut 타임라인 오른쪽 위): 스키밍 · 스내핑 · 확대 막대.
+            '<span class="tl-view" role="group" aria-label="타임라인 보기">'
+            '<button type="button" data-tl="skimming" id="tl-skim" aria-pressed="true"'
+            ' title="스키밍 — 타임라인에 올린 자리를 뷰어에 보인다 (S)">스키밍</button>'
+            '<button type="button" data-tl="snapping" id="tl-snap" aria-pressed="true"'
+            ' title="스내핑 — 끄는 끝이 컷 · 플레이헤드에 붙는다 (N)">스내핑</button>'
+            # 가운데 고정 재생(D178) — 플레이헤드는 가운데, 타임라인이 흐른다.
+            '<button type="button" data-tl="center-play" id="tl-center" aria-pressed="false"'
+            ' title="가운데 고정 재생 — 재생하면 플레이헤드가 가운데에 서고 타임라인이 흐른다">'
+            "가운데 고정</button>"
+            '<input type="range" id="tl-zoom" min="0" max="1000" step="1"'
+            ' aria-label="타임라인 확대" title="타임라인 확대 (⌘= · ⌘− · ⇧Z 맞춤)"></span>'
             # 편집 단추 묶음과 출력 묶음 사이 가름(디자인 점검 U9).
             '<span class="tl-divider" aria-hidden="true"></span>'
             # 「공유」(W-88, D147) — Final Cut 공유 패널의 「번인 캡션:」(없음 · 언어)을 옮겼다.
@@ -173,7 +193,9 @@ def timeline_player_html(model: dict[str, Any] | None) -> str:
             " 오류 보기</label></div>"
             '<div id="tl-index-list" class="tl-index-list" role="listbox"'
             ' aria-label="타임라인 인덱스 — 누르면 그 자리로 간다"></div></div>'
-            '<div class="tl-strip"><canvas id="tl-canvas"></canvas></div>'
+            # 전체 보기 띠(W-103, D176) — 타임라인 전체 · 아래 스토리라인이 보이는 자리(창).
+            '<div class="tl-strip"><canvas id="tl-canvas" aria-label="타임라인 전체 보기 —'
+            ' 누르거나 끌면 그 자리로 가고 아래 스토리라인이 따라간다"></canvas></div>'
             '<div class="tl-range"><div class="tl-range-head"><span id="tl-source-head"></span>'
             '<span class="tl-gap"></span>'
             '<select id="tl-add-pick" class="tl-add-pick" aria-label="클립이 없는 원본" hidden>'
@@ -209,8 +231,9 @@ def _cue_panel_html() -> str:
         ' title="번역 모드 전환 — 렌더한 초안의 저장된 영어를 한국어 글로 찾아 보인다'
         '(사지 않는다)">번역 모드</button></div>'
         '<canvas id="tl-lane" class="tl-lane" tabindex="-1"'
-        ' aria-label="파형 자막 레인 — 위 클립 띠의 끝을 끌어 클립 길이를 고치고,'
-        ' 자막 블록을 끌어 시각을 고치고, 빈 곳을 끌어 새 선택(Enter로 넣기)">'
+        ' aria-label="스토리라인 · 파형 자막 레인 — 위쪽 클립 카드(이름 · 장면)를 눌러 고르고 끝을'
+        " 끌어 길이를 고치고(자르기 도구면 누른 자리에서 자르고), 자막 블록을 끌어 시각을 고치고,"
+        ' 빈 곳을 끌어 새 선택(Enter로 넣기)">'
         "</canvas>"
         '<div class="tl-cues-body"><div id="tl-cue-list" class="tl-cue-list" role="listbox"'
         ' aria-label="보이는 자막 — 누르면 고르고 그 시작으로 간다"></div>'
@@ -265,6 +288,18 @@ TIMELINE_PLAYER_CSS = """
   cursor: pointer; border: 1px solid var(--vl-line-strong); background: var(--vl-surface-raised);
   color: var(--vl-ink); height: 24px; box-sizing: border-box; }
 .tl-transport button[hidden] { display: none; }
+/* 도구 묶음(W-103, D176) — 붙은 두 단추, 켠 도구는 accent 채움(Final Cut 도구 메뉴). */
+.tl-tools, .tl-view { display: inline-flex; align-items: center; }
+.tl-view { gap: 4px; }
+.tl-view button[aria-pressed="true"] { border-color: var(--vl-accent-ink);
+  color: var(--vl-accent-ink); background: var(--vl-accent-soft); }
+.tl-view input[type="range"] { width: 96px; accent-color: var(--vl-accent); }
+.tl-tools button { border-radius: 0; }
+.tl-tools button:first-child { border-radius: 4px 0 0 4px; }
+.tl-tools button:last-child { border-radius: 0 4px 4px 0; border-left: 0; }
+.tl-tools button[aria-pressed="true"] { background: var(--vl-accent-soft);
+  border-color: var(--vl-accent-ink); color: var(--vl-accent-ink); font-weight: 600; }
+.tl-tools button:last-child[aria-pressed="true"] { border-left: 1px solid var(--vl-accent-ink); }
 .tl-timecode { font-family: var(--vl-font-mono); font-size: 14px; }
 /* 저장 표지(디자인 점검 U8) — 폭 고정이라 글이 바뀌어도 옆 칸이 움직이지 않는다. */
 .tl-save { display: inline-block; width: 7.5em; white-space: nowrap; font-size: 12px; }
@@ -282,7 +317,8 @@ TIMELINE_PLAYER_CSS = """
 .tl-status { color: var(--vl-ink-muted); flex: 1 0 100%; min-height: 1.4em; white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis; }
 .tl-status.is-error { color: var(--vl-danger); }
-.tl-strip { position: relative; height: 56px; border: 1px solid var(--vl-line);
+/* 전체 보기 띠(W-103, D176) — 읽는 곳은 아래 스토리라인이라 얇다(예전 56px 클립 띠). */
+.tl-strip { position: relative; height: 22px; border: 1px solid var(--vl-line);
   border-radius: 6px; background: var(--vl-surface-sunken); overflow: hidden; }
 .tl-range { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
 .tl-range-head { display: flex; gap: 6px; align-items: center; color: var(--vl-ink-muted); }
@@ -365,7 +401,8 @@ TIMELINE_PLAYER_CSS = """
   .tl-root > #tl-index { grid-area: index; contain: size; min-height: 0; }
   .tl-root > #tl-index .tl-index-list { flex: 1 1 auto; min-height: 0; max-height: none; }
 }
-.tl-lane { display: block; width: 100%; height: 124px; border-radius: 6px;
+/* 스토리라인(이름 줄 26 + 필름 띠 40) · 눈금 · 파형 · 자막 — 필름 띠만큼 예전 124px에서 늘었다. */
+.tl-lane { display: block; width: 100%; height: 164px; border-radius: 6px;
   touch-action: none; }
 .tl-cues-body { display: flex; gap: 8px; align-items: stretch; }
 .tl-cue-list { position: relative; flex: 1 1 60%; min-width: 0; max-height: 260px;
@@ -391,6 +428,9 @@ TIMELINE_PLAYER_CSS = """
   .tl-root.is-fit .tl-cues-body { grid-area: body; flex-direction: column; min-height: 0; }
   .tl-root.is-fit .tl-cue-list { flex: 1 1 auto; max-height: none; min-height: 0; }
   .tl-root.is-fit .tl-cue-edit { flex: none; }
+  /* 자막 칸이 재생기 밖이면(D178) 한 열 — 타임라인이 덱 폭 전체를 쓴다. */
+  .tl-root.is-fit.is-solo { grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "transport" "strip" "range" "lane"; }
 }
 /* Subtitle Edit식 표(W-87, D146) — # · 시작 · 끝 · 길이 · 텍스트 · 간격 · 문자/초.
    머리는 목록 위에 붙는다. */

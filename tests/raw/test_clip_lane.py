@@ -56,3 +56,49 @@ def test_clip_band_hit_and_trim(tmp_path: Path) -> None:
         None,
     ]
     assert got["trim"] == [32, 30, 29]
+
+
+_FILM = r"""
+const L = require(process.argv[2]);
+const out = {};
+// 클립 x 100–400, 칸 폭 64, 보이는 폭 300 — 클립 처음에 맞춰 놓고 보이는 칸만, 가운데는 클립 안.
+out.tiles = L.filmTiles(100, 400, 64, 300);
+// 클립이 왼쪽 밖에서 시작하면 클립 처음 기준 격자를 지킨다(스크롤해도 칸이 미끄러지지 않는다).
+out.left = L.filmTiles(-150, 60, 64, 300);
+out.none = [L.filmTiles(310, 400, 64, 300), L.filmTiles(10, 12, 0, 300)];
+// 칸 하나가 덮는 초 → 장면 간격(가장 작은 걸음 이상, 넘으면 마지막 걸음).
+const steps = [0.5, 1, 2, 4, 8];
+out.bucket = [L.filmBucket(0.1, steps), L.filmBucket(1, steps), L.filmBucket(1.2, steps),
+  L.filmBucket(30, steps)];
+out.key = [L.filmKey("A", 3.74, 0.5), L.filmKey("A", 3.76, 0.5), L.filmKey("B", 9.9, 4)];
+// 전체 보기 띠 — 레인 보기(start 300틱 · 1px = 10틱 · 폭 200px)가 덮는 자리, 총 6000틱을 600px에.
+out.window = [L.navWindow({ start: 300, tpp: 10 }, 200, 6000, 600),
+  L.navWindow({ start: -500, tpp: 10 }, 200, 6000, 600),
+  L.navWindow({ start: 0, tpp: 100 }, 200, 6000, 600)];
+out.center = L.centerOn({ start: 0, tpp: 10 }, 3000, 200);
+console.log(JSON.stringify(out));
+"""
+
+
+@needs_node
+def test_storyline_film_tiles_and_navigator(tmp_path: Path) -> None:
+    core = tmp_path / "lane.js"
+    core.write_text(caption_lane_js.CAPTION_LANE_JS, encoding="utf-8")
+    runner = tmp_path / "film.js"
+    runner.write_text(_FILM, encoding="utf-8")
+    done = subprocess.run(
+        ["node", str(runner), str(core)], capture_output=True, text=True, check=True, timeout=30
+    )
+    got = json.loads(done.stdout)
+    assert got["tiles"] == [
+        {"x": 100, "mid": 132},
+        {"x": 164, "mid": 196},
+        {"x": 228, "mid": 260},
+        {"x": 292, "mid": 324},
+    ]
+    assert got["left"] == [{"x": -22, "mid": 10}, {"x": 42, "mid": 51}]
+    assert got["none"] == [[], []]
+    assert got["bucket"] == [0.5, 1, 2, 8]
+    assert got["key"] == ["A:3.5", "A:4", "B:8"]
+    assert got["window"] == [[30, 230], [0, 150], [0, 600]]
+    assert got["center"] == {"start": 2000, "tpp": 10}

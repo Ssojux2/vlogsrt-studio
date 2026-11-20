@@ -170,10 +170,16 @@ def test_windows_go_out_together_up_to_the_limit(tmp_path: Path) -> None:
     runner = threading.Thread(target=lambda: done.append(_run(windows, holding, 3)))
     runner.start()
     holding.wait_inside(3)
-    assert holding.entered == ["window_000000", "window_000001", "window_000002"]
+    with holding.lock:
+        first_out = sorted(holding.entered)
+    # 문을 먼저 연다 — 단언이 실패해도 붙잡힌 일꾼이 프로세스 전체 자리를 쥔 채 남아 다음
+    # 시험이 기다리다 멈추지 않게(CI에서 실패 하나가 셋이 됐다).
     for gate in holding.gates.values():
         gate.set()
     runner.join(WAIT)
+    # 함께 나간 셋은 앞 창 셋이다 — 그 셋이 들어온 차례는 일꾼 스레드의 차례라 정해져 있지 않다
+    # (리눅스 CI에서 1 · 0 · 2, 0 · 2 · 1로 들어왔다). 결과 차례는 아래에서 창 차례로 본다.
+    assert first_out == ["window_000000", "window_000001", "window_000002"]
     assert holding.most_inside == 3
     assert [a.window_id for a in done[0]] == [w.window.window_id for w in windows]
 

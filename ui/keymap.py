@@ -86,9 +86,14 @@ PLAYER_KEYMAP: tuple[PlayerKey, ...] = (
     _k("Minus", "zoom-out", "축소", "−"),
     _k("KeyZ", "zoom-fit", "창에 맞추기", "⇧Z", shift=True),
     _k("KeyN", "snapping", "스내핑 켜기 · 끄기", "N"),
+    # 스키밍(W-103, D176 — Final Cut S): 타임라인 창만(자막 창의 S는 Subtitle Edit 줄 나누기).
+    _k("KeyS", "skimming", "스키밍 켜기 · 끄기(올린 자리를 뷰어에)", "S", TIMELINE),
     _k("KeyE", "share", "공유(영상에 넣을 자막 칸으로)", "⌘E", mod=True),
     # 타임라인 창(클립 — Final Cut)
     _k("KeyB", "blade", "자르기(플레이헤드에서 클립 나누기)", "⌘B", TIMELINE, mod=True),
+    # 도구(W-103, D176 — Final Cut A · B): 타임라인 창에서만(자막 창의 A는 Subtitle Edit 시작점).
+    _k("KeyA", "tool-select", "선택 도구(클립 고르기 · 끝 끌기)", "A", TIMELINE),
+    _k("KeyB", "tool-blade", "자르기 도구(누른 자리에서 자르기)", "B", TIMELINE),
     _k("Backspace", "delete-clip", "삭제(범위 또는 고른 클립 — 뒤가 당겨 온다)", "⌫", TIMELINE),
     _k("Delete", "delete-clip", "삭제(범위 또는 고른 클립 — 뒤가 당겨 온다)", "⌦", TIMELINE),
     _k("KeyI", "mark-in", "범위 시작 설정(플레이헤드)", "I", TIMELINE),

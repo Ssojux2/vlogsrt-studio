@@ -35,13 +35,16 @@ console.log(JSON.stringify([
   K.match(T, ev("Comma", { shiftKey: true }), "timeline", false),
   K.match(T, ev("", { key: " " }), "timeline", false),
   K.match(T, ev("KeyQ"), "captions", false),
+  K.match(T, ev("KeyB"), "timeline", false),
+  K.match(T, ev("KeyB"), "captions", false),
 ]));
 """
 
 
 @needs_node
 def test_the_pane_and_exact_modifiers_pick_one_action(tmp_path: Path) -> None:
-    """⌫는 창마다 뜻이 다르다(자막 창 — 줄, 타임라인 창 — 클립) · A는 자막 창만 · [ 는 어디서나 ·
+    """⌫는 창마다 뜻이 다르다(자막 창 — 줄, 타임라인 창 — 클립) · A는 자막 창이면 시작점, 타임라인
+    창이면 선택 도구 · B는 타임라인 창의 자르기 도구(W-103, D176) · [ 는 어디서나 ·
     수식키는 정확히(⌥[ 는 다듬기, ⇧B는 나누기) · Mod는 ⌘이든 Ctrl이든 · 글 칸 안은 `inText` 줄만."""
     core = tmp_path / "keys.js"
     core.write_text(keymap.keymap_js(), encoding="utf-8")
@@ -54,7 +57,7 @@ def test_the_pane_and_exact_modifiers_pick_one_action(tmp_path: Path) -> None:
         "delete-cue",
         "delete-clip",
         "cue-start",
-        None,
+        "tool-select",
         "cue-start",
         "trim-start",
         "blade",
@@ -66,6 +69,8 @@ def test_the_pane_and_exact_modifiers_pick_one_action(tmp_path: Path) -> None:
         "leave-text",
         "cue-big-back",
         "toggle",
+        None,
+        "tool-blade",
         None,
     ]
 
