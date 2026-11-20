@@ -512,7 +512,7 @@ def test_the_timeline_index_lists_clips_and_cues_and_filters_errors() -> None:
     """W-86c(D150) — Final Cut 「인덱스」: 클립 · 자막(「오류 보기」) 목록, 누르면 그 자리로."""
     page = timeline_player_html(client_model("sig", "tok", _opened(), _media(), TIERS))
     for needle in ('id="tl-index-toggle"', 'id="tl-index"', 'id="tl-index-errors"',
-                   'data-tl="index-clips"', 'data-tl="index-cues"', ">자르기</button>",
+                   'data-tl="index-clips"', 'data-tl="index-cues"', ">플레이헤드 자르기</button>",
                    ">실행 취소</button>", ">다시 실행</button>", ">목록</button>"):  # fmt: skip
         assert needle in page, needle
     for action in ("index", "index-clips", "index-cues"):
@@ -598,7 +598,8 @@ def test_one_screen_is_the_default_and_the_keys_live_in_the_top_bar_sheet() -> N
     assert "return stored === null || stored === CFG.fitOn;" in window_js.window_bind_js()
     assert "function fitDeck()" in PLAYER_JS and "S.settings.fitLaneMinPx" in PLAYER_JS
     fallback = (
-        'lane.clientHeight < S.settings.fitLaneMinPx) {\n      root.classList.remove("is-fit");'
+        "lane.clientHeight < S.settings.fitLaneMinPx + S.settings.laneFilmPx) {\n"
+        '      root.classList.remove("is-fit");'
     )
     assert fallback in PLAYER_JS
     # 끄는 동안 미리 그린 문서는 저장하지 않는다(D169) · 공유 뒤 영어는 모드와 상관없이 찾는다.
@@ -643,17 +644,17 @@ def test_the_deck_reads_at_a_glance_after_the_design_audit() -> None:
     fit = PLAYER_JS[PLAYER_JS.index("function fitDeck()") :].split("S.fitDeck = fitDeck;")[0]
     assert "var kept = deck ? deck.scrollTop : 0;" in fit and fit.count("scrollTop = kept") == 2
     assert '"transport head" "strip body" "range body" "lane body"' in css
-    for painter in ("function paintStrip()", "function paintSource()", "function paintLane()"):
+    for painter in ("function paintNav()", "function paintSource()", "function paintLane()"):
         body = PLAYER_JS[PLAYER_JS.index(painter) :].split("\n  }\n")[0]
         assert "paintHead(" in body and '"--vl-danger"' not in body, painter
     head = PLAYER_JS[PLAYER_JS.index("function paintHead(") :].split("\n  }\n")[0]
     assert '"--vl-playhead-casing"' in head and '"--vl-playhead"' in head
     cues = PLAYER_JS[PLAYER_JS.index("function paintLaneCues(") :].split("\n  }\n")[0]
     assert '"--vl-tier-yellow-ink"' in cues and '"--vl-danger"' not in cues
-    assert "paintRuler(g, w, 0, 0," in PLAYER_JS and "paintRuler(ctx, width, band," in PLAYER_JS
+    # 레인 눈금은 맨 위(W-103, D176 — Final Cut), 전체 보기 띠에는 눈금이 없다.
+    assert "paintRuler(ctx, width, 0, view.start" in PLAYER_JS
     assert "paintSourceEnds(g, w, h, source.frames * seconds);" in PLAYER_JS
     assert '"--vl-clip-fill"' in PLAYER_JS and '"--vl-clip-fill-alt"' in PLAYER_JS
-    assert 'chosen && ready ? "--vl-on-accent" : "--vl-ink"' in PLAYER_JS
     assert 'content: "키 입력"' in css and "0 0 0 2px var(--vl-accent-ink)" in css
     assert ".tl-cue-row.is-current { background: var(--vl-surface-hover); }" in css
     assert 'id="tl-save"' in page and "S.saving = true;\n    paintSaveChip();" in PLAYER_JS
@@ -662,3 +663,44 @@ def test_the_deck_reads_at_a_glance_after_the_design_audit() -> None:
         assert needle in page, needle
     for old in (">블레이드<", ">실행 복귀<", ">인덱스<", "번인 캡션 <select"):
         assert old not in page, old
+
+
+def test_the_storyline_reads_like_final_cut() -> None:
+    """W-103(D176) — 사용자 화면에서 클립 112개가 화면 폭 클립 띠에 20화소도 안 돼 읽히지 않았다.
+
+    위 띠는 전체 보기(창 · 플레이헤드, 글 없음)이고, 읽고 고치는 곳은 레인 위쪽 스토리라인이다 —
+    맨 위 시간 눈금(끌면 플레이헤드) · 이름 줄 + 미리보기 장면 필름 띠 · 노란 고름 테두리 ·
+    노란 트림 손잡이와 끄는 동안의 프레임 표 · 자르기 도구(B)의 자를 선 · 스키머(S) · 스내핑(N) ·
+    확대 막대.
+    그리기와 화면 상태뿐이다 — 연산은 예전 그대로(`clipOp("blade")` · `TL.clampEdge`)."""
+    css = timeline_player.TIMELINE_PLAYER_CSS
+    page = timeline_player_html(client_model("sig", "tok", _opened(), _media(), TIERS))
+    for needle in ('id="tl-tool-select" aria-pressed="true"', 'id="tl-tool-blade"',
+                   'id="tl-skim"', 'id="tl-snap"', 'id="tl-zoom"', ">↖ 선택</button>",
+                   ">✂ 자르기</button>", ">플레이헤드 자르기</button>"):  # fmt: skip
+        assert needle in page, needle
+    assert ".tl-strip { position: relative; height: 22px;" in css
+    assert ".tl-lane { display: block; width: 100%; height: 164px;" in css
+    nav = PLAYER_JS[PLAYER_JS.index("function paintNav()") :].split("\n  }\n")[0]
+    assert "LN.navWindow(laneView()" in nav and "fillText" not in nav
+    band = "return S.settings.laneClipPx + S.settings.laneFilmPx + S.settings.laneWavePx;"
+    assert band in PLAYER_JS
+    # D177 — 파형은 클립 카드 안(필름 아래 줄), 자막은 스토리라인 위 칸, 스토리라인은 레인 맨 아래.
+    assert "paintStoryAudio(ctx, view, xs, xe, width, fills[tone]);" in PLAYER_JS
+    assert "bandTop = Math.max(RULER_PX, height - band);" in PLAYER_JS
+    assert 'return y >= laneLayout(c.clientHeight).bandTop ? "band" : "lane";' in PLAYER_JS
+    # 끝에 올리면 원본의 어디서 잘렸는지, 더 늘릴 원본이 없으면 빨강(Final Cut 미디어 끝).
+    assert "TL.clampEdge(doc, i, side, outward, S.settings) !== edge" in PLAYER_JS
+    assert '"더 늘릴 원본 없음"' in PLAYER_JS
+    frame = PLAYER_JS[PLAYER_JS.index("function paintStoryFrame(") :].split("\n  }\n")[0]
+    assert '"--vl-tier-yellow-ink"' in frame
+    blade = 'if (S.tool === "blade") { seek(frameAtTicks(ticks)); clipOp("blade"); return; }'
+    assert blade in PLAYER_JS
+    assert 'if (zone === "ruler") { rulerDown(ev, ticks); return; }' in PLAYER_JS
+    assert "paintSkimmer(ctx, height);" in PLAYER_JS and '"--vl-skimmer"' in PLAYER_JS
+    # 필름 띠는 덱 둘과 따로인 영상 하나 — 문서에 붙이지 않는다(덱 · timeupdate가 모른다).
+    grab = PLAYER_JS[PLAYER_JS.index("function filmVideo()") :].split("\n  }\n")[0]
+    assert 'document.createElement("video")' in grab and "appendChild" not in grab
+    assert 'function decks() { return [$("tl-deck-a"), $("tl-deck-b")]; }' in PLAYER_JS
+    # 스키밍 중 재생은 스키머 자리에서(Final Cut).
+    assert "var skimmed = skimFrame();" in PLAYER_JS

@@ -85,6 +85,8 @@ COLOR_TOKENS: dict[str, tuple[str, str]] = {
     "draft": ("#b4600f", "#e7913a"),
     "playhead": ("#121417", "#f4f6f8"),
     "playhead-casing": ("#ffffff", "#0a0b0d"),
+    # 스키머(W-103, D176 — Final Cut): 마우스를 올린 자리의 선. 플레이헤드처럼 casing을 두른다.
+    "skimmer": ("#d0273f", "#ff5c73"),
     # 재생기 클립 띠의 클립 — 원본이 바뀔 때마다 두 채움을 번갈아(원본 경계가 보이게) 쓴다. 예전
     # accent-soft · surface-raised는 서로 1.07:1 · 바닥 위 약 1.3:1이라 클립이 갈리지 않았다
     # (디자인 점검 2026-11-19). 어두운 값은 점검이 제안한 #34507a · #3d4a7a 그대로다.

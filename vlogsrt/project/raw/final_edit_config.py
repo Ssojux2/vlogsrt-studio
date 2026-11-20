@@ -32,7 +32,13 @@ class FinalEditSettings:
       한 걸음 줌하는 휠 델타(마우스 한 칸 = 100 px) — 트랙패드 핀치의 작은 델타는 작게 줌한다.
       `snap_px`: 스냅이 붙는 거리(파형 자막 레인의 가장자리 잡는 거리도 같다, W-87b).
     - `lane_px_per_s`: 파형 자막 레인(W-87b)이 처음 보이는 1초의 화소 폭 — 줌 범위 안.
-    - `lane_clip_px`: 파형 레인 위쪽 클립 띠(W-100, D169)의 높이 — 끝을 끌어 클립 길이를 고친다.
+    - `lane_clip_px`: 파형 레인 위쪽 클립 띠(W-100, D169)의 이름 줄 높이 — 끝을 끌어 클립 길이를
+      고친다.
+    - `lane_film_px`: 그 이름 줄 아래 필름 띠(W-103, D176 — Final Cut 스토리라인의 그림 칸) 높이.
+      미리보기에서 브라우저가 뽑은 장면을 칸마다 보인다. 클립 띠 전체 = 이름 줄 + 필름 띠.
+    - `lane_wave_px`: 그 필름 띠 아래 클립에 붙은 소리 파형 줄 높이(D177 — Final Cut처럼 파형은 클립
+      안에, 자막은 스토리라인 위 칸에서 고친다).
+    - `film_cache_tiles`: 브라우저가 기억하는 필름 장면 수의 상한(넘으면 오래된 것부터 버린다).
     - `fit_lane_min_px`: 한 화면 맞춤(W-102, D175)의 두 열 격자에서 파형 레인이 받아야 하는 최소
       높이 — 못 받으면(위 덱이 원본 타임라인을 펼친 때) 예전처럼 쌓고 덱이 스크롤한다.
     - `big_step_frames`: Shift+화살표·Shift+밀기의 프레임 수.
@@ -62,6 +68,9 @@ class FinalEditSettings:
     snap_px: int = 8
     lane_px_per_s: int = 100
     lane_clip_px: int = 26
+    lane_film_px: int = 40
+    lane_wave_px: int = 24
+    film_cache_tiles: int = 400
     fit_lane_min_px: int = 96
     big_step_frames: int = 10
     shuttle_rates: tuple[int, ...] = (1, 2, 4, 8)
@@ -74,7 +83,8 @@ class FinalEditSettings:
             self.min_clip_frames, self.max_text_chars, self.max_cues, self.autosave_ms,
             self.new_cue_ms, self.reverse_tick_ms, self.waveform_rate, self.waveform_bin_ms,
             self.zoom_min_px_per_s, self.big_step_frames, self.caption_step_ms, self.lane_clip_px,
-            self.fit_lane_min_px,
+            self.fit_lane_min_px, self.lane_film_px, self.film_cache_tiles,
+            self.lane_wave_px,
             self.caption_small_step_ms,
         )  # fmt: skip
         if min(positive) <= 0 or self.min_gap_ms < 0 or self.coalesce_ms < 0 or self.snap_px < 0:
@@ -114,6 +124,9 @@ def client_settings(settings: FinalEditSettings = FINAL_EDIT_SETTINGS) -> dict[s
         "snapPx": settings.snap_px,
         "lanePxPerS": settings.lane_px_per_s,
         "laneClipPx": settings.lane_clip_px,
+        "laneFilmPx": settings.lane_film_px,
+        "laneWavePx": settings.lane_wave_px,
+        "filmCacheTiles": settings.film_cache_tiles,
         "fitLaneMinPx": settings.fit_lane_min_px,
         "bigStepFrames": settings.big_step_frames,
         "shuttleRates": list(settings.shuttle_rates),
