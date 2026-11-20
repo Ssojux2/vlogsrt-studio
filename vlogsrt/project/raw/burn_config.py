@@ -30,6 +30,8 @@ class BurnSettings:
       Pretendard-SemiBold`로 그 파일을 골랐다.
     - `default_*`: 작업공간에 저장한 모양이 없을 때의 위치·크기·외곽선·여백·글자색.
     - `*_range`: 화면 손잡이와 저장값 검사의 (최소, 최대) — 범위 밖은 거부한다.
+    - `position_scale`: 화면에서 끌어 옮긴 자리(W-107, D181)의 단위 — 자막 덩어리 가운데를 영상
+      너비·높이의 `1/position_scale` 몫으로 적는다(1000이면 천분율). 값이 아니라 단위다.
     - `english_scale`: 영어 줄 글자·외곽선 크기 = 한글 × 이 값. `side_margin_ratio`: 좌우 여백 =
       영상 너비 × 이 값(긴 줄은 그 안에서 libass가 고르게 접는다, WrapStyle 0).
     - `outline_color`: 외곽선 색은 고정이다(검정) — 사람이 고르는 것은 글자색뿐이다.
@@ -56,6 +58,7 @@ class BurnSettings:
     font_px_range: tuple[int, int] = (20, 160)
     outline_px_range: tuple[int, int] = (0, 16)
     margin_px_range: tuple[int, int] = (0, 480)
+    position_scale: int = 1000
     english_scale: Fraction = Fraction(4, 5)
     side_margin_ratio: Fraction = Fraction(1, 20)
     preview_long_edge: int = 960
@@ -88,6 +91,8 @@ def _range_problems(s: BurnSettings) -> list[str]:
         problems.append("글자 크기는 1px 이상이어야 한다")
     if s.reference_height < 1 or s.preview_long_edge < 2:
         problems.append("기준 높이·미리보기 긴 변은 양수여야 한다")
+    if s.position_scale < 1:
+        problems.append("position_scale은 양수여야 한다")
     if s.inline_graph_chars < 1:
         problems.append("inline_graph_chars는 양수여야 한다")
     if not 2 <= s.preview_jpeg_quality <= 31:

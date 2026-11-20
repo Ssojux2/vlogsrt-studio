@@ -22,6 +22,7 @@ from typing import Any
 import gradio as gr
 
 from ui import keymap, platform_keys
+from ui.burn_cell import normalize_color
 from ui.caption_grid_js import CAPTION_GRID_JS
 from ui.caption_lane_js import CAPTION_LANE_JS
 from ui.timeline_edit_js import TIMELINE_CORE_JS
@@ -31,6 +32,8 @@ PLAYER_BLOCK_ID = "vl-timeline-player"
 PLAYER_ROOT_ID = "tl-root"
 TAB_LABEL = "원본 범위 타임라인"
 BURN_NONE = "none"
+BURN_ENGLISH = "ko-en"
+"""「한국어 + 영어」 — 번역이 없으면 최종출력이 Gemini로 옮긴다(W-108, D182)."""
 """「번인 캡션: 없음」 — 예전 렌더 그대로(`timeline_share.BURN_NONE`과 같다, 시험이 대조한다)."""
 JOB_ENDED = frozenset({"succeeded", "failed", "cancelled"})
 """끝난 작업 상태 — 렌더 작업을 묻는 `tl_job`이 끝을 알린다."""
@@ -44,16 +47,42 @@ def _rational(row: dict[str, Any]) -> tuple[int, int]:
     return int(row["num"]), int(row["den"])
 
 
+STYLE_KEYS = (
+    "position", "font_px", "outline_px", "margin_px", "text_color", "x_permille", "y_permille",
+)  # fmt: skip
+"""자막 모양의 칸 — 뒤 둘은 화면에서 끌어 옮긴 자리(W-107, D181, 없으면 None)."""
+
+
+def style_payload(style: Any) -> dict[str, Any]:
+    """모양 → 브라우저가 받는 사전.
+    (화면 계층은 프로젝트 계층을 import하지 않는다 — 칸만 읽는다.)"""
+    return {key: getattr(style, key) for key in STYLE_KEYS}
+
+
 def burn_model(style: Any, settings: Any) -> dict[str, Any]:
     """자막 겹(W-98, D173)이 번인 모양을 근사하는 재료 — 저장한 모양과 번인 설정의 비율들.
-    (화면 계층은 프로젝트 계층을 import하지 않는다 — 받은 값의 칸만 읽는다.)"""
-    keys = ("position", "font_px", "outline_px", "margin_px", "text_color")
+    화면에서 고치는 손(W-107, D181)이 쓰는 범위·기본값·자리 단위도 싣는다."""
     return {
-        "style": {key: getattr(style, key) for key in keys},
+        "style": style_payload(style),
         "referenceHeight": settings.reference_height,
         "englishScale": float(settings.english_scale),
         "sideMargin": float(settings.side_margin_ratio),
         "outlineColor": settings.outline_color,
+        "positionScale": settings.position_scale,
+        "ranges": {
+            "font_px": list(settings.font_px_range),
+            "outline_px": list(settings.outline_px_range),
+            "margin_px": list(settings.margin_px_range),
+        },
+        "defaults": {
+            "position": settings.default_position,
+            "font_px": settings.default_font_px,
+            "outline_px": settings.default_outline_px,
+            "margin_px": settings.default_margin_px,
+            "text_color": settings.default_text_color.upper(),
+            "x_permille": None,
+            "y_permille": None,
+        },
     }
 
 
@@ -126,7 +155,9 @@ def timeline_player_html(model: dict[str, Any] | None) -> str:
         '<video id="tl-deck-a" class="tl-deck" preload="auto" playsinline></video>'
         '<video id="tl-deck-b" class="tl-deck is-standby" preload="auto" playsinline></video>'
         '<div id="tl-missing" class="tl-missing" hidden></div>'
-        '<div id="tl-overlay" class="tl-overlay"></div></div></div>'
+        '<div id="tl-overlay" class="tl-overlay"></div>'
+        + platform_keys.display(_style_tools_html())
+        + "</div></div>"
         + platform_keys.display(
             '<div class="tl-transport">'
             '<button type="button" data-tl="prev-cut" title="이전 컷 (↑)">⏮</button>'
@@ -173,15 +204,18 @@ def timeline_player_html(model: dict[str, Any] | None) -> str:
             ' aria-label="타임라인 확대" title="타임라인 확대 (⌘= · ⌘− · ⇧Z 맞춤)"></span>'
             # 편집 단추 묶음과 출력 묶음 사이 가름(디자인 점검 U9).
             '<span class="tl-divider" aria-hidden="true"></span>'
-            # 「공유」(W-88, D147) — Final Cut 공유 패널의 「번인 캡션:」(없음 · 언어)을 옮겼다.
-            '<label class="tl-burn" title="공유할 때 영상에 입힐 자막(Final Cut 「번인 캡션」)">'
+            # 「최종출력」(W-88 · D147 · 이름 D181) — Final Cut 공유 패널 「번인 캡션:」을 옮겼다.
+            '<label class="tl-burn"'
+            ' title="최종출력할 때 영상에 입힐 자막(Final Cut 「번인 캡션」)">'
             '영상에 넣을 자막 <select id="tl-burn" aria-label="영상에 넣을 자막">'
             '<option value="none">없음 — 렌더만</option>'
             '<option value="ko">한국어</option>'
-            '<option value="ko-en">한국어 + 영어</option></select></label>'
+            '<option value="ko-en"'
+            ' title="영어 번역이 없으면 최종출력할 때 Gemini로 옮깁니다(유료)">'
+            "한국어 + 영어</option></select></label>"
             '<button type="button" data-tl="render" id="tl-render" class="tl-primary"'
             ' title="저장한 타임라인을 원본에서 한 번 렌더하고, 고르면 자막을 입힌다(무료 로컬)">'
-            "공유</button>"
+            "최종출력</button>"
             '<button type="button" data-tl="index" id="tl-index-toggle" aria-pressed="false"'
             ' title="타임라인 목록 — 클립 · 자막 목록, Final Cut 「인덱스」 (⇧⌘2)">목록</button>'
             '<span id="tl-status" class="tl-status" aria-live="polite"></span></div>'
@@ -211,6 +245,48 @@ def timeline_player_html(model: dict[str, Any] | None) -> str:
         )
         # 단축키 시트는 머리줄 「단축키」 판 하나다(W-102, D175).
         + f"{_cue_panel_html()}</div>"
+    )
+
+
+def _style_tools_html() -> str:
+    """화면 자막 모양(W-107, D181) — 인스타그램·캡컷처럼 뷰어 위에서 자막을 끌어 옮기고
+    모서리로 키운다.
+
+    자막 겹은 매번 다시 그려지므로 손잡이는 그 형제다. 가운데 안내선 둘 · 덩어리 틀(모서리 넷) ·
+    도구 막대 · 여는 단추. 모양은 전체 자막 하나다(큐마다가 아니다)."""
+    grips = "".join(
+        f'<span class="tl-style-grip" data-grip="{corner}" aria-hidden="true"></span>'
+        for corner in ("nw", "ne", "sw", "se")
+    )
+    return (
+        '<div class="tl-guide tl-guide-v" hidden></div>'
+        '<div class="tl-guide tl-guide-h" hidden></div>'
+        '<div id="tl-style-box" class="tl-style-box" hidden'
+        ' title="끌어 옮기기 (⇧ 한 축만 · ⌘ 붙지 않게) — 모서리를 끌면 크기 (⇧ 가운데 기준)">'
+        f"{grips}</div>"
+        '<div id="tl-style-bar" class="tl-style-bar" hidden role="toolbar" aria-label="자막 모양">'
+        '<span class="tl-style-name">전체 자막</span>'
+        '<button type="button" data-style="font-down" title="글자 작게">A−</button>'
+        '<output id="tl-style-font" title="글자 크기 (1080 기준 px)"></output>'
+        '<button type="button" data-style="font-up" title="글자 크게">A+</button>'
+        '<span class="tl-style-sep" aria-hidden="true"></span>'
+        '<button type="button" data-style="outline-down" title="외곽선 얇게">◯−</button>'
+        '<output id="tl-style-outline" title="외곽선 (px)"></output>'
+        '<button type="button" data-style="outline-up" title="외곽선 두껍게">◯+</button>'
+        '<label class="tl-style-color" title="글자색">'
+        '<input type="color" id="tl-style-color" aria-label="글자색"></label>'
+        '<span class="tl-style-sep" aria-hidden="true"></span>'
+        '<button type="button" data-style="center-x" title="가로 가운데로">↔ 가운데</button>'
+        '<button type="button" data-style="anchor"'
+        ' title="위·아래 기본 자리로 (끌어 옮긴 자리를 버린다)">'
+        "기본 자리</button>"
+        '<button type="button" data-style="reset" title="모양 전체를 기본값으로">초기화</button>'
+        '<button type="button" data-style="done" class="tl-primary"'
+        ' title="닫기 (Esc)">완료</button>'
+        "</div>"
+        '<button type="button" id="tl-style-toggle" class="tl-style-toggle" aria-pressed="false"'
+        ' title="자막 모양 — 화면에서 자막을 끌어 옮기고 크기·색을 바꾼다(전체 자막)">'
+        "Aa 자막 모양</button>"
     )
 
 
@@ -285,7 +361,47 @@ TIMELINE_PLAYER_CSS = """
   flex-direction: column; align-items: center; justify-content: flex-end; gap: 0.1em;
   font-family: "Pretendard", var(--vl-font-sans); }
 .tl-overlay.is-styled.is-top { justify-content: flex-start; }
-.tl-overlay.is-styled > div { paint-order: stroke fill; overflow-wrap: anywhere; }
+.tl-overlay.is-styled > div { paint-order: stroke fill; overflow-wrap: anywhere;
+  pointer-events: auto; cursor: move; touch-action: none; }
+/* 화면 자막 모양(W-107, D181) — 인스타그램·캡컷처럼 뷰어 위에서 자막을 끌고 모서리로 키운다. */
+.tl-overlay.is-styled.is-point { justify-content: center; transform: translateY(-50%); }
+.tl-style-box { position: absolute; z-index: 3; box-sizing: border-box; cursor: move;
+  touch-action: none; border: 1px dashed var(--vl-on-video-overlay);
+  outline: 1px solid var(--vl-video-well); }
+.tl-style-box[hidden], .tl-style-bar[hidden], .tl-guide[hidden],
+.tl-style-toggle[hidden] { display: none; }
+.tl-style-grip { position: absolute; width: 10px; height: 10px; border-radius: 50%;
+  background: var(--vl-on-video-overlay); border: 1px solid var(--vl-video-well); }
+.tl-style-grip[data-grip="nw"] { left: -6px; top: -6px; cursor: nwse-resize; }
+.tl-style-grip[data-grip="ne"] { right: -6px; top: -6px; cursor: nesw-resize; }
+.tl-style-grip[data-grip="sw"] { left: -6px; bottom: -6px; cursor: nesw-resize; }
+.tl-style-grip[data-grip="se"] { right: -6px; bottom: -6px; cursor: nwse-resize; }
+.tl-guide { position: absolute; z-index: 2; pointer-events: none;
+  background: var(--vl-snap-guide); }
+.tl-guide-v { top: 0; bottom: 0; left: 50%; width: 1px; }
+.tl-guide-h { left: 0; right: 0; top: 50%; height: 1px; }
+.tl-style-bar { position: absolute; z-index: 4; top: 8px; left: 50%; transform: translateX(-50%);
+  display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 4px;
+  max-width: calc(100% - 16px); box-sizing: border-box; padding: 4px 6px; border-radius: 6px;
+  font-size: 12px; background: var(--vl-video-overlay); color: var(--vl-on-video-overlay); }
+.tl-style-bar.is-bottom { top: auto; bottom: 8px; }
+.tl-style-bar button { font: inherit; font-size: 12px; height: 24px; padding: 0 6px;
+  border-radius: 4px; cursor: pointer; border: 1px solid var(--vl-line-strong);
+  background: transparent; color: inherit; }
+.tl-style-bar button.tl-primary { background: var(--vl-accent); border-color: var(--vl-accent);
+  color: var(--vl-on-accent); font-weight: 600; }
+.tl-style-bar output { min-width: 2.2em; text-align: center; font-family: var(--vl-font-mono); }
+.tl-style-name { font-weight: 600; margin-right: 2px; }
+.tl-style-sep { align-self: stretch; width: 1px; background: var(--vl-line-strong); }
+.tl-style-color { display: inline-flex; }
+.tl-style-color input { width: 26px; height: 22px; padding: 0; border: 0; background: none;
+  cursor: pointer; }
+.tl-style-toggle { position: absolute; z-index: 4; top: 8px; right: 8px; height: 24px;
+  padding: 0 8px; border-radius: 4px; font-size: 12px; cursor: pointer; opacity: 0.7;
+  border: 1px solid var(--vl-line-strong); background: var(--vl-video-overlay);
+  color: var(--vl-on-video-overlay); transition: opacity 120ms; }
+.tl-frame:hover .tl-style-toggle, .tl-style-toggle:focus-visible { opacity: 1; }
+.tl-frame.is-styling .tl-style-toggle { display: none; }
 .tl-transport { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; }
 .tl-transport button { font: inherit; font-size: 12px; padding: 2px 8px; border-radius: 4px;
   cursor: pointer; border: 1px solid var(--vl-line-strong); background: var(--vl-surface-raised);
@@ -310,7 +426,7 @@ TIMELINE_PLAYER_CSS = """
 .tl-save.is-dirty { color: var(--vl-tier-yellow-ink); }
 .tl-save.is-saving { color: var(--vl-ink-muted); }
 .tl-save.is-saved { color: var(--vl-tier-green-ink); }
-/* 편집 단추 묶음 | 출력 묶음(디자인 점검 U9) — 「공유」가 이 줄의 주 동작이다. */
+/* 편집 단추 묶음 | 출력 묶음(디자인 점검 U9) — 「최종출력」이 이 줄의 주 동작이다. */
 .tl-divider { align-self: stretch; width: 1px; margin: 2px 2px; background: var(--vl-line-strong); }
 .tl-transport button.tl-primary { background: var(--vl-accent); border-color: var(--vl-accent);
   color: var(--vl-on-accent); font-weight: 600; }
@@ -573,6 +689,9 @@ class TimelinePlayer:
         def tl_translate(payload: dict[str, object]) -> dict[str, object]:
             return self.action(payload, "translate")
 
+        def tl_style(payload: dict[str, object]) -> dict[str, object]:
+            return self.action(payload, "style")
+
         return [
             tl_media,
             tl_prepare,
@@ -584,6 +703,7 @@ class TimelinePlayer:
             tl_wave,
             tl_english,
             tl_translate,
+            tl_style,
         ]
 
     def action(self, payload: dict[str, object], kind: str) -> dict[str, object]:
@@ -595,7 +715,7 @@ class TimelinePlayer:
 
         try:
             root = owner._require_current_selection(owner._serve_str(payload, "signature") or None)
-            if kind in ("prepare", "save", "render", "add", "translate"):
+            if kind in ("prepare", "save", "render", "add", "translate", "style"):
                 owner._require_workbench_token(payload, owner._visual_lifetime_token, TAB_LABEL)
         except gr.Error as error:
             return fail(error, stale=True)
@@ -611,6 +731,8 @@ class TimelinePlayer:
                 return self._job(root, payload)
             if kind == "translate":
                 return self._translate(root, timeline_id, payload)
+            if kind == "style":
+                return self._style(root, payload)
             if kind == "wave":
                 source_id = owner._serve_str(payload, "sourceId")
                 wave = owner.raw.timeline_waveform(root, source_id)
@@ -670,6 +792,17 @@ class TimelinePlayer:
             raise ValueError("재생기가 건 작업(렌더 · 영어 만들기)이 아닙니다.")
         return {"ok": True, "status": job.status, "ended": job.status in JOB_ENDED}
 
+    def _style(self, root: Any, payload: dict[str, object]) -> dict[str, object]:
+        """화면에서 고친 자막 모양을 저장한다(W-107, D181) — 공유 탭 손잡이와 같은 검사·같은 자리.
+        범위 밖이면 저장하지 않고 까닭을 돌려준다. 저장한 모양을 돌려준다."""
+        given = payload.get("style")
+        if not isinstance(given, dict):
+            raise ValueError("자막 모양 요청의 모양이 틀렸습니다.")
+        mapping = {key: given.get(key) for key in STYLE_KEYS}
+        mapping["text_color"] = normalize_color(str(mapping["text_color"] or ""))
+        saved = self.owner.raw.save_subtitle_burn_style(root, mapping)
+        return {"ok": True, "style": style_payload(saved)}
+
     def _translate(
         self, root: Any, timeline_id: str | None, payload: dict[str, object]
     ) -> dict[str, object]:
@@ -695,7 +828,7 @@ class TimelinePlayer:
     ) -> dict[str, object]:
         """저장된 리비전 하나를 렌더하는 작업을 건다 — 작업이 그 리비전을 다시 확인한다(D130).
 
-        「번인 캡션」을 고르면 같은 작업이 렌더 뒤 자막을 입힌다(「공유」, W-88 · D147).
+        「번인 캡션」을 고르면 같은 작업이 렌더 뒤 자막을 입힌다(「최종출력」, W-88 · D147).
         「없음」이면 예전 렌더 그대로다."""
         revision = payload.get("revision")
         if timeline_id is None or not isinstance(revision, int) or isinstance(revision, bool):
@@ -703,6 +836,15 @@ class TimelinePlayer:
         burn = self.owner._serve_str(payload, "burn") or BURN_NONE
         if burn == BURN_NONE:
             handle = self.owner.raw.start_timeline_render(root, timeline_id, revision)
-        else:
-            handle = self.owner.raw.start_timeline_share(root, timeline_id, revision, burn)
-        return {"ok": True, "jobId": handle.job_id}
+            return {"ok": True, "jobId": handle.job_id}
+        client = self._translator(root, timeline_id, revision) if burn == BURN_ENGLISH else None
+        handle = self.owner.raw.start_timeline_share(root, timeline_id, revision, burn, client)
+        return {"ok": True, "jobId": handle.job_id, "translating": client is not None}
+
+    def _translator(self, root: Any, timeline_id: str, revision: int) -> object | None:
+        """「한국어 + 영어」 최종출력(W-108, D182) — 그 리비전 글의 번역이 없으면 Gemini 연결
+        (누름이 승인 · 유료). 이미 옮겼으면 None(무료). 키가 없으면 화면 글(`gr.Error`)이다."""
+        raw = self.owner.raw
+        if raw.srt_translation_cached(root, raw.timeline_korean_srt(root, timeline_id, revision)):
+            return None
+        return self.owner._live_transport_for_action().semantic_client(raw.translation_model())

@@ -116,7 +116,7 @@ def test_fit_window_splits_the_decks_by_tokens_and_folds_source_rows_for_the_pro
 
 
 def test_the_player_opens_the_share_tab_when_sharing_ends() -> None:
-    body = PLAYER_APP_JS[PLAYER_APP_JS.index("공유를 마쳤습니다") :][:400]
+    body = PLAYER_APP_JS[PLAYER_APP_JS.index("최종출력을 마쳤습니다") :][:400]
     assert 'W.__vlWindow.showInspector("share")' in body
 
 

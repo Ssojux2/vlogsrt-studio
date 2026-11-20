@@ -727,7 +727,7 @@ ACTIVITY_JOB_LABELS = {
     "source_preview": "원본 미리보기",
     raw_service.VISUAL_PREPARE_JOB_KIND: "미리보기 준비",
     raw_service.ANALYSIS_PROXY_JOB_KIND: "4K 분석 프록시",
-    raw_service.RENDER_EXPORT_JOB_KIND: "추천만 이어붙이기",
+    raw_service.RENDER_EXPORT_JOB_KIND: "최종출력",
     raw_service.TIMELINE_EXPORT_JOB_KIND: TIMELINE_JOB_LABEL,
     raw_service.SRT_TRANSLATE_JOB_KIND: "영어 SRT 변환",
     raw_service.SUBTITLE_BURN_JOB_KIND: BURN_JOB_LABEL,

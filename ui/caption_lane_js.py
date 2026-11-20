@@ -235,6 +235,45 @@ CAPTION_LANE_JS = r"""
     if (deltaMode !== 0) { return deltaY < 0 ? step : 1 / step; }
     return Math.pow(step, Math.max(-1, Math.min(1, -deltaY / notchPx)));
   };
+  // ─── 화면 자막 모양(W-107, D181) — 뷰어에서 자막을 끌어 옮기고 모서리로 키운다 ───────
+  // 정수로 반올림해 [lo, hi] 안으로.
+  L.clampInt = function (value, range) {
+    return Math.max(range[0], Math.min(range[1], Math.round(value)));
+  };
+  // 가운데 c를 덩어리가 틀 안에 들게 — [반, 틀 − 반] 안, 덩어리가 틀보다 크면 틀 가운데.
+  function keepIn(c, size, total) {
+    var half = size / 2;
+    return half * 2 >= total ? total / 2 : Math.max(half, Math.min(total - half, c));
+  }
+  // 끌어 옮기기 — 덩어리 가운데(start, 틀 px)를 (dx, dy)만큼. lock(⇧)이면 큰 쪽 축 하나만,
+  // snap이면 화면 가운데 선(세로 · 가로)에 snapPx 안에서 붙고 그 안내선을 켠다.
+  L.styleMove = function (start, dx, dy, box, frame, opts) {
+    if (opts.lock) {
+      if (Math.abs(dx) >= Math.abs(dy)) { dy = 0; } else { dx = 0; }
+    }
+    var x = start.x + dx;
+    var y = start.y + dy;
+    var guides = { v: false, h: false };
+    if (opts.snap && Math.abs(x - frame.w / 2) <= opts.snapPx) { x = frame.w / 2; guides.v = true; }
+    if (opts.snap && Math.abs(y - frame.h / 2) <= opts.snapPx) { y = frame.h / 2; guides.h = true; }
+    return { x: keepIn(x, box.w, frame.w), y: keepIn(y, box.h, frame.h), guides: guides };
+  };
+  // 모서리 끌기 — 붙잡은 점(from: 맞은편 모서리, ⇧면 가운데)에서 잰 거리의 비로 글자 크기.
+  L.styleScale = function (font, from, start, now, range) {
+    var before = Math.hypot(start.x - from.x, start.y - from.y);
+    if (!(before > 0)) { return L.clampInt(font, range); }
+    return L.clampInt(font * Math.hypot(now.x - from.x, now.y - from.y) / before, range);
+  };
+  // 크기를 바꾼 덩어리의 가운데 — 맞은편 모서리(anchor)를 제자리에 둔다. sign은 그 모서리에서
+  // 잡은 모서리 쪽(±1, ±1).
+  L.styleAnchor = function (anchor, sign, box) {
+    return { x: anchor.x + sign.x * box.w / 2, y: anchor.y + sign.y * box.h / 2 };
+  };
+  // 가운데(틀 px) → 저장 자리(scale 단위 몫, 번인의 `\pos`).
+  L.stylePoint = function (c, frame, scale) {
+    return { x_permille: L.clampInt(c.x / frame.w * scale, [0, scale]),
+      y_permille: L.clampInt(c.y / frame.h * scale, [0, scale]) };
+  };
   root.__vlCaptionLane = L;
   if (typeof module !== "undefined" && module.exports) { module.exports = L; }
 })(typeof window !== "undefined" ? window : globalThis);
