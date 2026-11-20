@@ -74,6 +74,7 @@ MARK_ON_GROUNDS: dict[str, tuple[str, ...]] = {
     "warn": ("caption-chip",),
     "playhead": ("surface-sunken",),
     "skimmer": ("surface-sunken", "video-well"),
+    "snap-guide": ("video-well",),
     "draft": ("surface-sunken",),
     "accent": ("surface-sunken",),
     "tier-yellow-ink": ("surface-sunken",),

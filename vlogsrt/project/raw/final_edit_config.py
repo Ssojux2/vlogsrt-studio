@@ -45,6 +45,10 @@ class FinalEditSettings:
     - `shuttle_rates`: L을 거듭 누를 때의 배속.
     - `caption_step_ms`·`caption_small_step_ms`: 자막 창의 ←/→ · ⌥←/→ 한 걸음(Subtitle Edit 기본
       1초 · 500 ms 그대로 — 재생기 화면이 데이터로 받는다).
+    - `style_drag_px`: 화면 자막을 끌어 옮기기(W-107, D181)가 시작되는 거리 — 그 아래는
+      누름(고르기)이다.
+      가운데 선에 붙는 거리는 `snap_px` 그대로다.
+    - `style_font_step`: 화면 자막 도구 막대 「A−」·「A+」 한 번의 글자 크기 걸음(1080 기준 px).
     """
 
     min_duration_ms: int = 850
@@ -76,6 +80,8 @@ class FinalEditSettings:
     shuttle_rates: tuple[int, ...] = (1, 2, 4, 8)
     caption_step_ms: int = 1000
     caption_small_step_ms: int = 500
+    style_drag_px: int = 3
+    style_font_step: int = 2
 
     def __post_init__(self) -> None:
         positive = (
@@ -85,7 +91,7 @@ class FinalEditSettings:
             self.zoom_min_px_per_s, self.big_step_frames, self.caption_step_ms, self.lane_clip_px,
             self.fit_lane_min_px, self.lane_film_px, self.film_cache_tiles,
             self.lane_wave_px,
-            self.caption_small_step_ms,
+            self.caption_small_step_ms, self.style_drag_px, self.style_font_step,
         )  # fmt: skip
         if min(positive) <= 0 or self.min_gap_ms < 0 or self.coalesce_ms < 0 or self.snap_px < 0:
             raise ValueError("최종 편집 설정의 크기·한도는 양수여야 한다")
@@ -132,4 +138,6 @@ def client_settings(settings: FinalEditSettings = FINAL_EDIT_SETTINGS) -> dict[s
         "shuttleRates": list(settings.shuttle_rates),
         "captionStepMs": settings.caption_step_ms,
         "captionSmallStepMs": settings.caption_small_step_ms,
+        "styleDragPx": settings.style_drag_px,
+        "styleFontStep": settings.style_font_step,
     }

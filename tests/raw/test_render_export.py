@@ -615,7 +615,7 @@ def test_the_service_job_renders_and_the_activity_label_names_it(trip: Folder) -
     assert record.kind == "render_export"
     latest = trip.service.latest_render_export(trip.root)
     assert latest is not None and Path(latest["video"]).is_file()
-    assert workspace_service.ACTIVITY_JOB_LABELS["render_export"] == "추천만 이어붙이기"
+    assert workspace_service.ACTIVITY_JOB_LABELS["render_export"] == "최종출력"
     assert "render_export" in workspace_service.CLOSE_CANCELS_JOB_KINDS
 
 

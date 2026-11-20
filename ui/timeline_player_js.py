@@ -524,14 +524,12 @@ PLAYER_APP_JS = r"""
     var unit = Math.min(frame.width, frame.height) / S.burn.referenceHeight;
     var style = S.burn.style;
     var side = frame.width * S.burn.sideMargin;
-    overlay.className = "tl-overlay is-styled is-" + style.position;
-    overlay.style.left = side + "px";
-    overlay.style.right = side + "px";
-    overlay.style.top = style.position === "top" ? style.margin_px * unit + "px" : "";
-    overlay.style.bottom = style.position === "top" ? "" : style.margin_px * unit + "px";
+    placeOverlay(overlay, style, frame, unit, side);
     overlay.textContent = "";
+    // 화면에서 모양을 고칠 때(W-107) 플레이헤드 아래 자막이 없으면 예시 줄로 잡을 것을 보인다.
+    if (!cues.length && S.styling) { cues = [[null, null, 0, 0, STYLE_SAMPLE[0]]]; }
     cues.forEach(function (cue) {
-      var english = overlayEnglish(cue);
+      var english = cue[0] === null ? STYLE_SAMPLE[1] : overlayEnglish(cue);
       if (cue[4]) {
         overlay.appendChild(overlayLine("tl-ov-ko", cue[4], style.font_px * unit,
           style.outline_px * unit, style.text_color));
@@ -542,13 +540,285 @@ PLAYER_APP_JS = r"""
           style.outline_px * scale * unit, style.text_color));
       }
     });
+    paintStyleBox();
+  }
+  // 자리 — 위·아래 + 여백(D173), 또는 화면에서 끌어 옮긴 점(W-107, D181): 덩어리 가운데가 그 점이고
+  // 접는 폭은 그대로 틀 너비 − 좌우 여백 둘이다(번인의 `\pos` + 정렬 5와 같다).
+  function placeOverlay(overlay, style, frame, unit, side) {
+    var point = style.x_permille !== null && style.x_permille !== undefined;
+    overlay.className = "tl-overlay is-styled is-" + (point ? "point" : style.position);
+    if (point) {
+      var scale = S.burn.positionScale;
+      var width = frame.width - 2 * side;
+      overlay.style.width = width + "px";
+      overlay.style.left = frame.width * style.x_permille / scale - width / 2 + "px";
+      overlay.style.right = "";
+      overlay.style.top = frame.height * style.y_permille / scale + "px";
+      overlay.style.bottom = "";
+      return;
+    }
+    overlay.style.width = "";
+    overlay.style.left = side + "px";
+    overlay.style.right = side + "px";
+    overlay.style.top = style.position === "top" ? style.margin_px * unit + "px" : "";
+    overlay.style.bottom = style.position === "top" ? "" : style.margin_px * unit + "px";
   }
   // 손잡이를 바꾸면(공유 탭 「자막 모양」) 저장과 함께 여기로도 온다 — 다시 그리기만 한다.
+  // 손잡이에는 끌어 옮긴 자리가 없다 — 「위치」·「여백」이 그대로면 그 자리를 잇는다
+  // (서버와 같은 규칙).
   S.setBurnStyle = function (style) {
     if (!S.burn || !S.doc) { return; }
-    S.burn.style = style;
+    var old = S.burn.style || {};
+    var keep = old.x_permille !== null && old.x_permille !== undefined &&
+      style.position === old.position && Number(style.margin_px) === old.margin_px;
+    S.burn.style = Object.assign({}, style, { x_permille: keep ? old.x_permille : null,
+      y_permille: keep ? old.y_permille : null });
     paintOverlay();
   };
+
+  // ─── 화면 자막 모양(W-107, D181) ───────────────────────────────────────────
+  // 인스타그램·캡컷처럼 뷰어 위에서 고친다 — 자막을 끌어 옮기고(⇧ 한 축 · 가운데 선에 붙음 ·
+  // ⌘ 붙지 않게), 모서리로 키우고(맞은편 모서리 기준 · ⇧ 가운데 기준 대칭), 막대로 크기·외곽선·색.
+  // 모양은 전체 자막 하나다. 놓을 때 · 막대를 누를 때 저장하고(공유 탭 손잡이와 같은 자리 ·
+  // 같은 검사) 공유 탭 손잡이를 저장값으로 다시 맞춘다. 실패하면 앞 모양으로 돌린다.
+  var STYLE_SAMPLE = ["자막 모양 — 끌어 옮기기", "Drag to move"];
+  function styleFrameEl() { var o = $("tl-overlay"); return o ? o.parentNode : null; }
+  function setStyling(on) {
+    S.styling = !!on && !!S.burn && !!S.doc;
+    var frame = styleFrameEl();
+    if (frame) { frame.classList.toggle("is-styling", S.styling); }
+    var toggle = $("tl-style-toggle");
+    if (toggle) { toggle.setAttribute("aria-pressed", S.styling ? "true" : "false"); }
+    showGuides(false, false);
+    paintOverlay();
+  }
+  // 덩어리 — 줄들을 감싼 사각형(틀 px). 줄이 없으면 null.
+  function textBox() {
+    var overlay = $("tl-overlay");
+    var frame = styleFrameEl();
+    if (!overlay || !frame || !overlay.children.length) { return null; }
+    var f = frame.getBoundingClientRect();
+    var l = Infinity, t = Infinity, r = -Infinity, b = -Infinity;
+    Array.prototype.forEach.call(overlay.children, function (line) {
+      var q = line.getBoundingClientRect();
+      l = Math.min(l, q.left); t = Math.min(t, q.top);
+      r = Math.max(r, q.right); b = Math.max(b, q.bottom);
+    });
+    return { left: l - f.left, top: t - f.top, w: r - l, h: b - t,
+      frame: { w: f.width, h: f.height } };
+  }
+  function paintStyleBox() {
+    var box = $("tl-style-box");
+    var bar = $("tl-style-bar");
+    var toggle = $("tl-style-toggle");
+    if (toggle) { toggle.hidden = !S.burn; }
+    var rect = S.styling ? textBox() : null;
+    if (box) {
+      box.hidden = !rect;
+      if (rect) {
+        box.style.left = rect.left + "px"; box.style.top = rect.top + "px";
+        box.style.width = rect.w + "px"; box.style.height = rect.h + "px";
+      }
+    }
+    if (!bar) { return; }
+    bar.hidden = !S.styling;
+    if (!S.styling) { return; }
+    var style = S.burn.style;
+    // 막대는 자막과 반대쪽 끝에 — 자막이 위쪽 절반이면 아래에 선다.
+    bar.classList.toggle("is-bottom", !!rect && rect.top + rect.h / 2 < rect.frame.h / 2);
+    $("tl-style-font").textContent = style.font_px;
+    $("tl-style-outline").textContent = style.outline_px;
+    var color = $("tl-style-color");
+    if (color && W.document.activeElement !== color) {
+      color.value = style.text_color.toLowerCase();
+    }
+  }
+  function showGuides(vertical, horizontal) {
+    var frame = styleFrameEl();
+    if (!frame) { return; }
+    var v = frame.querySelector(".tl-guide-v");
+    var h = frame.querySelector(".tl-guide-h");
+    if (v) { v.hidden = !vertical; }
+    if (h) { h.hidden = !horizontal; }
+  }
+  function withPoint(style, point) { return Object.assign({}, style, point); }
+  function onStyleDown(ev) {
+    if (!S.burn || !S.doc || ev.button !== 0) { return; }
+    if (!S.styling) { setStyling(true); }
+    var rect = textBox();
+    if (!rect) { return; }
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (S.playing) { stopPlayback(); }
+    var grip = ev.target.getAttribute ? ev.target.getAttribute("data-grip") : null;
+    var center = { x: rect.left + rect.w / 2, y: rect.top + rect.h / 2 };
+    var drag = { grip: grip, x0: ev.clientX, y0: ev.clientY, center: center, rect: rect,
+      moved: false, before: Object.assign({}, S.burn.style), font: S.burn.style.font_px,
+      outline: S.burn.style.outline_px };
+    if (grip) {
+      drag.sign = { x: grip.charAt(1) === "e" ? 1 : -1, y: grip.charAt(0) === "s" ? 1 : -1 };
+      var half = { x: drag.sign.x * rect.w / 2, y: drag.sign.y * rect.h / 2 };
+      drag.corner = { x: center.x + half.x, y: center.y + half.y };
+      drag.anchor = { x: center.x - half.x, y: center.y - half.y };
+    }
+    S.styleDrag = drag;
+    if (ev.currentTarget.setPointerCapture) { ev.currentTarget.setPointerCapture(ev.pointerId); }
+  }
+  function onStyleMove(ev) {
+    var drag = S.styleDrag;
+    if (!drag) { return; }
+    var dx = ev.clientX - drag.x0;
+    var dy = ev.clientY - drag.y0;
+    if (!drag.moved && Math.hypot(dx, dy) < S.settings.styleDragPx) { return; }
+    drag.moved = true;
+    if (drag.grip) { scaleStyle(drag, ev, dx, dy); return; }
+    var at = LN.styleMove(drag.center, dx, dy, drag.rect, drag.rect.frame, { lock: ev.shiftKey,
+      snap: !(ev.metaKey || ev.ctrlKey), snapPx: S.settings.snapPx });
+    showGuides(at.guides.v, at.guides.h);
+    S.burn.style = withPoint(S.burn.style,
+      LN.stylePoint(at, drag.rect.frame, S.burn.positionScale));
+    paintOverlay();
+  }
+  // 모서리 끌기 — 글자(외곽선도 같은 비율로) 크기. 기본은 맞은편 모서리를 제자리에 두고,
+  // ⇧면 가운데를 두고 위아래·좌우 대칭으로 커진다. 위·아래 자리였어도 그 가운데가 자리가 된다.
+  function scaleStyle(drag, ev, dx, dy) {
+    var ranges = S.burn.ranges;
+    var scale = S.burn.positionScale;
+    var from = ev.shiftKey ? drag.center : drag.anchor;
+    var now = { x: drag.corner.x + dx, y: drag.corner.y + dy };
+    var font = LN.styleScale(drag.font, from, drag.corner, now, ranges.font_px);
+    var outline = LN.clampInt(drag.outline * font / drag.font, ranges.outline_px);
+    var sized = Object.assign({}, S.burn.style, { font_px: font, outline_px: outline });
+    S.burn.style = withPoint(sized, LN.stylePoint(drag.center, drag.rect.frame, scale));
+    paintOverlay();
+    if (ev.shiftKey) { return; }
+    var rect = textBox();
+    if (!rect) { return; }
+    var held = LN.styleAnchor(drag.anchor, drag.sign, rect);
+    S.burn.style = withPoint(S.burn.style, LN.stylePoint(held, drag.rect.frame, scale));
+    paintOverlay();
+  }
+  function onStyleUp() {
+    var drag = S.styleDrag;
+    S.styleDrag = null;
+    showGuides(false, false);
+    if (drag && drag.moved) { saveStyle(drag.before); }
+  }
+  function onStyleBar(ev) {
+    var target = ev.target.closest ? ev.target.closest("[data-style]") : null;
+    if (!target || !S.burn) { return; }
+    ev.stopPropagation();
+    var act = target.getAttribute("data-style");
+    if (act === "done") { setStyling(false); return; }
+    var before = Object.assign({}, S.burn.style);
+    var next = styleAction(act, Object.assign({}, before));
+    if (!next) { return; }
+    S.burn.style = next;
+    paintOverlay();
+    saveStyle(before);
+  }
+  function styleAction(act, style) {
+    var ranges = S.burn.ranges;
+    var step = S.settings.styleFontStep;
+    if (act === "font-up" || act === "font-down") {
+      style.font_px = LN.clampInt(style.font_px + (act === "font-up" ? step : -step),
+        ranges.font_px);
+    } else if (act === "outline-up" || act === "outline-down") {
+      style.outline_px = LN.clampInt(style.outline_px + (act === "outline-up" ? 1 : -1),
+        ranges.outline_px);
+    } else if (act === "center-x") {
+      var rect = textBox();
+      if (!rect) { return null; }
+      style = withPoint(style, LN.stylePoint({ x: rect.frame.w / 2, y: rect.top + rect.h / 2 },
+        rect.frame, S.burn.positionScale));
+    } else if (act === "anchor") {
+      style.x_permille = null; style.y_permille = null;
+    } else if (act === "reset") {
+      style = Object.assign({}, S.burn.defaults);
+    } else { return null; }
+    return style;
+  }
+  function onStyleColorInput(ev) {
+    if (!S.burn) { return; }
+    if (!S.colorBefore) { S.colorBefore = Object.assign({}, S.burn.style); }
+    S.burn.style = Object.assign({}, S.burn.style, { text_color: ev.target.value.toUpperCase() });
+    paintOverlay();
+  }
+  function onStyleColorChange(ev) {
+    onStyleColorInput(ev);
+    var before = S.colorBefore || Object.assign({}, S.burn.style);
+    S.colorBefore = null;
+    saveStyle(before);
+  }
+  function saveStyle(before) {
+    S.styleGen = (S.styleGen || 0) + 1;
+    var gen = S.styleGen;
+    var payload = { signature: S.signature, token: S.token,
+      style: Object.assign({}, S.burn.style) };
+    S.server.tl_style(payload).catch(function () {
+      return { ok: false, error: "자막 모양을 저장하지 못했습니다 — 서버가 답하지 않았습니다." };
+    }).then(function (got) {
+      if (gen !== S.styleGen || !S.burn) { return; }
+      if (!got || !got.ok) {
+        S.burn.style = before;
+        paintOverlay();
+        say((got && got.error) || "자막 모양을 저장하지 못했습니다.", true);
+        return;
+      }
+      S.burn.style = got.style;
+      paintOverlay();
+      say("자막 모양을 저장했습니다 — 최종출력이 이 모양으로 입힙니다(전체 자막).", false);
+      syncShareKnobs();
+    });
+  }
+  // 공유 탭 손잡이를 저장값으로 다시 맞춘다 — 그 숨은 그라디오 단추(되살리기, 저장 고리 밖).
+  function syncShareKnobs() {
+    var source = W.document.getElementById("vl-burn-sync");
+    if (source && source.tagName !== "BUTTON" && source.querySelector) {
+      source = source.querySelector("button") || source;
+    }
+    if (source && typeof source.click === "function") { source.click(); }
+  }
+  function bindStyleTools() {
+    var overlay = $("tl-overlay");
+    var box = $("tl-style-box");
+    [overlay, box].forEach(function (el) {
+      if (!el || el.__tlStyleBound) { return; }
+      el.__tlStyleBound = true;
+      el.addEventListener("pointerdown", onStyleDown);
+      el.addEventListener("pointermove", onStyleMove);
+      el.addEventListener("pointerup", onStyleUp);
+      el.addEventListener("pointercancel", onStyleUp);
+      // 화면 자막을 누르면 고르기만 한다 — 영상 누름(재생 · 멈춤)으로 넘기지 않는다.
+      el.addEventListener("click", function (ev) { ev.stopPropagation(); });
+    });
+    var bar = $("tl-style-bar");
+    if (bar && !bar.__tlBound) {
+      bar.__tlBound = true;
+      bar.addEventListener("click", onStyleBar);
+      bar.addEventListener("pointerdown", function (ev) { ev.stopPropagation(); });
+    }
+    var color = $("tl-style-color");
+    if (color && !color.__tlBound) {
+      color.__tlBound = true;
+      color.addEventListener("input", onStyleColorInput);
+      color.addEventListener("change", onStyleColorChange);
+    }
+    var toggle = $("tl-style-toggle");
+    if (toggle && !toggle.__tlBound) {
+      toggle.__tlBound = true;
+      toggle.addEventListener("click", function (ev) {
+        ev.stopPropagation();
+        setStyling(!S.styling);
+      });
+    }
+    if (!W.__tlStyleEsc) {
+      W.__tlStyleEsc = true;
+      W.document.addEventListener("keydown", function (ev) {
+        if (S.styling && ev.key === "Escape") { setStyling(false); }
+      });
+    }
+  }
   function cueText() {
     var t = S.playhead * TL.sequenceFrameTicks(S.doc.facts);
     return S.proj.cues.filter(function (cue) {
@@ -1027,12 +1297,12 @@ PLAYER_APP_JS = r"""
       : "스내핑을 켰습니다 — 자막 가장자리가 컷 경계에 붙습니다(⇧를 누르면 그때만 끕니다).", false);
     return true;
   }
-  // ⌘E(Final Cut 「공유」) — 공유 칸(번인 캡션)으로 갈 뿐 렌더를 걸지 않는다. 거는 것은 단추다.
+  // ⌘E(Final Cut 「공유」) — 최종출력 칸(번인 캡션)으로 갈 뿐 렌더를 걸지 않는다. 거는 것은 단추다.
   function focusShare() {
     var pick = $("tl-burn");
     if (!pick) { return false; }
     pick.focus();
-    say("공유 — 「영상에 넣을 자막」을 고른 뒤 「공유」를 누르세요.", false);
+    say("최종출력 — 「영상에 넣을 자막」을 고른 뒤 「최종출력」을 누르세요.", false);
     return true;
   }
 
@@ -2541,9 +2811,13 @@ PLAYER_APP_JS = r"""
       revision: S.baseRevision, burn: burnPick ? burnPick.value : "none" };
     if (W.__vlServer) { W.__vlServer.wake(true); }
     S.server.tl_render(payload).then(function (got) {
-      if (!got || !got.ok) { say((got && got.error) || "공유를 걸지 못했습니다.", true); return; }
-      say("리비전 " + payload.revision + "을 공유합니다(렌더" +
-        (payload.burn === "none" ? "" : " + 자막 입히기") + ", 무료 로컬) — 활동 띠에서 진행을" +
+      if (!got || !got.ok) {
+        say((got && got.error) || "최종출력을 걸지 못했습니다.", true);
+        return;
+      }
+      say("최종출력 중 — 리비전 " + payload.revision + "(렌더" +
+        (got.translating ? " + 영어 번역(Gemini, 유료)" : "") +
+        (payload.burn === "none" ? ", 무료 로컬" : " + 자막 입히기") + ") — 활동 띠에서 진행을" +
         " 보고, 끝나면 결과 카드와 초안 폴더에 나옵니다.", false);
       watchRender(got.jobId);
     });
@@ -2610,7 +2884,7 @@ PLAYER_APP_JS = r"""
           say("렌더가 끝나지 못했습니다(" + got.status + ") — 「기록」에서 까닭을 보세요.", true);
           return;
         }
-        say("공유를 마쳤습니다 — 인스펙터 「공유」의 결과 카드 「초안 폴더 열기」에 영상이" +
+        say("최종출력을 마쳤습니다 — 인스펙터 「공유」의 결과 카드 「초안 폴더 열기」에 영상이" +
           " 있습니다(자막을 입혔으면 <이름>.burned.mp4 · 영어 번역이 아직 없으면 한국어만).",
           false);
         if (W.__vlWindow && W.__vlWindow.showInspector) { W.__vlWindow.showInspector("share"); }
@@ -2993,7 +3267,11 @@ PLAYER_APP_JS = r"""
     var v = ev.target;
     if (S.playing && v === active()) { onFrame(v, v.currentTime, Math.floor); }
   }
-  function onVideoClick() { toggle(); }
+  // 화면 자막 모양을 고치는 중이면(W-107) 영상 누름은 고르기를 푼다 — 캡컷처럼 밖을 누르면 닫힌다.
+  function onVideoClick() {
+    if (S.styling) { setStyling(false); return; }
+    toggle();
+  }
   function forwardOutside(part) {
     part.__tlBound = true;
     part.addEventListener("keydown", function (ev) {
@@ -3080,6 +3358,7 @@ PLAYER_APP_JS = r"""
           attributeFilter: ["data-vl-workspace", "data-vl-fit", "data-vl-viewer"] });
       }
     }
+    bindStyleTools();
     // 자막 겹의 크기는 화면 틀 크기에 따른다(W-98) — 틀이 바뀌면 다시 그린다.
     var overlay = $("tl-overlay");
     if (overlay && !overlay.__tlBound && overlay.parentNode) {

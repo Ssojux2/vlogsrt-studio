@@ -191,3 +191,34 @@ def test_moving_a_knob_saves_the_style_and_tells_the_player(
     )
     burn.save_view("stale-signature", "bottom", 54, 4, 60, "#FFFFFF")  # 다른 작업공간 — 쓰지 않는다
     assert burn_export.saved_style(server.raw, root).position == "top"
+
+
+def test_knobs_keep_a_dragged_position_until_place_knobs_move(
+    tmp_path: Path, local_socket: None
+) -> None:
+    """W-107(D181) — 화면에서 끌어 옮긴 자리는 크기·외곽선·색 손잡이로 지워지지 않는다. 「위치」·
+    「여백」을 바꾸면 위·아래 자리로 돌아간다. 미리보기·내보내기도 같은 자리를 쓴다."""
+    server, app, by_id = _built(tmp_path)
+    burn = server._burn_cell
+    root = server.workspace_root()
+    assert root is not None
+    signature = server.current_signature()
+    moved = burn_in.BurnStyle("bottom", 54, 4, 60, "#FFFFFF", 300, 450)
+    burn_export.save_style(server.raw, root, moved)
+    burn.save_view(signature, "bottom", 80, 6, 60, "#ffcc00")
+    kept = burn_export.saved_style(server.raw, root)
+    assert (kept.font_px, kept.text_color, kept.x_permille, kept.y_permille) == (
+        80, "#FFCC00", 300, 450,
+    )  # fmt: skip
+    assert burn._style(root, ("bottom", 80, 6, 60, "#FFCC00")).x_permille == 300
+    burn.save_view(signature, "top", 80, 6, 60, "#FFCC00")
+    back = burn_export.saved_style(server.raw, root)
+    assert (back.position, back.x_permille) == ("top", None)
+    # 재생기가 화면에서 저장하면 숨은 단추가 손잡이를 저장값으로 다시 맞춘다
+    # (되살리기 — 저장 고리 밖).
+    sync = by_id[burn_cell.SYNC_ID]
+    deps = app.config["dependencies"]
+    fns = {d["id"]: app.fns[d["id"]].fn for d in deps if d["id"] in app.fns}
+    (synced,) = [d for d in deps if [tuple(t) for t in d["targets"]] == [(sync._id, "click")]]
+    assert fns[synced["id"]] == burn.restore_view
+    assert synced["outputs"] == [block._id for block in burn.style_inputs()]

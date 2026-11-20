@@ -22,6 +22,9 @@ KOREAN_STYLE = "KO"
 ENGLISH_STYLE = "EN"
 _ALIGNMENT = {"bottom": 2, "top": 8}
 """ASS 숫자판 정렬 — 2 = 아래 가운데, 8 = 위 가운데."""
+_CENTER_ALIGNMENT = 5
+"""화면에서 끌어 옮긴 자리(W-107, D181) — `\\pos`가 덩어리 가운데를 그 점에 놓는다."""
+POINT_KEYS = ("x_permille", "y_permille")
 _CENTIS = 100
 _PREVIEW_END = "9:59:59.99"
 """미리보기 한 장의 사건 끝 — 찾기(`-ss`)가 시각을 0으로 되돌려도 늘 보이게 한다."""
@@ -44,13 +47,17 @@ class BurnStyle:
     """사람이 고르는 네 가지 — 자리·글자 크기·외곽선·글자색(+ 자리에서 가장자리까지 여백).
 
     크기·외곽선·여백은 1080p 기준 픽셀이고 영상의 짧은 변에 비례한다
-    (`BurnSettings.reference_height`, D171)."""
+    (`BurnSettings.reference_height`, D171). `x_permille`·`y_permille`(W-107, D181)는 화면에서 끌어
+    옮긴 자리 — 자막 덩어리 가운데를 영상 너비·높이의 몫(`position_scale` 단위)으로 적고, 있으면
+    위·아래 + 여백 대신 그 점이다. 둘 다 없으면(None) 예전 그대로다."""
 
     position: str
     font_px: int
     outline_px: int
     margin_px: int
     text_color: str
+    x_permille: int | None = None
+    y_permille: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,7 +109,21 @@ def style_from_mapping(
         _whole(raw, "outline_px", base.outline_px, settings.outline_px_range, "외곽선"),
         _whole(raw, "margin_px", base.margin_px, settings.margin_px_range, "여백"),
         color.upper(),
+        *_point(raw, settings),
     )
+
+
+def _point(raw: Mapping[str, object], settings: BurnSettings) -> tuple[int | None, int | None]:
+    """끌어 옮긴 자리 — 둘 다 있거나(정수, 0–`position_scale`) 둘 다 없다(None)."""
+    given = [raw.get(key) for key in POINT_KEYS]
+    if all(value is None for value in given):
+        return None, None
+    if any(value is None for value in given):
+        raise BurnInError("옮긴 자리는 가로·세로가 함께 있어야 합니다")
+    bounds = (0, settings.position_scale)
+    x = _whole(raw, "x_permille", 0, bounds, "가로 자리")
+    y = _whole(raw, "y_permille", 0, bounds, "세로 자리")
+    return x, y
 
 
 def _whole(
@@ -119,18 +140,23 @@ def _whole(
         raise BurnInError(f"{label}는 정수여야 합니다: {value!r}")
     low, high = bounds
     if not low <= number <= high:
-        raise BurnInError(f"{label}는 {low}–{high}px 사이여야 합니다: {value}")
+        raise BurnInError(f"{label}는 {low}–{high} 사이여야 합니다: {value}")
     return int(number)
 
 
 def style_to_mapping(style: BurnStyle) -> dict[str, object]:
-    return {
+    """저장 꼴 — 옮긴 자리가 없으면 예전 다섯 칸 그대로(저장 바이트가 바뀌지 않는다)."""
+    mapping: dict[str, object] = {
         "position": style.position,
         "font_px": style.font_px,
         "outline_px": style.outline_px,
         "margin_px": style.margin_px,
         "text_color": style.text_color,
     }
+    if style.x_permille is not None and style.y_permille is not None:
+        mapping["x_permille"] = style.x_permille
+        mapping["y_permille"] = style.y_permille
+    return mapping
 
 
 # ── 짝짓기 ──────────────────────────────────────────────────────────────
@@ -186,7 +212,8 @@ def ass_document(
     settings: BurnSettings = BURN_SETTINGS,
 ) -> str:
     """번인할 ASS 글 — 화면 좌표는 영상 크기 그대로(`PlayResX/Y`)라 비율이 실제 픽셀이 된다."""
-    lines = [_dialogue(_ass_time(e.start), _ass_time(e.end), e) for e in pairing.events]
+    point = _point_tag(style, width, height, settings)
+    lines = [_dialogue(_ass_time(e.start), _ass_time(e.end), e, point) for e in pairing.events]
     return _document(style, width, height, settings, lines)
 
 
@@ -198,7 +225,9 @@ def preview_document(
     settings: BurnSettings = BURN_SETTINGS,
 ) -> str:
     """미리보기 한 장의 ASS — 고른 사건 하나가 처음부터 끝까지 보인다."""
-    return _document(style, width, height, settings, [_dialogue("0:00:00.00", _PREVIEW_END, event)])
+    point = _point_tag(style, width, height, settings)
+    line = _dialogue("0:00:00.00", _PREVIEW_END, event, point)
+    return _document(style, width, height, settings, [line])
 
 
 def _document(
@@ -235,14 +264,26 @@ def _style_line(
     outline = round(style.outline_px * scale * unit)
     side = round(width * s.side_margin_ratio)
     margin = round(style.margin_px * unit)
+    alignment = _ALIGNMENT[style.position]
+    if style.x_permille is not None:
+        alignment, margin = _CENTER_ALIGNMENT, 0
     fill, edge = _ass_color(style.text_color), _ass_color(s.outline_color)
     return (
         f"Style: {name},{s.font_name},{size},{fill},{fill},{edge},{edge},"
-        f"0,0,0,0,100,100,0,0,1,{outline},0,{_ALIGNMENT[style.position]},{side},{side},{margin},1"
+        f"0,0,0,0,100,100,0,0,1,{outline},0,{alignment},{side},{side},{margin},1"
     )
 
 
-def _dialogue(start: str, end: str, event: BurnEvent) -> str:
+def _point_tag(style: BurnStyle, width: int, height: int, s: BurnSettings) -> str:
+    """옮긴 자리의 `{\\pos(x,y)}` — 영상 픽셀로 가장 가까이 반올림한다. 없으면 빈 글."""
+    if style.x_permille is None or style.y_permille is None:
+        return ""
+    x = round(Fraction(width * style.x_permille, s.position_scale))
+    y = round(Fraction(height * style.y_permille, s.position_scale))
+    return f"{{\\pos({x},{y})}}"
+
+
+def _dialogue(start: str, end: str, event: BurnEvent, point: str = "") -> str:
     if event.korean and event.english:
         text = f"{_escape(event.korean)}\\N{{\\r{ENGLISH_STYLE}}}{_escape(event.english)}"
         first = KOREAN_STYLE
@@ -250,7 +291,7 @@ def _dialogue(start: str, end: str, event: BurnEvent) -> str:
         text, first = _escape(event.korean), KOREAN_STYLE
     else:
         text, first = _escape(event.english), ENGLISH_STYLE
-    return f"Dialogue: 0,{start},{end},{first},,0,0,0,,{text}"
+    return f"Dialogue: 0,{start},{end},{first},,0,0,0,,{point}{text}"
 
 
 def _escape(text: str) -> str:

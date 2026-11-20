@@ -416,7 +416,7 @@ def test_the_recommended_only_export_is_retired_from_the_screen(
     타임라인 공유가 그대로 쓴다(활동 이름 그대로)."""
     server, app, by_id, buttons = _built(tmp_path)
     assert "vl-render-export" not in by_id and not hasattr(server, "render_export_view")
-    assert workspace_service.ACTIVITY_JOB_LABELS["render_export"] == "추천만 이어붙이기"
+    assert workspace_service.ACTIVITY_JOB_LABELS["render_export"] == "최종출력"
 
 
 def test_import_export_and_approve_wake_the_activity_poller(

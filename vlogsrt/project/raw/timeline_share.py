@@ -36,7 +36,7 @@ from vlogsrt.project.raw import (
     timeline_render,
     translation,
 )
-from vlogsrt.project.raw.models import RawWorkspaceError
+from vlogsrt.project.raw.models import AnalysisError, RawWorkspaceError
 
 if TYPE_CHECKING:
     from vlogsrt.project.raw.jobs import JobContext
@@ -46,15 +46,23 @@ BURN_NONE = "none"
 BURN_KOREAN = "ko"
 BURN_KOREAN_ENGLISH = "ko-en"
 BURN_MODES = (BURN_NONE, BURN_KOREAN, BURN_KOREAN_ENGLISH)
+BURN_MODE_NAMES = {
+    BURN_NONE: "자막 없음",
+    BURN_KOREAN: "한국어",
+    BURN_KOREAN_ENGLISH: "한국어 + 영어",
+}
+"""「최종출력」(W-107, D181)의 서버 줄이 말하는 번인 캡션 이름 — 화면 고르기와 같은 말."""
 
 ENGLISH_OFF = "off"
 ENGLISH_USED = "used"
 ENGLISH_WRITTEN = "written"
 ENGLISH_MISSING = "missing"
 ENGLISH_EDITED = "edited"
+ENGLISH_TRANSLATED = "translated"
+ENGLISH_FAILED = "failed"
 MISSING_ENGLISH_TEXT = (
-    "이 글의 영어 번역이 아직 없어 한국어만 입혔습니다 — 「영어 SRT로 변환」을 누른 뒤"
-    " 다시 공유하면 저장된 번역을 무료로 씁니다."
+    "이 글의 영어 번역이 아직 없어 한국어만 입혔습니다 — 「영어 만들기」를 누르거나"
+    " 「한국어 + 영어」로 다시 최종출력하면 옮겨서 입힙니다."
 )
 
 
@@ -74,9 +82,16 @@ def share(
     mode: str,
     style: burn_in.BurnStyle,
     context: JobContext | None = None,
+    *,
+    translator: object | None = None,
 ) -> dict[str, Any]:
-    """렌더하고(언제나) 고르면 입힌다 — 결과 사실(폴더 · 영상 · SRT · 번인 · 영어)을 돌려준다."""
+    """렌더하고(언제나) 고르면 입힌다 — 결과 사실(폴더 · 영상 · SRT · 번인 · 영어)을 돌려준다.
+
+    `translator`(Gemini 클라이언트, W-108 · D182)가 있으면 「한국어 + 영어」에서 번역이 없을 때
+    그 자리에서 옮긴다(유료 — 「최종출력」 누름이 승인). 없으면 예전처럼 사지 않는다(D114)."""
     require_mode(mode)
+    # 활동 띠·「기록」의 서버 로그가 가장 새 줄을 보인다(D101) — 최종출력이 도는 동안 그 줄이다.
+    log.info(f"최종출력 중 · 리비전 {revision} · 영상에 넣을 자막: {BURN_MODE_NAMES[mode]}")
     exported = timeline_render.export_timeline(service, root, timeline_id, revision, context)
     facts: dict[str, Any] = {
         "folder": str(exported.folder),
@@ -87,11 +102,13 @@ def share(
         "burned": None,
     }
     if mode == BURN_NONE:
+        log.info(f"최종출력을 마쳤다: {exported.video}")
         return facts
     document = _require_rendered_text(root, timeline_id, revision, exported.srt)
-    english, facts["english"] = _english(service, root, exported.srt, mode, document)
+    english, facts["english"] = _english(service, root, exported.srt, mode, document, translator)
     job = burn_export.prepare(exported.video, exported.srt, english)
     facts["burned"] = burn_export.burn(service, root, job, style)
+    log.info(f"최종출력을 마쳤다: {facts['burned']['path']}")
     return facts
 
 
@@ -120,23 +137,43 @@ def _english(
     korean: Path,
     mode: str,
     document: timeline_edit.TimelineDocument,
+    translator: object | None = None,
 ) -> tuple[Path | None, str]:
-    """입힐 영어 SRT와 그 출처 — 사지 않는다(D114). 고친 영어가 있으면 그것이 먼저다(D166)."""
+    """입힐 영어 SRT와 그 출처. 고친 영어가 있으면 그것이 먼저다(D166). 저장된 번역이 없으면
+    `translator`가 있을 때만 옮긴다(W-108, D182) — 없으면 사지 않는다(D114)."""
     if mode != BURN_KOREAN_ENGLISH:
         return None, ENGLISH_OFF
     edits = edited_by_number(document)
     if edits:
-        return _english_with_edits(service, root, korean, edits)
+        return _english_with_edits(service, root, korean, edits, translator)
     matched, _others = srt_english.matching_english(service, root, korean)
     if matched is not None:
         return matched, ENGLISH_USED
     job = srt_english.prepare(service, root, korean)
     saved = srt_english.cached(service, root, job)
+    source = ENGLISH_WRITTEN
+    if saved is None and translator is not None:
+        saved = _translate(service, root, job, translator)
+        if saved is None:
+            return None, ENGLISH_FAILED
+        source = ENGLISH_TRANSLATED
     if saved is None:
         log.warn(MISSING_ENGLISH_TEXT)
         return None, ENGLISH_MISSING
     written = srt_english.write_english(service, root, job, saved)
-    return Path(str(written["path"])), ENGLISH_WRITTEN
+    return Path(str(written["path"])), source
+
+
+def _translate(
+    service: RawWorkspaceService, root: Path, job: Any, translator: object
+) -> dict[str, Any] | None:
+    """Gemini로 옮긴다(유료). 실패하면 렌더한 영상을 버리지 않고 까닭을 경고로 남긴다(규칙 9)."""
+    failures = (translation.TranslationError, AnalysisError, ValueError, RuntimeError, OSError)
+    try:
+        return srt_english.translate(service, root, job, translator)
+    except failures as error:
+        log.warn(f"영어 번역에 실패해 한국어만 입혔습니다 — {error}")
+        return None
 
 
 def edited_by_number(document: timeline_edit.TimelineDocument) -> dict[str, str]:
@@ -157,9 +194,14 @@ def edited_by_number(document: timeline_edit.TimelineDocument) -> dict[str, str]
 
 
 def _english_with_edits(
-    service: RawWorkspaceService, root: Path, korean: Path, edits: dict[str, str]
+    service: RawWorkspaceService,
+    root: Path,
+    korean: Path,
+    edits: dict[str, str],
+    translator: object | None = None,
 ) -> tuple[Path | None, str]:
-    """저장된 번역(있으면)에 고친 영어를 덮어 쓴다 — 빈 큐가 남으면 한국어만(사지 않는다)."""
+    """저장된 번역(있으면)에 고친 영어를 덮어 쓴다. 빈 큐가 남으면 `translator`가 있을 때만 옮겨
+    채우고(W-108, D182), 없으면 한국어만(사지 않는다)."""
     job = srt_english.prepare(service, root, korean)
     saved = srt_english.cached(service, root, job)
     english = {str(k): str(v) for k, v in (saved or {}).get("english", {}).items()}
@@ -167,7 +209,13 @@ def _english_with_edits(
     try:
         payload, counts = srt_english.english_texts_payload(job, english)
     except translation.TranslationError:
-        log.warn(MISSING_ENGLISH_TEXT)
-        return None, ENGLISH_MISSING
+        bought = _translate(service, root, job, translator) if translator is not None else None
+        if bought is None:
+            if translator is None:
+                log.warn(MISSING_ENGLISH_TEXT)
+            return None, ENGLISH_FAILED if translator is not None else ENGLISH_MISSING
+        english = {str(k): str(v) for k, v in bought.get("english", {}).items()}
+        english.update(edits)
+        payload, counts = srt_english.english_texts_payload(job, english)
     written = srt_english.place_english(service, root, job, payload, counts)
     return Path(str(written["path"])), ENGLISH_EDITED

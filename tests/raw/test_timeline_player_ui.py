@@ -375,7 +375,9 @@ def test_share_with_burn_captions_starts_the_share_job_and_none_stays_a_render(
     shared: list[tuple[str, int, str]] = []
     rendered: list[tuple[str, int]] = []
 
-    def share(_root: Path, timeline_id: str, revision: int, burn: str) -> Any:
+    def share(
+        _root: Path, timeline_id: str, revision: int, burn: str, client: object = None
+    ) -> Any:
         shared.append((timeline_id, revision, burn))
         return SimpleNamespace(job_id="s1")
 
@@ -391,11 +393,14 @@ def test_share_with_burn_captions_starts_the_share_job_and_none_stays_a_render(
         "timelineId": "t1",
         "revision": 5,
     }
-    assert player.action({**payload, "burn": "ko-en"}, "render") == {"ok": True, "jobId": "s1"}
+    monkeypatch.setattr(server.raw, "timeline_korean_srt", lambda *_a: tmp_path / "k.srt")
+    monkeypatch.setattr(server.raw, "srt_translation_cached", lambda _r, _s: True)
+    got = player.action({**payload, "burn": "ko-en"}, "render")
+    assert got == {"ok": True, "jobId": "s1", "translating": False}
     assert player.action({**payload, "burn": "none"}, "render") == {"ok": True, "jobId": "r1"}
     assert shared == [("t1", 5, "ko-en")] and rendered == [("t1", 5)]
     page = timeline_player_html(client_model("sig", "tok", _opened(), _media(), TIERS))
-    assert 'id="tl-burn"' in page and ">공유</button>" in page
+    assert 'id="tl-burn"' in page and ">최종출력</button>" in page
     for value in timeline_share.BURN_MODES:
         assert f'<option value="{value}"' in page, value
     assert 'burn: burnPick ? burnPick.value : "none"' in PLAYER_JS
@@ -531,9 +536,12 @@ def test_the_model_carries_the_burn_style_for_the_overlay() -> None:
     model = client_model("sig", "tok", _opened(), _media(), TIERS, burn_model(style, BURN_SETTINGS))
     assert model["burn"] == {
         "style": {"position": "top", "font_px": 70, "outline_px": 2, "margin_px": 30,
-                  "text_color": "#FFCC00"},
+                  "text_color": "#FFCC00", "x_permille": None, "y_permille": None},
         "referenceHeight": 1080, "englishScale": 0.8, "sideMargin": 0.05,
-        "outlineColor": "#000000",
+        "outlineColor": "#000000", "positionScale": 1000,
+        "ranges": {"font_px": [20, 160], "outline_px": [0, 16], "margin_px": [0, 480]},
+        "defaults": {"position": "bottom", "font_px": 54, "outline_px": 4, "margin_px": 60,
+                     "text_color": "#FFFFFF", "x_permille": None, "y_permille": None},
     }  # fmt: skip
     assert client_model("sig", "tok", _opened(), _media(), TIERS)["burn"] is None
     js = PLAYER_JS
@@ -720,3 +728,121 @@ def test_the_editor_follows_the_list_and_a_click_goes_to_the_text() -> None:
     )
     assert plain in PLAYER_JS
     assert 'if (drag && !drag.moved && drag.part === "body" && drag.id) {' in PLAYER_JS
+
+
+def test_the_viewer_saves_a_dragged_caption_style_with_the_token(
+    tmp_path: Path, local_socket: None
+) -> None:
+    """W-107(D181) — 화면에서 끌어 옮기고 키운 모양은 공유 탭 손잡이와 같은 자리에 같은 검사로
+    저장된다(낡은 토큰·범위 밖은 쓰지 않는다). 저장하면 공유 탭 손잡이를 숨은 단추로 다시 맞춘다."""
+    from ui import burn_cell
+    from vlogsrt.project.raw import burn_export
+
+    server, root, signature = _server(tmp_path)
+    server.build_blocks()
+    player = server._timeline_player
+    style = {"position": "bottom", "font_px": 80, "outline_px": 6, "margin_px": 60,
+             "text_color": "#ffcc00", "x_permille": 300, "y_permille": 450}  # fmt: skip
+    payload: dict[str, object] = {"signature": signature, "token": "낡은-토큰", "style": style}
+    refused = player.action(payload, "style")
+    assert refused["ok"] is False and refused["stale"] is True
+    payload["token"] = server._visual_lifetime_token
+    got = player.action(payload, "style")
+    assert got == {"ok": True, "style": {**style, "text_color": "#FFCC00"}}
+    saved = burn_export.saved_style(server.raw, root)
+    assert (saved.font_px, saved.x_permille, saved.y_permille) == (80, 300, 450)
+    bad = player.action({**payload, "style": {**style, "x_permille": 2000}}, "style")
+    assert bad["ok"] is False and burn_export.saved_style(server.raw, root) == saved
+    js = PLAYER_JS
+    assert "S.server.tl_style(payload)" in js and '"vl-burn-sync"' in js
+    assert burn_cell.SYNC_ID == "vl-burn-sync"
+
+
+def test_the_viewer_moves_and_scales_captions_like_capcut() -> None:
+    """W-107(D181) — 뷰어 위 자막: 끌어 옮기기(⇧ 한 축 · 가운데 선 · ⌘ 붙지 않게) · 모서리 넷
+    (맞은편 모서리 · ⇧ 가운데 대칭) · 막대(크기 · 외곽선 · 색 · 가운데 · 기본 자리 · 초기화 ·
+    완료)."""
+    page = timeline_player_html(client_model("sig", "tok", _opened(), _media(), TIERS))
+    for needle in ('id="tl-style-box"', 'id="tl-style-bar"', 'id="tl-style-toggle"',
+                   'class="tl-guide tl-guide-v"', 'id="tl-style-color"'):  # fmt: skip
+        assert needle in page, needle
+    for grip in ("nw", "ne", "sw", "se"):
+        assert f'data-grip="{grip}"' in page
+    for act in ("font-down", "font-up", "outline-down", "outline-up", "center-x", "anchor",
+                "reset", "done"):  # fmt: skip
+        assert f'data-style="{act}"' in page and f'act === "{act}"' in PLAYER_JS, act
+    js = PLAYER_JS
+    assert "lock: ev.shiftKey" in js and "snap: !(ev.metaKey || ev.ctrlKey)" in js
+    assert "var from = ev.shiftKey ? drag.center : drag.anchor;" in js
+    assert "S.settings.styleDragPx" in js and "S.settings.styleFontStep" in js
+    # 화면 자막 누름은 영상 누름(재생 · 멈춤)으로 넘기지 않고, 고치는 중 영상 누름은 닫기다.
+    assert "if (S.styling) { setStyling(false); return; }" in js
+    assert ">최종출력</button>" in page
+
+
+def test_final_output_with_english_buys_the_translation_only_when_it_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W-108(D182) — 「한국어 + 영어」 최종출력은 그 리비전 글의 번역이 없으면 Gemini 연결을 넘긴다
+    (누름이 승인 — 유료). 이미 옮긴 글이면 연결을 묻지 않는다. 연결이 없으면 까닭을 값으로
+    답한다."""
+    import gradio as gr
+
+    server, _root, signature = _server(tmp_path)
+    player = server._timeline_player
+    clients: list[object] = []
+
+    def share(_r: Path, _t: str, _v: int, burn: str, client: object = None) -> Any:
+        clients.append(client)
+        return SimpleNamespace(job_id="s1")
+
+    monkeypatch.setattr(server.raw, "start_timeline_share", share)
+    monkeypatch.setattr(server.raw, "timeline_korean_srt", lambda *_a: tmp_path / "k.srt")
+    monkeypatch.setattr(server.raw, "srt_translation_cached", lambda _r, _s: False)
+    transport = SimpleNamespace(semantic_client=lambda model: f"gemini:{model}")
+    monkeypatch.setattr(server, "_live_transport_for_action", lambda: transport)
+    payload = {"signature": signature, "token": server._visual_lifetime_token,
+               "timelineId": "t1", "revision": 5, "burn": "ko-en"}  # fmt: skip
+    got = player.action(payload, "render")
+    assert got == {"ok": True, "jobId": "s1", "translating": True}
+    assert clients == [f"gemini:{server.raw.translation_model()}"]
+    assert player.action({**payload, "burn": "ko"}, "render")["translating"] is False
+    assert clients[-1] is None
+
+    def no_key() -> Any:
+        raise gr.Error("키가 없다")
+
+    monkeypatch.setattr(server, "_live_transport_for_action", no_key)
+    refused = player.action(payload, "render")
+    assert refused["ok"] is False and "키가 없다" in str(refused["error"])
+    assert "영어 번역(Gemini, 유료)" in PLAYER_JS
+
+
+def test_the_share_job_checks_the_online_gate_before_it_buys_a_translation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W-108(D182) — 번역을 살 최종출력은 작업을 걸기 **전에** 온라인 문을 본다
+    (오프라인이면 닫힌다).
+    클라이언트가 없거나 「한국어」면 문을 보지 않는다(무료 로컬 그대로)."""
+    from vlogsrt.project.raw import burn_export, srt_english
+    from vlogsrt.project.raw.models import AnalysisError
+
+    server, root, _signature = _server(tmp_path)
+    monkeypatch.setattr(burn_export, "executable", lambda *a: "ffmpeg")
+    gates: list[Path] = []
+
+    def closed(_service: Any, path: Path) -> None:
+        gates.append(path)
+        raise AnalysisError("오프라인")
+
+    monkeypatch.setattr(srt_english, "require_online", closed)
+    with pytest.raises(AnalysisError, match="오프라인"):
+        server.raw.start_timeline_share(root, "t1", 1, "ko-en", object())
+    assert gates == [root]
+    jobs: list[str] = []
+    monkeypatch.setattr(
+        server.raw, "submit_job", lambda _r, _k, fingerprint, _b: jobs.append(fingerprint)
+    )
+    server.raw.start_timeline_share(root, "t1", 1, "ko", object())
+    server.raw.start_timeline_share(root, "t1", 1, "ko-en")
+    assert gates == [root] and len(jobs) == 2

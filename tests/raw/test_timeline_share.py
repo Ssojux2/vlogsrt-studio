@@ -225,3 +225,105 @@ def test_edits_are_numbered_by_the_rendered_srt_and_stale_or_hidden_ones_drop() 
     rendered = [cue.utterance_id for cue in timeline_edit.render_cues(document)[0]]
     assert "c2" not in rendered  # 가려졌다
     assert timeline_share.edited_by_number(document) == {str(rendered.index("c3") + 1): "two"}
+
+
+def test_the_server_log_says_final_output_while_it_runs(
+    world: tuple[Path, _Calls], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W-107(D181) — 「최종출력」이 도는 동안 활동 띠·「기록」 서버 로그의 가장 새 줄이
+    그것을 말한다."""
+    root, _calls = world
+    lines: list[str] = []
+    monkeypatch.setattr(timeline_share.log, "info", lines.append)
+    _share(root, timeline_share.BURN_KOREAN)
+    assert lines[0] == "최종출력 중 · 리비전 4 · 영상에 넣을 자막: 한국어"
+    assert lines[-1].startswith("최종출력을 마쳤다: ") and lines[-1].endswith("draft.burned.mp4")
+    lines.clear()
+    _share(root, timeline_share.BURN_NONE)
+    assert lines[0] == "최종출력 중 · 리비전 4 · 영상에 넣을 자막: 자막 없음"
+    assert lines[-1].endswith("draft.mp4")
+
+
+# ─── 「한국어 + 영어」 최종출력은 번역이 없으면 Gemini로 옮긴다(W-108, D182) ────────────────
+
+
+def test_english_is_translated_with_gemini_when_a_translator_is_given(
+    world: tuple[Path, _Calls], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """누름이 승인이다(D110) — 번역이 없으면 그 자리에서 옮겨(유료) 쓰고 한국어 아래에 입힌다."""
+    root, calls = world
+    written = root / "export" / "20261116T000000Z" / "draft.en.srt"
+    asked: list[tuple[object, object]] = []
+    monkeypatch.setattr(srt_english, "matching_english", lambda s, r, k: (None, ()))
+    monkeypatch.setattr(srt_english, "prepare", lambda s, r, k: "srt-job")
+    monkeypatch.setattr(srt_english, "cached", lambda s, r, j: None)
+
+    def translate(_s: Any, _r: Path, job: object, client: object) -> dict[str, Any]:
+        asked.append((job, client))
+        return {"english": {"1": "Hello"}}
+
+    monkeypatch.setattr(srt_english, "translate", translate)
+    monkeypatch.setattr(srt_english, "write_english", lambda s, r, j, d: {"path": str(written)})
+    facts = timeline_share.share(
+        SimpleNamespace(),
+        root,
+        "t1",
+        4,
+        timeline_share.BURN_KOREAN_ENGLISH,
+        STYLE,
+        translator="gemini",
+    )
+    assert asked == [("srt-job", "gemini")]
+    assert calls.prepared[0][2] == written and facts["english"] == "translated"
+
+
+def test_a_failed_translation_warns_and_burns_korean_only(
+    world: tuple[Path, _Calls], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """번역이 실패해도 렌더한 영상은 버리지 않는다 — 까닭을 경고로 남기고 한국어만
+    입힌다(규칙 9)."""
+    from vlogsrt.project.raw import translation
+
+    root, calls = world
+    warned: list[str] = []
+    monkeypatch.setattr(timeline_share.log, "warn", warned.append)
+    monkeypatch.setattr(srt_english, "matching_english", lambda s, r, k: (None, ()))
+    monkeypatch.setattr(srt_english, "prepare", lambda s, r, k: "srt-job")
+    monkeypatch.setattr(srt_english, "cached", lambda s, r, j: None)
+
+    def fail(*_a: Any) -> Any:
+        raise translation.TranslationError("응답이 줄을 빠뜨렸다")
+
+    monkeypatch.setattr(srt_english, "translate", fail)
+    facts = timeline_share.share(
+        SimpleNamespace(),
+        root,
+        "t1",
+        4,
+        timeline_share.BURN_KOREAN_ENGLISH,
+        STYLE,
+        translator="gemini",
+    )
+    assert facts["english"] == "failed" and calls.prepared[0][2] is None and calls.burned
+    assert any("응답이 줄을 빠뜨렸다" in line for line in warned)
+
+
+def test_partial_edits_are_completed_by_the_translation(
+    world: tuple[Path, _Calls], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """고친 영어(D166)는 그대로 먼저다 — 빈 큐만 새 번역이 채운다."""
+    root, _calls = world
+    srt = root / "export" / "20261116T000000Z" / "draft.srt"
+    srt.write_bytes(TWO.encode("utf-8"))
+    monkeypatch.setattr(timeline_edit, "srt_text", lambda document: TWO)
+    monkeypatch.setattr(timeline_share, "edited_by_number", lambda document: {"1": "Hi"})
+    monkeypatch.setattr(srt_english, "cached", lambda s, r, j: None)
+    monkeypatch.setattr(
+        srt_english, "translate", lambda *a: {"english": {"1": "Hello", "2": "Goodbye"}}
+    )
+    facts = timeline_share.share(
+        _service(), root, "t1", 4, timeline_share.BURN_KOREAN_ENGLISH, STYLE, translator="gemini"
+    )
+    assert facts["english"] == timeline_share.ENGLISH_EDITED
+    english = srt.with_name("draft.en.srt").read_text(encoding="utf-8")
+    assert english.split("\n")[2::4] == ["Hi", "Goodbye"]
