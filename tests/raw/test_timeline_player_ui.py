@@ -135,11 +135,14 @@ def test_the_clip_edit_buttons_are_on_the_page_and_every_button_has_a_handler() 
         assert re.search(rf'(^|[\s{{,])"?{re.escape(action)}"?: function', PLAYER_JS, re.M) or (
             re.search(rf'(^|[\s{{,])"?{re.escape(action)}"?: [A-Za-z]+[,}} ]', PLAYER_JS, re.M)
         ), action
-    # 키는 표 하나(W-89, D154) — ⌘B 블레이드 · ⌫/⌦ 삭제는 타임라인 창의 줄이다.
+    # 키는 표 하나(W-89, D154) — ⌫/⌦ 삭제는 타임라인 창의 줄이다.
     from ui.keymap import PLAYER_KEYMAP
 
     clip_keys = {(k.code, k.mod, k.action) for k in PLAYER_KEYMAP if k.pane == "timeline"}
-    assert ("KeyB", True, "blade") in clip_keys
+    # ⌘B는 어디서나 · 글 칸 안에서도 자른다(W-112, D186 — 사용자 지시).
+    anywhere = {(k.code, k.mod, k.in_text, k.action) for k in PLAYER_KEYMAP if k.pane == "any"}
+    assert ("KeyB", True, True, "blade") in anywhere
+    assert 'if (!mod || ev.code !== "KeyB" || ev.shiftKey' in PLAYER_JS
     assert {("Backspace", False, "delete-clip"), ("Delete", False, "delete-clip")} <= clip_keys
     assert 'blade: function () { clipOp("blade"); }' in PLAYER_JS
     assert '"delete-clip": function () { clipOp("delete"); }' in PLAYER_JS
@@ -151,7 +154,8 @@ def test_the_cue_panel_is_on_the_page_and_its_buttons_have_handlers() -> None:
     assert 'id="tl-cue-list"' in page and 'id="tl-cue-edit"' in page
     assert 'data-tl="cue-insert"' in page
     drawn = set(re.findall(r'cueButton\("([a-z-]+)"', PLAYER_JS))
-    assert drawn == {"cue-start", "cue-end", "cue-split", "cue-merge", "cue-delete"}
+    # 「이 줄 영어 번역」(W-112)은 번역 모드의 영어 칸 아래 단추다.
+    assert drawn == {"cue-start", "cue-end", "cue-split", "cue-merge", "cue-delete", "cue-en-ask"}
     for action in drawn | {"cue-insert"}:
         assert re.search(rf'"{re.escape(action)}": function', PLAYER_JS), action
     for op in ("start", "end", "split", "merge", "delete", "insert", "text"):
@@ -401,10 +405,8 @@ def test_share_with_burn_captions_starts_the_share_job_and_none_stays_a_render(
         "timelineId": "t1",
         "revision": 5,
     }
-    monkeypatch.setattr(server.raw, "timeline_korean_srt", lambda *_a: tmp_path / "k.srt")
-    monkeypatch.setattr(server.raw, "srt_translation_cached", lambda _r, _s: True)
     got = player.action({**payload, "burn": "ko-en"}, "render")
-    assert got == {"ok": True, "jobId": "s1", "translating": False}
+    assert got == {"ok": True, "jobId": "s1"}  # 최종출력은 번역을 사지 않는다(D186)
     assert player.action({**payload, "burn": "none"}, "render") == {"ok": True, "jobId": "r1"}
     assert shared == [("t1", 5, "ko-en")] and rendered == [("t1", 5)]
     page = timeline_player_html(client_model("sig", "tok", _opened(), _media(), TIERS))
@@ -602,6 +604,75 @@ def test_make_english_needs_the_token_and_translates_that_revisions_srt(
     assert "translate: translate" in PLAYER_JS and "watchTranslate(got.jobId)" in PLAYER_JS
 
 
+def test_one_cue_is_translated_into_its_english_field_on_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W-112(D186, 사용자 지시 「번역모드에서 영어 번역을 모델에 요청해서 입력하는 버튼」) — 고른
+    줄 하나를 옮기는 쓰기라 서명·수명 토큰에 묶이고, 앞 줄들을 맥락으로 넘기며 받은 영어를 돌려준다.
+    화면은 그 영어를 고친 영어(D166)로 넣는다. 버튼은 번역 모드의 영어 칸 아래에 있다."""
+    server, _root, signature = _server(tmp_path)
+    player = server._timeline_player
+    asked: list[tuple[str, list[str], object]] = []
+
+    def line(_root: Path, korean: str, context: list[str], client: object) -> str:
+        asked.append((korean, context, client))
+        return "The mudflat is in sight."
+
+    monkeypatch.setattr(server.raw, "timeline_translate_line", line)
+    transport = SimpleNamespace(semantic_client=lambda model: f"gemini:{model}")
+    monkeypatch.setattr(server, "_live_transport_for_action", lambda: transport)
+    payload: dict[str, object] = {"signature": signature, "token": "낡은-토큰",
+                                  "text": "갯펄이 보인다.", "context": ["앞 줄"]}  # fmt: skip
+    assert player.action(payload, "line")["stale"] is True and asked == []
+    payload["token"] = server._visual_lifetime_token
+    got = player.action(payload, "line")
+    assert got == {"ok": True, "english": "The mudflat is in sight."}
+    assert asked == [("갯펄이 보인다.", ["앞 줄"], f"gemini:{server.raw.translation_model()}")]
+    assert player.action({**payload, "context": [1]}, "line")["ok"] is False and len(asked) == 1
+    assert "tl_translate_line" in [f.__name__ for f in player.server_functions()]
+    js = PLAYER_JS
+    assert 'cueButton("cue-en-ask", "이 줄 영어 번역",' in js
+    assert '"cue-en-ask": function () { askLineEnglish(cueTargetOf(target)); }' in js
+    assert "next = TL.cueSetEnglish(S.doc, id, got.english, S.settings);" in js
+
+
+def test_clicking_a_video_card_moves_the_timeline_to_that_video() -> None:
+    """W-112(D186, 사용자 지시 「영상 목록에서 영상을 클릭하면 타임라인의 그 영상 위치로 이동」) —
+    카드를 누르면 재생기가 그 원본의 첫 클립을 고르고 플레이헤드 · 레인을 옮긴다(문서는 그대로).
+    타임라인에 없는 원본이면 넣는 길을 말한다."""
+    from ui import ui_facade
+
+    facade = Path(ui_facade.__file__).read_text(encoding="utf-8")
+    jump = "if (chosen && window.__vlTimelineJump) { window.__vlTimelineJump(chosen.sourceId); }"
+    assert jump in facade
+    js = PLAYER_JS
+    body = js[js.index("W.__vlTimelineJump = function (sourceId) {") :]
+    body = body[: body.index("  };")]
+    assert "navTo(span.outStart);" in body and "S.sel = span.index;" in body
+    assert "타임라인에 없습니다" in body and "change(" not in body
+
+
+def test_english_is_an_option_and_is_checked_before_the_final_output() -> None:
+    """W-112(D186, 사용자 지시 「영어자막도 출력전에 확인」 · 「옵션으로 켜고 끌 수 있도록」) —
+    「영상에 넣을 자막」의 「한국어 + 영어」가 영어를 켠다: 영어 열 · 자막 겹에 영어가 보이고, 다른
+    고름이면 겹에 영어가 없다. 최종출력은 영어가 없는 보이는 줄이 있으면 렌더하지 않고 「영어
+    만들기」를 가리킨다(최종출력은 사지 않는다). 「영어 만들기」는 겹쳐 걸지 않는다."""
+    js = PLAYER_JS
+    assert 'return !!pick && pick.value === "ko-en";' in js
+    assert 'burn.addEventListener("change", onBurnChange);' in js
+    assert "setTranslation(englishOn());" in js and "restoreBurn();" in js
+    assert 'if (!englishOn()) { return ""; }' in js
+    assert 'if (payload.burn === "ko-en" && !englishReady()) { return; }' in js
+    assert 'return kind !== "edited" && kind !== "saved";' in js
+    assert "if (S.translating) {" in js and "S.translating = null;" in js
+    assert "「최종출력」을 누르세요." in js
+    # 번역은 「영어 만들기」만 산다 — 최종출력의 관문은 옮기지 않고 그 단추를 가리킨다.
+    gate = js[js.index("function englishReady() {") : js.index("function translate() {")]
+    assert "translate(" not in gate and "「영어 만들기」를 눌러 옮기고" in gate
+    page = timeline_player_html(client_model("sig", "tok", _opened(), _media(), TIERS))
+    assert "영어 자막을 켭니다" in page
+
+
 def test_one_screen_is_the_default_and_the_keys_live_in_the_top_bar_sheet() -> None:
     """W-102(D175, 사용자 지시 「한화면에서 보이도록 · 단축키는 오른쪽 위 단추에 몰아서」) — 맞춤은
     기억이 없으면 켜지고, 맞춤이면 재생기가 두 열로 덱 남은 높이를 받는다 — 파형 레인이 최소
@@ -788,42 +859,31 @@ def test_the_viewer_moves_and_scales_captions_like_capcut() -> None:
     assert ">최종출력</button>" in page
 
 
-def test_final_output_with_english_buys_the_translation_only_when_it_is_missing(
+def test_final_output_never_buys_a_translation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """W-108(D182) — 「한국어 + 영어」 최종출력은 그 리비전 글의 번역이 없으면 Gemini 연결을 넘긴다
-    (누름이 승인 — 유료). 이미 옮긴 글이면 연결을 묻지 않는다. 연결이 없으면 까닭을 값으로
-    답한다."""
-    import gradio as gr
-
+    """W-112(D186, 사용자 확인 「영어 자막 만들기 눌러야지만 영어자막 번역」) — 최종출력은
+    「한국어 + 영어」여도 Gemini 연결을 묻지도 넘기지도 않는다. 영어는 「영어 만들기」만 옮기고,
+    화면이 영어가 다 있는지 본 뒤에만 「한국어 + 영어」를 건다(D182를 뒤집었다)."""
     server, _root, signature = _server(tmp_path)
     player = server._timeline_player
-    clients: list[object] = []
+    shared: list[tuple[Any, ...]] = []
 
-    def share(_r: Path, _t: str, _v: int, burn: str, client: object = None) -> Any:
-        clients.append(client)
+    def share(_r: Path, timeline_id: str, revision: int, burn: str, *rest: object) -> Any:
+        shared.append((timeline_id, revision, burn, rest))
         return SimpleNamespace(job_id="s1")
 
+    def no_transport() -> Any:
+        raise AssertionError("최종출력이 번역 연결을 물었다")
+
     monkeypatch.setattr(server.raw, "start_timeline_share", share)
-    monkeypatch.setattr(server.raw, "timeline_korean_srt", lambda *_a: tmp_path / "k.srt")
-    monkeypatch.setattr(server.raw, "srt_translation_cached", lambda _r, _s: False)
-    transport = SimpleNamespace(semantic_client=lambda model: f"gemini:{model}")
-    monkeypatch.setattr(server, "_live_transport_for_action", lambda: transport)
+    monkeypatch.setattr(server, "_live_transport_for_action", no_transport)
     payload = {"signature": signature, "token": server._visual_lifetime_token,
                "timelineId": "t1", "revision": 5, "burn": "ko-en"}  # fmt: skip
-    got = player.action(payload, "render")
-    assert got == {"ok": True, "jobId": "s1", "translating": True}
-    assert clients == [f"gemini:{server.raw.translation_model()}"]
-    assert player.action({**payload, "burn": "ko"}, "render")["translating"] is False
-    assert clients[-1] is None
-
-    def no_key() -> Any:
-        raise gr.Error("키가 없다")
-
-    monkeypatch.setattr(server, "_live_transport_for_action", no_key)
-    refused = player.action(payload, "render")
-    assert refused["ok"] is False and "키가 없다" in str(refused["error"])
-    assert "영어 번역(Gemini, 유료)" in PLAYER_JS
+    assert player.action(payload, "render") == {"ok": True, "jobId": "s1"}
+    assert player.action({**payload, "burn": "ko"}, "render") == {"ok": True, "jobId": "s1"}
+    assert shared == [("t1", 5, "ko-en", ()), ("t1", 5, "ko", ())]
+    assert "영어 번역(Gemini, 유료)" not in PLAYER_JS
 
 
 def test_a_refused_final_output_always_answers_and_is_logged(
@@ -836,14 +896,11 @@ def test_a_refused_final_output_always_answers_and_is_logged(
 
     server, _root, signature = _server(tmp_path)
     player = server._timeline_player
-    monkeypatch.setattr(server.raw, "timeline_korean_srt", lambda *_a: tmp_path / "k.srt")
-    monkeypatch.setattr(server.raw, "srt_translation_cached", lambda _r, _s: False)
 
-    def unpriced(model: str) -> object:
-        raise AnalysisApprovalError(f"{model} 가격 미정")
+    def unpriced(*_args: object) -> object:
+        raise AnalysisApprovalError("libass 가격 미정")
 
-    transport = SimpleNamespace(semantic_client=unpriced)
-    monkeypatch.setattr(server, "_live_transport_for_action", lambda: transport)
+    monkeypatch.setattr(server.raw, "start_timeline_share", unpriced)
     warned: list[str] = []
     monkeypatch.setattr(server, "_serve_warn", warned.append)
     payload = {"signature": signature, "token": server._visual_lifetime_token,

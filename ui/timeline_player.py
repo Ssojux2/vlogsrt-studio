@@ -33,9 +33,7 @@ PLAYER_ROOT_ID = "tl-root"
 TAB_LABEL = "원본 범위 타임라인"
 BURN_NONE = "none"
 """「번인 캡션: 없음」 — 예전 렌더 그대로(`timeline_share.BURN_NONE`과 같다, 시험이 대조한다)."""
-BURN_ENGLISH = "ko-en"
-"""「한국어 + 영어」 — 번역이 없으면 최종출력이 Gemini로 옮긴다(W-108, D182)."""
-REFUSAL_LOGGED = {"render": "최종출력", "translate": "영어 만들기"}
+REFUSAL_LOGGED = {"render": "최종출력", "translate": "영어 만들기", "line": "줄 영어 번역"}
 """거절을 서버 로그(활동 띠 · 「기록」)에도 남기는 요청 — 화면 상태 줄 하나로는 놓치기 쉽다."""
 ANSWERED_ERRORS = (ValueError, TypeError, KeyError, OSError)
 """서버 함수가 500 대신 화면 글로 돌려주는 그 밖의 예외."""
@@ -215,7 +213,8 @@ def timeline_player_html(model: dict[str, Any] | None) -> str:
             '<option value="none">없음 — 렌더만</option>'
             '<option value="ko">한국어</option>'
             '<option value="ko-en"'
-            ' title="영어 번역이 없으면 최종출력할 때 Gemini로 옮깁니다(유료)">'
+            ' title="영어 자막을 켭니다 — 영어 열과 화면 자막에 영어가 보입니다. 영어는 자막 칸의'
+            ' 「영어 만들기」로만 옮기고(유료), 영어가 없는 줄이 있으면 최종출력하지 않습니다">'
             "한국어 + 영어</option></select></label>"
             '<button type="button" data-tl="render" id="tl-render" class="tl-primary"'
             ' title="저장한 타임라인을 원본에서 한 번 렌더하고, 고르면 자막을 입힌다(무료 로컬)">'
@@ -692,6 +691,9 @@ class TimelinePlayer:
         def tl_style(payload: dict[str, object]) -> dict[str, object]:
             return self.action(payload, "style")
 
+        def tl_translate_line(payload: dict[str, object]) -> dict[str, object]:
+            return self.action(payload, "line")
+
         return [
             tl_media,
             tl_prepare,
@@ -704,6 +706,7 @@ class TimelinePlayer:
             tl_english,
             tl_translate,
             tl_style,
+            tl_translate_line,
         ]
 
     def action(self, payload: dict[str, object], kind: str) -> dict[str, object]:
@@ -718,7 +721,7 @@ class TimelinePlayer:
 
         try:
             root = owner._require_current_selection(owner._serve_str(payload, "signature") or None)
-            if kind in ("prepare", "save", "render", "add", "translate", "style"):
+            if kind in ("prepare", "save", "render", "add", "translate", "style", "line"):
                 owner._require_workbench_token(payload, owner._visual_lifetime_token, TAB_LABEL)
         except gr.Error as error:
             return fail(error, stale=True)
@@ -736,6 +739,8 @@ class TimelinePlayer:
                 return self._translate(root, timeline_id, payload)
             if kind == "style":
                 return self._style(root, payload)
+            if kind == "line":
+                return self._translate_line(root, payload)
             if kind == "wave":
                 source_id = owner._serve_str(payload, "sourceId")
                 wave = owner.raw.timeline_waveform(root, source_id)
@@ -814,6 +819,20 @@ class TimelinePlayer:
         saved = self.owner.raw.save_subtitle_burn_style(root, mapping)
         return {"ok": True, "style": style_payload(saved)}
 
+    def _translate_line(self, root: Any, payload: dict[str, object]) -> dict[str, object]:
+        """번역 모드의 「이 줄 영어 번역」(W-112, D186) — 한 줄을 옮겨 영어를 돌려준다(유료 · 누름이
+        승인). 앞 줄들은 맥락이다. 화면이 받은 영어를 고친 영어(D166)로 문서에 넣는다."""
+        korean = payload.get("text")
+        context = payload.get("context", [])
+        lines = context if isinstance(context, list) else None
+        texts = lines is not None and all(isinstance(line, str) for line in lines)
+        if not isinstance(korean, str) or lines is None or not texts:
+            raise ValueError("줄 영어 번역 요청의 모양이 틀렸습니다(한국어 · 앞 줄).")
+        raw = self.owner.raw
+        client = self.owner._live_transport_for_action().semantic_client(raw.translation_model())
+        english = raw.timeline_translate_line(root, korean, lines, client)
+        return {"ok": True, "english": english}
+
     def _translate(
         self, root: Any, timeline_id: str | None, payload: dict[str, object]
     ) -> dict[str, object]:
@@ -848,14 +867,7 @@ class TimelinePlayer:
         if burn == BURN_NONE:
             handle = self.owner.raw.start_timeline_render(root, timeline_id, revision)
             return {"ok": True, "jobId": handle.job_id}
-        client = self._translator(root, timeline_id, revision) if burn == BURN_ENGLISH else None
-        handle = self.owner.raw.start_timeline_share(root, timeline_id, revision, burn, client)
-        return {"ok": True, "jobId": handle.job_id, "translating": client is not None}
-
-    def _translator(self, root: Any, timeline_id: str, revision: int) -> object | None:
-        """「한국어 + 영어」 최종출력(W-108, D182) — 그 리비전 글의 번역이 없으면 Gemini 연결
-        (누름이 승인 · 유료). 이미 옮겼으면 None(무료). 키가 없으면 화면 글(`gr.Error`)이다."""
-        raw = self.owner.raw
-        if raw.srt_translation_cached(root, raw.timeline_korean_srt(root, timeline_id, revision)):
-            return None
-        return self.owner._live_transport_for_action().semantic_client(raw.translation_model())
+        # 최종출력은 번역을 사지 않는다(W-112, D186 — D182를 뒤집었다): 영어는 「영어 만들기」만
+        # 옮기고, 화면이 영어가 다 있는지 본 뒤에만 「한국어 + 영어」를 건다.
+        handle = self.owner.raw.start_timeline_share(root, timeline_id, revision, burn)
+        return {"ok": True, "jobId": handle.job_id}

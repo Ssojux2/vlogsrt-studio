@@ -70,7 +70,7 @@ def _notes(model: dict[str, Any]) -> list[tuple[str, str]]:
     if unseeded:
         notes.append((
             f"넣지 않은 원본 {len(unseeded)}개",
-            f"추천 구간이 없어 넣지 않은 원본: {_names(unseeded)}"
+            f"보통·추천 구간이 없어 넣지 않은 원본: {_names(unseeded)}"
             " — 영상 목록의 카드를 타임라인에 끌어 놓아 넣을 수 있습니다.",
         ))  # fmt: skip
     if seed.get("empty"):

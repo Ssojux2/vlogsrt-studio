@@ -111,6 +111,36 @@ def test_green_is_kept_and_yellow_is_dropped_with_its_reason() -> None:
     assert plan.parts[0].start_frame == 0 and plan.parts[0].end_frame == 120
 
 
+def test_keep_normal_keeps_yellow_and_human_normal_but_not_hold_or_red() -> None:
+    """D186(사용자 결정 「타임라인으로 보낼때 보통, 추천 구간만」) — `keep_normal`이면 자동 노랑과
+    사람 「보통」도 남긴다(추천과 맞닿으면 한 조각). 판정 보류 · 빨강 · 미분석은 그대로 뺀다.
+    지금 설정(`RENDER_SETTINGS`)이 켜고, 클래스 기본값은 예전 규칙(추천만)이다."""
+    assert RENDER_SETTINGS.keep_normal is True and RenderSettings().keep_normal is False
+    keep = RenderSettings(min_part_seconds=F(1), merge_gap_seconds=F(0), keep_normal=True)
+    source = _source(
+        seconds=20,
+        tiers=(
+            _tier(0, 4),
+            _tier(4, 8, tiering.TIER_YELLOW),
+            _tier(8, 11, tiering.TIER_YELLOW, hold=True),
+            _tier(11, 14, tiering.TIER_RED),
+            _tier(14, 17, tiering.TIER_GREEN),
+        ),
+        segments=(_mark(0, 14), _mark(14, 17, override="normal"), _mark(17, 20)),
+    )
+    plan = rp.build_plan([source], keep)
+    assert _parts(plan) == [(F(0), F(8), rp.PART_AUTO_GREEN), (F(14), F(17), rp.PART_AUTO_GREEN)]
+    assert [(start, end) for start, end, _reason in _ranges(plan)] == [
+        (F(8), F(11)),
+        (F(11), F(14)),
+        (F(17), F(20)),
+    ]
+    _require_tiles(plan, [source])
+    assert rp.kept_ranges(source, keep) == tuple(
+        rp.KeptRange(start, end, reason) for start, end, reason in _parts(plan)
+    )
+
+
 def test_a_hold_yellow_keeps_its_hold_flag_in_the_ledger() -> None:
     source = _source(tiers=(_tier(0, 10, tiering.TIER_YELLOW, hold=True),))
     plan = rp.build_plan([source], SETTINGS)

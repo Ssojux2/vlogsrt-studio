@@ -4474,6 +4474,8 @@ VISUAL_BOOTSTRAP_JS = (
         var cardId = node.getAttribute("data-vl-card");
         if (cardId) {
           var chosen = findCard(cardId); selectCard(cardId, true);
+          // 타임라인에서 그 영상의 자리로 간다(W-112, D186) — 재생기가 없으면 아무것도 하지 않는다.
+          if (chosen && window.__vlTimelineJump) { window.__vlTimelineJump(chosen.sourceId); }
           if (chosen && model.autoAnalyzeSelection && state.requestedSource !== chosen.sourceId) {
             var wanted = chosen.sourceId;
             state.requestedSource = wanted;
