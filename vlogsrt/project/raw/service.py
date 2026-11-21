@@ -4214,12 +4214,15 @@ class RawWorkspaceService:
         base_revision: int,
         payload: Mapping[str, Any],
         source_id: str,
+        *,
+        at_end: bool = False,
     ) -> dict[str, Any]:
-        """클립이 없는 원본을 원본 전체 클립으로 넣는다(W-71g) — 처음 넣으면 지금 자막을 심는다."""
+        """클립이 없는 원본을 원본 전체 클립으로 넣는다(W-71g) — 처음 넣으면 지금 자막을 심는다.
+        `at_end`면 타임라인 끝이다(영상 목록에서 끌어 놓기, W-110)."""
         from vlogsrt.project.raw import timeline_edit_io
 
         return timeline_edit_io.add_source_to_timeline(
-            self, root.expanduser(), timeline_id, base_revision, payload, source_id
+            self, root.expanduser(), timeline_id, base_revision, payload, source_id, at_end=at_end
         )
 
     def final_edit_waveform(self, root: Path, export_id: str) -> dict[str, Any]:

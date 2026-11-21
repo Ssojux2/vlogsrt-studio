@@ -2997,8 +2997,10 @@ VISUAL_BOOTSTRAP_JS = (
         var picked = c.id === sel || c.sourceId === curSourceId();
         var cls = "vl-thumb" + (picked ? " vl-thumb-sel" : "") +
           (cardExcluded(info) ? " vl-thumb-ex" : "");
+        // 끌 수 있다(W-110, D184) — 타임라인 끝에 놓으면 그 원본 전체가 클립으로 선다.
         return '<button type="button" class="' + cls + '" data-vl-card="' +
-            esc(c.id) + '" role="option"' + ' title="' + esc(c.sourceName) + '"' +
+            esc(c.id) + '" draggable="true" data-vl-source="' + esc(c.sourceId) + '"' +
+            ' role="option"' + ' title="' + esc(c.sourceName) + '"' +
           ' aria-selected="' + (picked ? "true" : "false") + '">' + cardArt(c) +
           '<span class="vl-thumb-name">' + esc(c.sourceName) + "</span>" +
           '<span class="vl-thumb-meta">' + cardCounts(info) + cardBadge(c, info) + "</span>" +
@@ -4688,6 +4690,17 @@ VISUAL_BOOTSTRAP_JS = (
       // 옛 모델로 사건을 처리하는 일이 없다(듣는이 재사용 금지, A5 실측).
       if (prevRootClick) { root.removeEventListener("click", prevRootClick); }
       root.addEventListener("click", root._vlClick);
+      // 영상 카드를 끌면 원본 아이디를 싣는다(W-110, D184) — 받는 쪽은 타임라인 재생기다.
+      if (root._vlDrag) { root.removeEventListener("dragstart", root._vlDrag); }
+      root._vlDrag = function (ev) {
+        var target = ev && ev.target;
+        var node = target && target.closest ? target.closest("[data-vl-source]") : null;
+        if (!node || !root.contains(node) || !ev.dataTransfer) { return; }
+        var sourceId = node.getAttribute("data-vl-source");
+        ev.dataTransfer.setData("application/x-vlogsrt-source", sourceId);
+        ev.dataTransfer.effectAllowed = "copy";
+      };
+      root.addEventListener("dragstart", root._vlDrag);
       // 누르는 순간(pointerdown) 시각 맞춤 적용·되돌리기 단추면 그때 보이던 제안을 적어 둔다 —
       // 다른 곳을 누르면 지운다(남은 누름이 나중 키보드 승인에 묻어가지 않는다).
       if (root._vlDown) { root.removeEventListener("pointerdown", root._vlDown); }

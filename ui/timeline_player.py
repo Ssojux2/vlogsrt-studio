@@ -32,9 +32,15 @@ PLAYER_BLOCK_ID = "vl-timeline-player"
 PLAYER_ROOT_ID = "tl-root"
 TAB_LABEL = "원본 범위 타임라인"
 BURN_NONE = "none"
+"""「번인 캡션: 없음」 — 예전 렌더 그대로(`timeline_share.BURN_NONE`과 같다, 시험이 대조한다)."""
 BURN_ENGLISH = "ko-en"
 """「한국어 + 영어」 — 번역이 없으면 최종출력이 Gemini로 옮긴다(W-108, D182)."""
-"""「번인 캡션: 없음」 — 예전 렌더 그대로(`timeline_share.BURN_NONE`과 같다, 시험이 대조한다)."""
+REFUSAL_LOGGED = {"render": "최종출력", "translate": "영어 만들기"}
+"""거절을 서버 로그(활동 띠 · 「기록」)에도 남기는 요청 — 화면 상태 줄 하나로는 놓치기 쉽다."""
+ANSWERED_ERRORS = (ValueError, TypeError, KeyError, OSError)
+"""서버 함수가 500 대신 화면 글로 돌려주는 그 밖의 예외."""
+PLACE_END = "end"
+"""「원본 넣기」의 자리 — 타임라인 끝(끌어 놓기, W-110). 없으면 촬영 차례 자리다."""
 JOB_ENDED = frozenset({"succeeded", "failed", "cancelled"})
 """끝난 작업 상태 — 렌더 작업을 묻는 `tl_job`이 끝을 알린다."""
 PLAYER_JS = (
@@ -235,7 +241,8 @@ def timeline_player_html(model: dict[str, Any] | None) -> str:
             '<select id="tl-add-pick" class="tl-add-pick" aria-label="클립이 없는 원본" hidden>'
             "</select>"
             '<button type="button" data-tl="add-source" id="tl-add" hidden'
-            ' title="고른 원본 전체를 촬영 차례 자리에 클립으로 넣는다">원본 넣기</button>'
+            ' title="고른 원본 전체를 촬영 차례 자리에 클립으로 넣는다 — 영상 목록의 카드를'
+            ' 레인에 끌어 놓으면 타임라인 끝에 넣는다">원본 넣기</button>'
             '<button type="button" data-tl="trim-start"'
             ' title="클립 앞을 커서로 (⌥[)">앞 ⌥[</button>'
             '<button type="button" data-tl="trim-end" title="클립 뒤를 커서로 (⌥])">뒤 ⌥]</button>'
@@ -711,7 +718,10 @@ class TimelinePlayer:
         owner = self.owner
 
         def fail(error: object, *, stale: bool = False) -> dict[str, object]:
-            return {"ok": False, "error": owner._serve_error(error), "stale": stale}
+            message = owner._serve_error(error)
+            if kind in REFUSAL_LOGGED:
+                owner._serve_warn(f"{REFUSAL_LOGGED[kind]}을 걸지 못했다: {message}")
+            return {"ok": False, "error": message, "stale": stale}
 
         try:
             root = owner._require_current_selection(owner._serve_str(payload, "signature") or None)
@@ -755,8 +765,10 @@ class TimelinePlayer:
             if missing:
                 owner.raw.start_source_preview(root, asset_ids=missing)
             return {"ok": True, "started": list(missing)}
-        except (self.service_error, gr.Error, ValueError, TypeError, KeyError, OSError) as error:
+        except (self.service_error, gr.Error, RuntimeError, *ANSWERED_ERRORS) as error:
             # gr.Error — 「영어 만들기」의 연결 없음(키 없음) 같은 화면 글도 값으로 돌려준다.
+            # RuntimeError — 연결의 승인 오류(`AnalysisApprovalError`)도 화면 글이다: 예전에는
+            # 서버 함수 밖으로 새어 단추가 아무 말 없이 멈췄다.
             return fail(error)
 
     def _save(
@@ -775,14 +787,18 @@ class TimelinePlayer:
     def _add(
         self, root: Any, timeline_id: str | None, payload: dict[str, object]
     ) -> dict[str, object]:
-        """클립이 없는 원본을 넣는다(W-71g) — 서버가 지금 자막을 심어 새 리비전으로 쓴다."""
+        """클립이 없는 원본을 넣는다(W-71g) — 서버가 지금 자막을 심어 새 리비전으로 쓴다.
+        `place`가 「end」면 촬영 차례 자리 대신 타임라인 끝이다(영상 목록에서 끌어 놓기, W-110)."""
         base = payload.get("baseRevision")
         document = payload.get("doc")
         source_id = self.owner._serve_str(payload, "sourceId")
         shape = isinstance(base, int) and not isinstance(base, bool) and isinstance(document, dict)
         if timeline_id is None or not shape or not source_id:
             raise ValueError("원본 넣기 요청의 모양이 틀렸습니다(타임라인 · 리비전 · 문서 · 원본).")
-        result = self.owner.raw.timeline_add_source(root, timeline_id, base, document, source_id)
+        at_end = self.owner._serve_str(payload, "place") == PLACE_END
+        result = self.owner.raw.timeline_add_source(
+            root, timeline_id, base, document, source_id, at_end=at_end
+        )
         return {"ok": True, **result}
 
     def _job(self, root: Any, payload: dict[str, object]) -> dict[str, object]:

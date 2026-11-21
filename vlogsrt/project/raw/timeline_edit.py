@@ -853,21 +853,26 @@ def add_source(
     source_id: str,
     transcript: tuple[str, Sequence[render_plan.SourceCue]],
     settings: FinalEditSettings = FINAL_EDIT_SETTINGS,
+    *,
+    at_end: bool = False,
 ) -> Seeded:
     """클립이 없는 원본을 원본 전체 클립 하나로 촬영 차례 자리에 넣는다(W-71g).
 
     같은 원본은 붙어 있어야 하므로 자리는 사실의 원본 차례로 정한다 — 차례가 뒤인 원본의 첫
-    클립 앞, 없으면 끝. 한 번도 심지 않은 원본만 `transcript`(리비전, 원본 자막)를 `seed`와 같은
-    규칙으로 심는다 — 이미 심은 원본(클립을 다 지운 것)은 자막과 리비전이 문서에 그대로 있다.
+    클립 앞, 없으면 끝. `at_end`면 차례와 무관하게 타임라인 끝이다(영상 목록에서 끌어 놓기,
+    W-110 · D184 — 다른 원본끼리의 차례는 검사가 묻지 않는다). 한 번도 심지 않은 원본만
+    `transcript`(리비전, 원본 자막)를 `seed`와 같은 규칙으로 심는다 — 이미 심은 원본(클립을 다
+    지운 것)은 자막과 리비전이 문서에 그대로 있다.
     """
     source = _source(document.facts, source_id)
     if any(clip.source_id == source_id for clip in document.clips):
         raise TimelineEditError(f"원본 {source_id}에는 이미 클립이 있다 — 원본 띠로 늘리세요")
     order = _source_order(document.facts)
-    at = next(
-        (i for i, c in enumerate(document.clips) if order[c.source_id] > order[source_id]),
-        len(document.clips),
-    )
+    at = len(document.clips)
+    if not at_end:
+        at = next(
+            (i for i, c in enumerate(document.clips) if order[c.source_id] > order[source_id]), at
+        )
     clips = (*document.clips[:at], Clip(source_id, 0, source.frame_count), *document.clips[at:])
     placed = _with_clips(document, clips)
     if source_id in dict(document.seeded):
