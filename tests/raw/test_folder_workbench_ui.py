@@ -53,6 +53,7 @@ from ui.workspace_service import (  # noqa: E402
 )
 from vlogsrt.project.raw import render_export, render_plan  # noqa: E402
 from vlogsrt.project.raw import service as raw_service  # noqa: E402
+from vlogsrt.project.raw.config import TRANSLATION  # noqa: E402
 from vlogsrt.project.raw.models import IngestError  # noqa: E402
 
 TERMINAL = frozenset({"succeeded", "failed", "cancelled"})
@@ -488,7 +489,7 @@ def test_the_convert_button_takes_a_client_only_when_something_is_untranslated(
     cached[0] = True
     result, _reply = server.srt_english_view(signature, str(srt))
     assert "저장된 번역 사용(무료)" in result
-    assert seen == ["client:gemini-3.8-flash", None]
+    assert seen == [f"client:{TRANSLATION.model}", None]  # 번역 모델은 설정에서 온다(D187)
 
 
 @dataclass(frozen=True)

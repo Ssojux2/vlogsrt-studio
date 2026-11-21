@@ -1900,7 +1900,10 @@ class TranslationSettings:
     실리고(바꾸면 다시 번역한다), 어느 분석 지문·결제 열쇠·등급·한국어 자막에도 없다. 줄 나눔은
     내보낼 때만 한다."""
 
-    model: str = GEMINI_FLASH_ANALYSIS_PROFILE.model
+    model: str = GEMINI_HYDROGEN_ANALYSIS_PROFILE.model
+    """번역 모델 — Gemini 4 Hydrogen(D187, 사용자 지시 2026-11-21 「번역도 Hydrogen이」). 모델이
+    번역 캐시 열쇠에 실려 예전 3.8 Flash 번역은 맞지 않는다 — 「영어 만들기」로 다시 산다(사용자
+    결정). 고친 영어(D166)는 문서에 있어 그대로다."""
     prompt_revision: str = "translation/v1"
     batch_lines: int = 150
     """한 요청에 옮길 줄 수 — 긴 영상은 이만큼씩 나눠 묻는다(응답 한도 안에 들게)."""
