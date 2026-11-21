@@ -37,6 +37,8 @@ console.log(JSON.stringify([
   K.match(T, ev("KeyQ"), "captions", false),
   K.match(T, ev("KeyB"), "timeline", false),
   K.match(T, ev("KeyB"), "captions", false),
+  K.match(T, ev("KeyB", { metaKey: true }), "captions", false),
+  K.match(T, ev("KeyB", { ctrlKey: true }), "captions", true),
 ]));
 """
 
@@ -72,6 +74,9 @@ def test_the_pane_and_exact_modifiers_pick_one_action(tmp_path: Path) -> None:
         None,
         "tool-blade",
         None,
+        # ⌘B는 어디서나 · 자막 글 칸 안에서도 자르기다(W-112, D186).
+        "blade",
+        "blade",
     ]
 
 

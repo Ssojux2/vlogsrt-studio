@@ -1750,6 +1750,9 @@ class RenderSettings:
       자리가 노는 것을 막는다. 계획(조각·출력 위치·SRT·보고서의 `parts`)은 그대로이고, 원본과
       시퀀스 레이트가 같고 프레임이 1:1인 조각만 나눈다(레이트 변환 조각은 통째로). 0이면 나누지
       않는다(예전 그대로).
+    - `keep_normal`(D186): 보통(노랑 — 판정 보류는 빼고)과 사람이 「보통」으로 정한 조각도 남긴다.
+      끄면 추천(초록 · 사람 추천)만이다(예전 규칙, 클래스 기본값). **사용자 결정**(2026-11-21
+      「타임라인으로 보낼때 보통, 추천 구간만」) — `RENDER_SETTINGS`가 켠다.
     """
 
     min_part_seconds: Fraction = Fraction(1)
@@ -1776,6 +1779,7 @@ class RenderSettings:
     한 번 더 하고 그 꼴은 그 실행 동안 소프트웨어로. 검증(프레임 수 · 격자)은 그대로다."""
     priority: int = 10
     piece_max_seconds: Fraction = Fraction(30)
+    keep_normal: bool = False
 
     def __post_init__(self) -> None:
         problems = (
@@ -1843,8 +1847,9 @@ def _render_codec_problems(settings: RenderSettings) -> list[str]:
     return problems
 
 
-RENDER_SETTINGS = RenderSettings()
-"""지금 쓰는 초안 렌더 설정 — 계획(`render_plan.build_plan`)과 렌더러의 기본값이다."""
+RENDER_SETTINGS = RenderSettings(keep_normal=True)
+"""지금 쓰는 초안 렌더 설정 — 계획(`render_plan.build_plan`)과 렌더러의 기본값이다. 「타임라인으로
+보내기」와 레일의 「내보낼 부분」은 보통·추천 구간을 남긴다(D186)."""
 
 
 @dataclass(frozen=True, slots=True)

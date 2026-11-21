@@ -75,7 +75,7 @@ def test_the_summary_names_what_was_left_out_and_escapes_it() -> None:
     assert "클립 3개" in page and "자막 4/5줄 보임" in page and "3.0초" in page
     assert "&lt;B&gt;.mp4" in page and "<B>" not in page
     assert "C.mp4 — unsupported_grid" in page
-    assert "추천 구간이 없어 넣지 않은 원본: D.mp4" in page
+    assert "보통·추천 구간이 없어 넣지 않은 원본: D.mp4" in page
     assert "빈 자막 2줄" in page and "1줄을 원본 안으로" in page
     assert timeline_summary_html(None) == ""
 
@@ -88,7 +88,7 @@ def test_the_summary_is_one_line_when_nothing_was_left_out() -> None:
     assert "title=" not in page
     noted = timeline_summary_html(_model(seed={"unseeded": [{"name": "D.mp4"}, {"name": "E.mp4"}]}))
     assert "<ul" not in noted and ">⚠ 넣지 않은 원본 2개</span>" in noted
-    assert 'title="추천 구간이 없어 넣지 않은 원본: D.mp4, E.mp4' in noted
+    assert 'title="보통·추천 구간이 없어 넣지 않은 원본: D.mp4, E.mp4' in noted
 
 
 def test_a_successful_send_stays_in_the_window_with_the_timeline_deck(

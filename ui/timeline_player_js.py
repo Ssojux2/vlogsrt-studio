@@ -22,7 +22,8 @@ PLAYER_APP_JS = r"""
       deck: 0, playing: false, loopGen: 0, media: {}, status: "", statusError: false,
       pollGen: 0, sel: 0, cursor: null, drag: null, dirty: false, saving: false,
       history: { past: [], future: [] }, tool: "select", skimOn: true, skimX: null,
-      dropAt: null, dropView: null };
+      dropAt: null, dropView: null, translating: null,
+      lineAsking: null };
   }
   S.server = server;
   var POLL_MS = 2000;
@@ -89,8 +90,9 @@ PLAYER_APP_JS = r"""
       S.lane = null;
     }
     bindDom();
+    restoreBurn();
     restoreTranslation();
-    // 자막 겹은 번역 모드와 상관없이 영어 줄을 보인다(W-98, D173) — 찾기는 무료 읽기다.
+    // 영어를 미리 찾아 둔다(무료 읽기) — 자막 겹은 영어 자막이 켜졌을 때만 보인다(W-112, D186).
     if (!S.english) { askEnglish(); }
     // 뷰어 하나(W-86b) — 화면(.tl-stage)을 위 덱 뷰어 칸으로 옮긴다(노드째, 청취자 그대로).
     if (W.__vlWindow && W.__vlWindow.adoptProgram) { W.__vlWindow.adoptProgram(S.rootEl); }
@@ -503,6 +505,7 @@ PLAYER_APP_JS = r"""
     });
   }
   function overlayEnglish(cue) {
+    if (!englishOn()) { return ""; }
     var label = englishLabel(cue[0], cue[4]);
     return label.kind === "edited" || label.kind === "saved" ? label.text : "";
   }
@@ -529,7 +532,7 @@ PLAYER_APP_JS = r"""
     // 화면에서 모양을 고칠 때(W-107) 플레이헤드 아래 자막이 없으면 예시 줄로 잡을 것을 보인다.
     if (!cues.length && S.styling) { cues = [[null, null, 0, 0, STYLE_SAMPLE[0]]]; }
     cues.forEach(function (cue) {
-      var english = cue[0] === null ? STYLE_SAMPLE[1] : overlayEnglish(cue);
+      var english = cue[0] === null ? (englishOn() ? STYLE_SAMPLE[1] : "") : overlayEnglish(cue);
       if (cue[4]) {
         overlay.appendChild(overlayLine("tl-ov-ko", cue[4], style.font_px * unit,
           style.outline_px * unit, style.text_color));
@@ -810,6 +813,19 @@ PLAYER_APP_JS = r"""
       toggle.addEventListener("click", function (ev) {
         ev.stopPropagation();
         setStyling(!S.styling);
+      });
+    }
+    // ⌘B(Ctrl+B)는 키가 재생기 밖(본문 · 위로 옮긴 뷰어 · 영상 목록)에 있어도 자른다(W-112, D186).
+    // 재생기 안의 키는 onKey가 먼저 받아 멈추므로 여기에 오지 않는다. 글 칸 안은 건드리지 않는다.
+    if (!W.__tlBladeKey) {
+      W.__tlBladeKey = true;
+      W.document.addEventListener("keydown", function (ev) {
+        var mod = ev.metaKey || ev.ctrlKey;
+        if (!mod || ev.code !== "KeyB" || ev.shiftKey || ev.altKey) { return; }
+        if (ev.defaultPrevented) { return; }
+        if (!S.doc || !S.rootEl || !S.rootEl.isConnected || editable(ev.target)) { return; }
+        ev.preventDefault();
+        clipOp("blade");
       });
     }
     if (!W.__tlStyleEsc) {
@@ -1739,6 +1755,43 @@ PLAYER_APP_JS = r"""
     change(next, (value.trim() ? "영어 고치기 " : "고친 영어 지우기 ") + id);
     paint();
   }
+  // 「이 줄 영어 번역」(W-112, D186) — 고른 줄 하나를 Gemini로 옮겨(유료 · 누름이 승인) 고친
+  // 영어(D166)로 넣는다. 앞의 보이는 줄들을 맥락으로 싣는다. 받는 사이 다른 줄로 가도 그 줄에
+  // 넣는다.
+  function askLineEnglish(id) {
+    commitText();
+    var cue = id ? projectedCue(id) : null;
+    if (!cue || !cue[4] || !cue[4].trim()) { say("옮길 한국어가 없습니다.", true); return; }
+    if (S.lineAsking) { say("한 줄을 옮기는 중입니다…", false); return; }
+    var at = S.proj.cues.map(function (row) { return row[0]; }).indexOf(id);
+    var context = S.proj.cues.slice(0, Math.max(at, 0)).map(function (row) { return row[4]; });
+    S.lineAsking = id;
+    say("이 줄을 영어로 옮기는 중(Gemini, 유료)…", false);
+    var asked = S.timelineId;
+    S.server.tl_translate_line({ signature: S.signature, token: S.token, text: cue[4],
+      context: context }).catch(function () {
+      return { ok: false, error: "서버가 답하지 않았습니다." };
+    }).then(function (got) {
+      S.lineAsking = null;
+      if (asked !== S.timelineId || !S.doc) { return; }
+      if (!got || !got.ok) {
+        say("이 줄을 옮기지 못했습니다 — " + ((got && got.error) || "까닭을 받지 못했습니다."),
+          true);
+        return;
+      }
+      if (!projectedCue(id)) { say("옮기는 사이 그 자막이 사라졌습니다.", true); return; }
+      var next;
+      try {
+        next = TL.cueSetEnglish(S.doc, id, got.english, S.settings);
+      } catch (error) {
+        if (!TL.isError(error)) { throw error; }
+        say("영어 넣기 — 하지 못했습니다: " + error.message, true);
+        return;
+      }
+      change(next, "영어 번역 " + id);
+      paintCueEditor(true);
+    });
+  }
   function onEnglishKey(ev) {
     if (ev.code === "Escape" || (ev.code === "Enter" && (ev.metaKey || ev.ctrlKey))) {
       ev.preventDefault();
@@ -1766,8 +1819,9 @@ PLAYER_APP_JS = r"""
     if (button) { button.setAttribute("aria-pressed", S.translation ? "true" : "false"); }
     if (S.translation && !S.english) { askEnglish(); }
   }
-  function toggleTranslation() {
-    S.translation = !S.translation;
+  function toggleTranslation() { setTranslation(!S.translation); }
+  function setTranslation(on) {
+    S.translation = on;
     try { W.localStorage.setItem(TRANSLATION_KEY, S.translation ? "on" : ""); }
     catch (error) { /* 기억은 편의일 뿐 */ }
     var button = $("tl-translation");
@@ -1963,7 +2017,10 @@ PLAYER_APP_JS = r"""
       '<textarea id="tl-cue-en-text" data-cue="' + esc(id) + '" spellcheck="true" lang="en"' +
       ' aria-label="영어 — 고치면 이 줄의 영어로 씁니다. ⌘Enter·Esc로 확정"' +
       ' placeholder="영어"></textarea>' +
-      '<span id="tl-cue-en" class="tl-cue-en-note"></span></div>' +
+      '<span id="tl-cue-en" class="tl-cue-en-note"></span>' +
+      '<div class="tl-cue-buttons">' + cueButton("cue-en-ask", "이 줄 영어 번역",
+        "이 줄의 한국어를 Gemini로 옮겨 영어 칸에 넣는다(유료 · 누름이 승인) — 앞 줄들은 맥락") +
+      "</div></div>" +
       '<div class="tl-cue-buttons">' +
       cueButton("cue-start", "시작을 여기로 [", "자막 시작을 플레이헤드로") +
       cueButton("cue-end", "끝을 여기로 ]", "자막 끝을 플레이헤드로") +
@@ -2876,6 +2933,7 @@ PLAYER_APP_JS = r"""
     var payload = { signature: S.signature, token: S.token, timelineId: S.timelineId,
       revision: S.baseRevision, burn: burnPick ? burnPick.value : "none" };
     if (S.rendering) { return; }
+    if (payload.burn === "ko-en" && !englishReady()) { return; }
     if (W.__vlServer) { W.__vlServer.wake(true); }
     // 누른 순간 답한다 — 번역 연결 확인 · 리비전 SRT 쓰기가 몇 초 걸릴 수 있다. 답이 오지 않거나
     // 서버 함수가 터져도 상태 줄에 까닭을 남긴다(예전에는 거절이 아무 말 없이 사라졌다).
@@ -2893,7 +2951,6 @@ PLAYER_APP_JS = r"""
         return;
       }
       say("최종출력 중 — 리비전 " + payload.revision + "(렌더" +
-        (got.translating ? " + 영어 번역(Gemini, 유료)" : "") +
         (payload.burn === "none" ? ", 무료 로컬" : " + 자막 입히기") + ") — 활동 띠에서 진행을" +
         " 보고, 끝나면 결과 카드와 초안 폴더에 나옵니다.", false);
       watchRender(got.jobId);
@@ -2903,11 +2960,68 @@ PLAYER_APP_JS = r"""
     var button = $("tl-render");
     if (button) { button.disabled = !!S.rendering; }
   }
+  // ─── 영어 자막 켜고 끄기(W-112, D186) ───────────────────────────
+  // 「영상에 넣을 자막」이 「한국어 + 영어」일 때만 영어가 켜진다 — 영어 열(번역 모드)과 자막 겹에
+  // 영어가 보이고 최종출력이 입힌다. 다른 고름이면 영어를 보이지도 입히지도 않는다. 고름은 이
+  // 브라우저에만 기억한다(편의 — 기억이 없거나 막혀도 「없음」으로 그대로 돈다).
+  var BURN_KEY = "vlogsrt.burnMode";
+  function englishOn() {
+    var pick = $("tl-burn");
+    return !!pick && pick.value === "ko-en";
+  }
+  function restoreBurn() {
+    var pick = $("tl-burn");
+    if (!pick) { return; }
+    var saved = null;
+    try { saved = W.localStorage.getItem(BURN_KEY); } catch (error) { saved = null; }
+    var known = [].some.call(pick.options, function (option) { return option.value === saved; });
+    if (saved && known) { pick.value = saved; }
+  }
+  function onBurnChange() {
+    var pick = $("tl-burn");
+    try { W.localStorage.setItem(BURN_KEY, pick.value); } catch (error) { /* 기억은 편의일 뿐 */ }
+    setTranslation(englishOn());
+    paintOverlay();
+    say(englishOn()
+      ? "영어 자막을 켰습니다 — 영어 열과 화면 자막에서 확인하세요. 영어가 없으면 한국어를 다" +
+        " 고친 뒤 자막 칸의 「영어 만들기」를 누르세요(Gemini, 유료)."
+      : "영어 자막을 껐습니다 — 영어를 보이지도 영상에 넣지도 않습니다.", false);
+  }
+  // 「한국어 + 영어」는 영어를 본 뒤에만 출력한다(W-112, D186 — 사용자 지시 「영어자막도 출력전에
+  // 확인」). 보이는 자막 중 영어(고친 영어 · 저장된 번역)가 없는 줄이 있으면 렌더하지 않고 「영어
+  // 만들기」를 건다(유료 · 누름이 승인, D182). 끝나면 영어 열 · 화면에서 확인하고 다시 누른다.
+  function englishReady() {
+    if (S.translating) {
+      say("영어로 옮기는 중입니다 — 끝나면 확인한 뒤 「최종출력」을 다시 누르세요.", false);
+      return false;
+    }
+    if (!S.english || S.english === "pending") {
+      if (!S.english) { askEnglish(); }
+      say("영어 자막을 찾는 중입니다 — 잠시 뒤 「최종출력」을 다시 누르세요.", false);
+      return false;
+    }
+    var missing = S.proj.cues.filter(function (cue) {
+      if (!cue[4] || !cue[4].trim()) { return false; }
+      var kind = englishLabel(cue[0], cue[4]).kind;
+      return kind !== "edited" && kind !== "saved";
+    }).length;
+    if (!missing) { return true; }
+    setTranslation(true);
+    if (W.__vlWindow && W.__vlWindow.showInspector) { W.__vlWindow.showInspector("analysis"); }
+    say("영어가 없는 자막 " + missing + "줄 — 최종출력하지 않았습니다. 한국어를 다 고친 뒤" +
+      " 자막 칸의 「영어 만들기」를 눌러 옮기고(Gemini, 유료), 영어 열 · 화면 자막에서 확인한 뒤" +
+      " 다시 누르세요.", true);
+    return false;
+  }
   // 「영어 만들기」(W-99, D174) — 저장한 리비전의 자막을 옮긴다(유료 · 누름이 승인, D110).
   // 저장 대기 편집을 먼저 보낸다. 끝나면 영어를 다시 찾아 영어 열·자막 겹에 보인다
   // (같은 글은 다시 사지 않는다).
   function translate() {
     commitText();
+    if (S.translating) {
+      say("영어로 옮기는 중입니다 — 끝나면 영어 열과 화면 자막에 보입니다.", false);
+      return;
+    }
     if (S.conflict) {
       say("저장이 충돌한 채로는 옮기지 않습니다 — 먼저 정리하세요.", true);
       return;
@@ -2920,13 +3034,16 @@ PLAYER_APP_JS = r"""
     var payload = { signature: S.signature, token: S.token, timelineId: S.timelineId,
       revision: S.baseRevision };
     if (W.__vlServer) { W.__vlServer.wake(true); }
+    S.translating = "asking";
     S.server.tl_translate(payload).catch(function () {
       return { ok: false, error: "영어 만들기를 걸지 못했습니다 — 서버가 답하지 않았습니다." };
     }).then(function (got) {
       if (!got || !got.ok) {
+        S.translating = null;
         say((got && got.error) || "영어 만들기를 걸지 못했습니다.", true);
         return;
       }
+      S.translating = got.jobId;
       say("리비전 " + payload.revision + "의 자막을 영어로 옮깁니다 — 끝나면 영어 열과" +
         " 화면 자막에 보입니다.", false);
       watchTranslate(got.jobId);
@@ -2937,14 +3054,15 @@ PLAYER_APP_JS = r"""
     W.setTimeout(function () {
       if (gen !== S.pollGen) { return; }
       S.server.tl_job({ signature: S.signature, jobId: jobId }).then(function (got) {
-        if (gen !== S.pollGen || !got || !got.ok) { return; }
+        if (gen !== S.pollGen || !got || !got.ok) { S.translating = null; return; }
         if (!got.ended) { watchTranslate(jobId); return; }
+        S.translating = null;
         if (got.status !== "succeeded") {
           say("영어를 만들지 못했습니다(" + got.status + ") — 「기록」에서 까닭을 보세요.", true);
           return;
         }
-        say("영어를 만들었습니다 — 한국어 아래 영어 줄로 보이고 공유의 「한국어 + 영어」가 씁니다.",
-          false);
+        say("영어를 만들었습니다 — 영어 열과 화면 자막에서 확인하고(고칠 줄은 영어 칸에서" +
+          " 고칩니다) 「최종출력」을 누르세요.", false);
         askEnglish();
       });
     }, POLL_MS);
@@ -3297,7 +3415,7 @@ PLAYER_APP_JS = r"""
       "force-save": function () { saveNow(true); }, render: render, index: toggleIndex,
       "index-clips": function () { indexTab("clips"); },
       "index-cues": function () { indexTab("cues"); }, translation: toggleTranslation,
-      translate: translate };
+      translate: translate, "cue-en-ask": function () { askLineEnglish(cueTargetOf(target)); } };
     var act = acts[target.getAttribute("data-tl")];
     if (act) { act(); }
   }
@@ -3324,6 +3442,23 @@ PLAYER_APP_JS = r"""
     }
     seek(frame);
   }
+  // 영상 목록의 카드를 누르면(W-112, D186) 타임라인에서 그 원본의 첫 클립으로 간다 — 고르고
+  // 플레이헤드와 레인만 옮긴다(문서는 그대로). 타임라인에 없는 원본이면 넣는 길을 말한다.
+  W.__vlTimelineJump = function (sourceId) {
+    if (!S.doc || !S.spans.length) { return false; }
+    var span = S.spans.filter(function (row) { return row.sourceId === sourceId; })[0];
+    if (!span) {
+      say(nameOf(sourceId) + "은(는) 타임라인에 없습니다 — 카드를 레인에 끌어 놓으면" +
+        " 넣습니다.", false);
+      return false;
+    }
+    if (S.playing) { stopPlayback(); }
+    navTo(span.outStart);
+    S.sel = span.index;
+    say(nameOf(sourceId) + " — 타임라인 " + (span.index + 1) + "번째 클립으로 갔습니다.", false);
+    paint();
+    return true;
+  };
   function onStripDown(ev) {
     if (!S.doc || !S.total) { return; }
     var c = ev.currentTarget;
@@ -3401,6 +3536,11 @@ PLAYER_APP_JS = r"""
     if (indexList && !indexList.__tlBound) {
       indexList.__tlBound = true;
       indexList.addEventListener("pointerdown", onIndexDown);
+    }
+    var burn = $("tl-burn");
+    if (burn && !burn.__tlBound) {
+      burn.__tlBound = true;
+      burn.addEventListener("change", onBurnChange);
     }
     var indexErrors = $("tl-index-errors");
     if (indexErrors && !indexErrors.__tlBound) {

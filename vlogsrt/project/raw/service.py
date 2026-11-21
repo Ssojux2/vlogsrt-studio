@@ -4169,6 +4169,15 @@ class RawWorkspaceService:
 
         return timeline_edit_io.korean_srt(root, timeline_id, revision)
 
+    def timeline_translate_line(
+        self, root: Path, korean: str, context: Sequence[str], client: object
+    ) -> str:
+        """번역 모드의 「이 줄 영어 번역」(W-112, D186) — 한 줄을 Gemini로 옮겨 영어를 돌려준다
+        (유료 · 누름이 승인). 저장하지 않는다 — 화면이 고친 영어로 문서에 넣는다."""
+        from vlogsrt.project.raw import srt_english
+
+        return srt_english.translate_line(self, root.expanduser(), korean, context, client)
+
     def timeline_english(self, root: Path, timeline_id: str) -> dict[str, str]:
         """타임라인 자막의 영어 열(W-87d) — 렌더한 초안들의 저장된 번역을 한국어 글로.
 

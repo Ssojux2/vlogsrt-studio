@@ -90,7 +90,9 @@ PLAYER_KEYMAP: tuple[PlayerKey, ...] = (
     _k("KeyS", "skimming", "스키밍 켜기 · 끄기(올린 자리를 뷰어에)", "S", TIMELINE),
     _k("KeyE", "share", "최종출력(영상에 넣을 자막 칸으로)", "⌘E", mod=True),
     # 타임라인 창(클립 — Final Cut)
-    _k("KeyB", "blade", "자르기(플레이헤드에서 클립 나누기)", "⌘B", TIMELINE, mod=True),
+    # ⌘B는 어디서나 · 자막 글 칸 안에서도 자른다(W-112, D186 — 사용자 지시 「타임라인에서 cmd+b를
+    # 누르면 그 자리가 잘리도록」: 마지막으로 누른 창이 자막이면 받지 않았다).
+    _k("KeyB", "blade", "자르기(플레이헤드에서 클립 나누기)", "⌘B", mod=True, in_text=True),
     # 도구(W-103, D176 — Final Cut A · B): 타임라인 창에서만(자막 창의 A는 Subtitle Edit 시작점).
     _k("KeyA", "tool-select", "선택 도구(클립 고르기 · 끝 끌기)", "A", TIMELINE),
     _k("KeyB", "tool-blade", "자르기 도구(누른 자리에서 자르기)", "B", TIMELINE),

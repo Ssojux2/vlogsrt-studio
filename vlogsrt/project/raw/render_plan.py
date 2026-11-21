@@ -71,6 +71,9 @@ GRID_KINDS = (GRID_UNIFORM, GRID_SNAP, GRID_MAP)
 
 PART_AUTO_GREEN = "auto_green"
 PART_HUMAN_RECOMMENDED = "human_recommended"
+PART_NORMAL = "normal"
+"""남긴 보통 자리(자동 노랑 · 사람 「보통」, D186) — 묶음의 까닭은 사람 추천이 없으면
+`auto_green`이다."""
 PART_TIMELINE = "timeline"
 """원본 범위 타임라인의 클립(W-71e, D130) — 등급이 아니라 사람이 고른 범위다."""
 
@@ -471,7 +474,7 @@ def _covering(rows: Sequence[TierPiece] | Sequence[SegmentMark], point: Fraction
     return None
 
 
-def _slots(source: RenderSource) -> list[_Slot]:
+def _slots(source: RenderSource, keep_normal: bool) -> list[_Slot]:
     extent = source.clock.extent
     tiers, marks = source.tiers or (), source.segments or ()
     edges = {Fraction(0), extent}
@@ -484,7 +487,7 @@ def _slots(source: RenderSource) -> list[_Slot]:
         tier_index, mark_index = _covering(tiers, middle), _covering(marks, middle)
         tier = tiers[tier_index] if tier_index is not None else None
         mark = marks[mark_index] if mark_index is not None else None
-        slots.append(_judge(start, end, tier, mark))
+        slots.append(_judge(start, end, tier, mark, keep_normal))
     return slots
 
 
@@ -497,9 +500,15 @@ def _review_state(mark: SegmentMark | None) -> str:
 
 
 def _judge(
-    start: Fraction, end: Fraction, tier: TierPiece | None, mark: SegmentMark | None
+    start: Fraction,
+    end: Fraction,
+    tier: TierPiece | None,
+    mark: SegmentMark | None,
+    keep_normal: bool,
 ) -> _Slot:
-    """자리 하나의 판정 — 사람이 정한 제외 → 사람 추천 → 사람 보통 → 자동 등급 순서다."""
+    """자리 하나의 판정 — 사람이 정한 제외 → 사람 추천 → 사람 보통 → 자동 등급 순서다.
+
+    `keep_normal`(D186)이면 보통(사람 「보통」 · 판정 보류가 아닌 자동 노랑)도 남긴다."""
     level = tier.tier if tier is not None else None
     state = _review_state(mark)
     slot = _Slot(start, end, False, DROP_UNANALYZED, state, level, tier.hold if tier else False)
@@ -510,12 +519,16 @@ def _judge(
     if mark is not None and mark.override == RECOMMENDED:
         return replace(slot, kept=True, reason=PART_HUMAN_RECOMMENDED)
     if mark is not None and mark.override == _OVERRIDE_NORMAL:
+        if keep_normal:
+            return replace(slot, kept=True, reason=PART_NORMAL)
         return replace(slot, reason=DROP_HUMAN_NORMAL)
     if level == TIER_GREEN:
         return replace(slot, kept=True, reason=PART_AUTO_GREEN)
     if level == TIER_RED:
         seen = mark is not None and mark.human
         return replace(slot, reason=DROP_RED_CONFIRMED if seen else DROP_RED_UNREVIEWED)
+    if level == TIER_YELLOW and keep_normal and not slot.hold:
+        return replace(slot, kept=True, reason=PART_NORMAL)
     return replace(slot, reason=DROP_YELLOW) if level == TIER_YELLOW else slot
 
 
@@ -584,7 +597,7 @@ def _layout_source(
     source: RenderSource, settings: RenderSettings
 ) -> tuple[list[_Kept], list[_Slot], int]:
     """원본 하나 → 남길 조각, 뺀 자리(합치기 전), 짧아서 뺀 조각 수."""
-    slots = _slots(source)
+    slots = _slots(source, settings.keep_normal)
     whole = excluded_reason(source)
     if whole is not None:
         return [], [replace(s, kept=False, reason=whole) for s in slots], 0

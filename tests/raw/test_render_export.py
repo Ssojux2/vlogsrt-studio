@@ -601,7 +601,7 @@ def test_a_source_the_renderer_refuses_is_left_out_and_named_not_blocking(
 def test_nothing_to_keep_is_refused_before_any_folder(trip: Folder) -> None:
     before = sorted(p.name for p in (trip.root / "export").iterdir())
     strict = dataclasses.replace(RENDER_SETTINGS, min_part_seconds=F(100))
-    with pytest.raises(render_export.RenderExportError, match="남길 추천 구간이 없어"):
+    with pytest.raises(render_export.RenderExportError, match="남길 보통·추천 구간이 없어"):
         render_export.export_draft(trip.service, trip.root, settings=strict)
     assert sorted(p.name for p in (trip.root / "export").iterdir()) == before
 

@@ -240,3 +240,29 @@ def test_only_the_english_of_the_current_korean_text_matches(
     assert srt_english.matching_english(service, root, srt) == (second, ())
     second.write_text("손으로 고친 영어", encoding="utf-8")
     assert srt_english.matching_english(service, root, srt) == (None, (second, first))
+
+
+def test_one_line_is_translated_with_its_context_and_nothing_is_saved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W-112(D186) — 번역 모드 「이 줄 영어 번역」: 한 줄만 옮기고 앞 줄들(많아야 `context_lines`)은
+    맥락으로만 싣는다. 번역 문서를 쓰지 않는다(화면이 고친 영어로 넣는다). 빈 글 · 오프라인은
+    요청 전에 닫는다."""
+    service, root = _workspace(tmp_path, monkeypatch)
+    translator = _Translator(echo=True)
+    before = [f"앞 줄 {n}" for n in range(8)]
+    files = sorted(path for path in root.rglob("*") if path.is_file())
+    client = _client(translator)
+    english = service.timeline_translate_line(root, "  갯펄이\n보인다 ", before, client)
+    assert english == "EN 갯펄이 보인다 ok"
+    (sent,) = translator.sent
+    body = json.loads(sent["contents"][0]["parts"][1]["text"])
+    assert body["lines"] == [{"id": srt_english.LINE_ID, "ko": "갯펄이 보인다"}]
+    assert [row["ko"] for row in body["context"]] == before[-5:]
+    assert sorted(path for path in root.rglob("*") if path.is_file()) == files
+    with pytest.raises(raw_service.RawWorkspaceError):
+        service.timeline_translate_line(root, "   ", [], _client(translator))
+    offline, offline_root = _workspace(tmp_path / "off", monkeypatch, online=False)
+    with pytest.raises(raw_service.AnalysisError):
+        offline.timeline_translate_line(offline_root, "바다", [], _client(translator))
+    assert len(translator.sent) == 1
