@@ -176,6 +176,13 @@ D24–D37·D55–D95에 남아 있다.)
    바꾸는 길은 「다시 듣기」뿐이다.** 소리 없는 원본도 1단계에서 엔진을 고정한다(D163).
    **whisper-1·gpt-transcribe에 새로 묻는 코드를 쓰지 마라(D163).** 이미 whisper로 들은 원본은 저장된 세그먼트 시각·
    글자를 **읽기만** 한다 — `timing_provider_for`는 whisper 모델을 `TranscriptionRetired`로 거부한다.
+   **글자는 Hydrogen 글자 귀가 줄 아이디로 다시 들을 수 있다(D187, 2026-11-21 사용자 승인 — W-114로 연결 중).**
+   Gemini 원본의 줄 글자는 Gemini 4 Hydrogen이 같은 청크 WAV를 듣고 **그 줄 아이디에 준 글자**일 수 있다. 시각·
+   경계·줄 아이디·줄 수·차례의 원천은 Transcribe `word_info` 그대로이고 글자 귀는 그것을 못 건드린다 — Hydrogen은
+   단어 시각을 주지 않으며, 그 글에 적힌 시각은 엔진이 잰 시각이 아니다(그것으로 줄을 정하면 D24다). 보낸 줄 아이디와
+   같은 아이디가 꼭 한 번씩 와야 받고, 아니면 그 청크는 Transcribe 글자 그대로 + 까닭이다. 줄이 덮지 않은 시간에
+   들린 말(`extra`)은 시각이 없어 어느 줄에도 붙이지 않고 기록만 한다. Hydrogen은 시간 엔진이 아니다 — 1단계 다른 귀가
+   없다는 D104는 시간 엔진을 두고 한 말이다.
 
 2. **들은 결과(1단계 기록·원본 자막 리비전)는 고치지 않고 새 리비전으로만 바꾼다.** 원본 자막의 줄 시각을 옮기는
    곳은 사람 편집 · 시각 맞춤 적용(`apply_snap`/`revert_snap`) · 빈칸 재전사 넣기(D59 19f)뿐이고, 모두 새 리비전이다.
@@ -197,6 +204,9 @@ D24–D37·D55–D95에 남아 있다.)
    계층(`loops.demote`, `validate`, `mapping`, `gapfill`)과 whisper 옛 엔진(`pipeline`·`repair`·`repetition`·`verify`·
    `refine`·`layout`·`cutpoints`·`evaluate`, D163)은 되살리지 마라 — `check_invariants.py`의 「삭제된 계층」이 검사한다.
    캐시만 읽는 글자 적용(`retext.py`·`raw/word_text.py`)은 계획만 세우는 순수 모듈이고 시각·줄 수를 못 건드린다.
+   **Hydrogen 줄 글자 계획(`raw/hydrogen_text.py`, D187)도 글자를 바꿀 수 있는 곳이다** — 그 줄 아이디에 온 Hydrogen
+   글자로만이고, 계획만 세우는 순수 모듈이며 시각·줄 수·차례를 내지 않는다(어느 클래스에도 시각 칸이 없다 —
+   `check_hydrogen_text_stays_pure`). 「말 없음」(`speech=false`)은 표시일 뿐 줄을 지우거나 비우지 않는다.
 
 6. **시간 엔진에 힌트를 보내지 마라.** Gemini 3.5 Transcribe(D92)에 `prompt`·`keywords`·`custom_vocabulary`·
    `system_instruction`을 보내지 않는다(공급자도 custom_vocabulary와 단어 시각을 함께 받지 않는다 — 옛 whisper가
@@ -392,6 +402,7 @@ python scripts/record_gemini_transcribe.py ...          # Gemini 시간 엔진 �
 | polish / 정리 | 영화 자막 관행으로 **문장부호만** 다듬는다. 글자는 못 지운다(D30) |
 | time engine / 시간 엔진 | 작업대 1단계 원본 자막의 시각을 주는 전사 모델 — Gemini 3.5 Transcribe(단어 시각, D92) 하나다. 원본마다 고정되고 바꾸는 길은 「다시 듣기」뿐이다. whisper-1은 은퇴했다(D163) — 그 엔진으로 들은 원본은 읽기만 한다 |
 | retired / 은퇴 | whisper-1·gpt-transcribe와 그것만 쓰던 기능(옛 CLI·옛 엔진·다른 귀·다시 묻기·D95 단어 배정·W2)을 지웠다는 뜻(D163). 저장된 결과는 읽고, 새 호출은 유료 호출 앞에서 까닭을 대고 닫는다 |
+| hydrogen text ear / Hydrogen 글자 귀 | Gemini 원본 줄의 글자를 Gemini 4 Hydrogen이 같은 청크 WAV로 다시 듣는 일(D187 — W-114로 연결 중). 계획은 `hydrogen_text.py`(순수)의 `plan` — 보낸 줄 아이디와 같은 아이디가 꼭 한 번씩 와야 받고, 모양 틀림·모르는 아이디·겹친 아이디·빠진 줄·빈 글자면 그 청크 전체가 Transcribe 초안 글자 그대로 + 까닭이다. 시각·경계·아이디·줄 수·차례는 Transcribe 그대로다. `speech=false`는 초안 글자를 두고 표시만, `extra`(줄 밖 말)는 시각이 없어 기록만 한다. 시간 엔진이 아니다 |
 | word cue / 단어 묶음 | Gemini 단어 시각을 자막 줄로 묶는 일(`word_cues.py`, 순수). 줄 경계는 엔진이 준 단어 경계에서만 고른다 — 시작 = 첫 시각 단어 시작, 끝 = 단어 끝의 최대값. 단어를 쪼개거나 시각을 만들지 않는다(D92) |
 | suspect / 확인 필요 | 원본 자막 줄의 무료 의심 표시(같은 말 런 · 끝 인사말 · 다른 문자 · 말소리 측정상 없음 · Gemini가 다르게 들음(D88)). **표시만** 한다 — 줄을 지우거나 숨기지 않는다(D59 19e) |
 | asr epoch / 다시 듣기 차례 | 작업대 원본의 내부 전사를 처음부터 다시 사려고 사람이 올리는 수. **0이 아닐 때만** 청크 열쇠·입력 지문·결속·견적에 실린다(D59 19b). 재전사(repair)와 다르다 |

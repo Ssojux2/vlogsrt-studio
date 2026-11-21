@@ -1069,6 +1069,12 @@ WORD_TEXT_VERSION = "word-text/v1"
 가운데가 가까운 줄(같으면 앞). 임계값이 없다. 규칙을 바꾸면 판을 올린다(글자 캐시 열쇠에 실린다,
 W-35b)."""
 
+HYDROGEN_TEXT_PLAN_VERSION = "hydrogen-text-plan/v1"
+"""Hydrogen 글자 귀(W-114a, D187)의 줄 글자 계획 규칙 판 — 보낸 줄 아이디와 같은 아이디가
+꼭 한 번씩 · 어긋나면 청크 전체가 초안 그대로 · `speech=false`는 표시만 · `extra`는 기록만.
+임계값이 없다. 요청 글의 판(`hydrogen-text/v1`, W-114b)과 따로다. 규칙을 바꾸면 판을
+올린다(W-114c가 글자 캐시 열쇠에 싣는다)."""
+
 
 @dataclass(frozen=True)
 class GeminiTextSettings:
