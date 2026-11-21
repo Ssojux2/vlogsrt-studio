@@ -861,6 +861,53 @@ def _word_text_plan_failures(body: str) -> list[str]:
     ]
 
 
+# Hydrogen 글자 귀(W-114a, D187) — 줄은 아이디로만 맞추고 글자만 낸다. 전송·전사·서비스·DB·파일·
+# 조판 계층이나 다른 글자 경로를 알면 계획이 호출·캐시 상태에 기대고, **어느 클래스에든** 시각 칸이
+# 생기면 시각 없는 Hydrogen 글(그 글에 적힌 시각 포함)이 줄의 시각이 된다(규칙 1 — D24의 모양).
+HYDROGEN_TEXT_MODULE = "hydrogen_text.py"
+HYDROGEN_TEXT_MUST_NOT_IMPORT = (
+    *WORD_TEXT_MUST_NOT_IMPORT, "word_text", "gemini_text", "text_ear", "hydrogen_text_io",
+    "translation_io", "source_transcript", "workspace", "pathlib",
+)  # fmt: skip
+HYDROGEN_TEXT_PLAN_CLASS = "LineTextPlan"
+
+
+def check_hydrogen_text_stays_pure() -> list[str]:
+    """D187 — Hydrogen 줄 글자 계획은 순수하고, 어느 클래스에도 시각 칸이 없다."""
+    path = PROJECT_PACKAGE / "raw" / HYDROGEN_TEXT_MODULE
+    if not path.exists():
+        return [f"vlogsrt/project/raw/{HYDROGEN_TEXT_MODULE}: Hydrogen 글자 계층이 사라졌다 (D187)"]
+    body = path.read_text(encoding="utf-8")
+    failures = [
+        f"{HYDROGEN_TEXT_MODULE}: {module}을 import한다 — 줄 글자 계획이 응답 밖에 기댄다 (D187)"
+        for module in _imports(body, HYDROGEN_TEXT_MUST_NOT_IMPORT)
+    ]
+    failures += [
+        f"{HYDROGEN_TEXT_MODULE}:{number}: 파일을 직접 읽거나 쓴다 — 계획은 값만 다룬다 (D187)"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if TIERING_FILE_IO.search(line)
+    ]
+    return failures + _hydrogen_text_class_failures(body)
+
+
+def _hydrogen_text_class_failures(body: str) -> list[str]:
+    classes = [node for node in ast.walk(ast.parse(body)) if isinstance(node, ast.ClassDef)]
+    failures = [
+        f"{HYDROGEN_TEXT_MODULE}: `{node.name}.{item.target.id}` — 줄 글자 계획에 시각 칸이 있다"
+        " (규칙 1, D187)"
+        for node in classes
+        for item in node.body
+        if isinstance(item, ast.AnnAssign)
+        and isinstance(item.target, ast.Name)
+        and item.target.id in WORD_TEXT_TIME_FIELDS
+    ]
+    if not any(node.name == HYDROGEN_TEXT_PLAN_CLASS for node in classes):
+        failures.append(
+            f"{HYDROGEN_TEXT_MODULE}: 줄 글자 계획 `{HYDROGEN_TEXT_PLAN_CLASS}`이 사라졌다 (D187)"
+        )
+    return failures
+
+
 # 작업공간 모드(W-37, D97) — 가로·세로 모드는 표지·흐름 게이트다. 모드 계층이 DB·파일·서비스를
 # 알거나, 타임라인 빌더(`plan`·`render`)가 모드를 받으면 모드가 Final Cut 문서 바이트를 바꾼다.
 WORKSPACE_MODE_MODULE = "workspace_mode.py"
@@ -3260,6 +3307,7 @@ CHECKS = (
     ("글자 교정은 순수하다", check_retext_stays_pure),
     ("Gemini 단어 해석·묶기는 순수하다", check_word_cues_stays_pure),
     ("Gemini 단어 → whisper 줄 글자 배정은 순수하고 글자만 낸다", check_word_text_stays_pure),
+    ("Hydrogen 줄 글자 계획은 순수하고 시각 칸이 없다", check_hydrogen_text_stays_pure),
     ("작업공간 모드는 순수하고 문서 밖이다", check_workspace_mode_stays_pure),
     ("라이브러리 맥락 평가는 순수하다", check_context_review_stays_pure),
     ("영어 자막 번역은 순수하다", check_translation_stays_pure),

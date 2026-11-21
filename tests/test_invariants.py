@@ -3969,6 +3969,60 @@ def test_the_real_word_text_layer_is_pure() -> None:
     assert check_invariants.check_word_text_stays_pure() == []
 
 
+HYDROGEN_TEXT = "vlogsrt/project/raw/hydrogen_text.py"
+HYDROGEN_TEXT_CLEAN = (
+    "from dataclasses import dataclass\n"
+    "class ExtraSpeech:\n    after_id: str | None\n    text: str\n"
+    "class LineTextPlan:\n    version: str\n    lines: tuple\n"
+)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "from vlogsrt.project.raw import word_text",
+        "from vlogsrt.project.raw import hydrogen_text_io",
+        "from vlogsrt.project.raw import source_transcript",
+        "from vlogsrt import transcribe",
+        "from vlogsrt import gemini_messages",
+        "import sqlite3",
+        "from pathlib import Path",
+        "from vlogsrt.project.raw import service",
+        "Path('x').read_text()",
+    ],
+)
+def test_hydrogen_text_impurity_is_caught(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
+) -> None:
+    """W-114a(D187) — Hydrogen 줄 글자 계획은 전송·전사·서비스·DB·파일·다른 글자 경로를 모른다."""
+    _fake_source_tree(monkeypatch, tmp_path, {HYDROGEN_TEXT: HYDROGEN_TEXT_CLEAN})
+    assert check_invariants.check_hydrogen_text_stays_pure() == []
+    (tmp_path / HYDROGEN_TEXT).write_text(HYDROGEN_TEXT_CLEAN + statement + "\n", encoding="utf-8")
+    failures = check_invariants.check_hydrogen_text_stays_pure()
+    assert failures and all(line.startswith("hydrogen_text.py") for line in failures)
+
+
+def test_a_time_field_on_any_hydrogen_class_and_a_missing_layer_are_caught(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """줄 밖 말(`extra`)에 시각이 생겨도 D24의 모양이다 — 계획 클래스만이 아니라 모두 본다."""
+    timed = HYDROGEN_TEXT_CLEAN.replace("    text: str\n", "    text: str\n    start: float\n")
+    _fake_source_tree(monkeypatch, tmp_path, {HYDROGEN_TEXT: timed})
+    (failure,) = check_invariants.check_hydrogen_text_stays_pure()
+    assert "ExtraSpeech.start" in failure
+    (tmp_path / HYDROGEN_TEXT).write_text("class Other:\n    text: str\n", encoding="utf-8")
+    (failure,) = check_invariants.check_hydrogen_text_stays_pure()
+    assert "LineTextPlan" in failure
+    (tmp_path / HYDROGEN_TEXT).unlink()
+    assert check_invariants.check_hydrogen_text_stays_pure() == [
+        f"{HYDROGEN_TEXT}: Hydrogen 글자 계층이 사라졌다 (D187)"
+    ]
+
+
+def test_the_real_hydrogen_text_layer_is_pure() -> None:
+    assert check_invariants.check_hydrogen_text_stays_pure() == []
+
+
 def test_workspace_mode_impurity_and_a_mode_parameter_on_the_builder_are_caught(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
