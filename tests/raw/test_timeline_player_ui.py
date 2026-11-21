@@ -178,7 +178,7 @@ def test_the_cue_keys_follow_the_draft_editor_and_delete_prefers_a_picked_cue() 
 
 def test_an_unconfirmed_cue_text_is_committed_before_saving_rendering_adding_or_hiding() -> None:
     """글 칸에 쓴 채로 렌더·넣기·⌘S·창 숨기기를 해도 그 글이 빠지지 않는다."""
-    for head in ("function render() {", "function addSourceAt(id, atEnd) {"):
+    for head in ("function render() {", "function addSourceAt(id, at) {"):
         body = PLAYER_JS[PLAYER_JS.index(head) :]
         assert body.index("commitText();") < body.index("\n  }\n"), head
     assert "commitText(); saveNow(false);" in PLAYER_JS
@@ -314,9 +314,9 @@ def test_adding_a_source_needs_the_token_and_passes_the_document_revision_and_so
     calls: list[tuple[Any, ...]] = []
 
     def add(
-        _root: Path, timeline_id: str, base: int, doc: Any, source_id: str, *, at_end: bool
+        _root: Path, timeline_id: str, base: int, doc: Any, source_id: str, *, at: int | None
     ) -> Any:
-        calls.append((timeline_id, base, doc, source_id, at_end))
+        calls.append((timeline_id, base, doc, source_id, at))
         return {"revision": base + 1, "doc": doc, "cues": 3, "empty": 1, "clamped": 0}
 
     monkeypatch.setattr(server.raw, "timeline_add_source", add)
@@ -334,10 +334,13 @@ def test_adding_a_source_needs_the_token_and_passes_the_document_revision_and_so
     payload["token"] = server._visual_lifetime_token
     got = player.action(payload, "add")
     assert got == {"ok": True, "revision": 4, "doc": doc, "cues": 3, "empty": 1, "clamped": 0}
-    assert calls == [("t1", 3, doc, "s2", False)]
-    # 영상 목록에서 끌어 놓으면(W-110) 자리는 타임라인 끝이다.
-    player.action({**payload, "place": "end"}, "add")
-    assert calls[-1] == ("t1", 3, doc, "s2", True)
+    assert calls == [("t1", 3, doc, "s2", None)]
+    # 영상 목록에서 끌어 놓으면(W-111) 자리는 놓은 클립 차례다. 정수가 아닌 자리는 거절한다.
+    player.action({**payload, "at": 1}, "add")
+    assert calls[-1] == ("t1", 3, doc, "s2", 1)
+    for wrong in (True, "1", 1.5):
+        refused_at = player.action({**payload, "at": wrong}, "add")
+        assert refused_at["ok"] is False and len(calls) == 2
     broken = player.action({**payload, "sourceId": ""}, "add")
     assert broken["ok"] is False and broken["stale"] is False
     assert "tl_add_source" in [f.__name__ for f in player.server_functions()]
@@ -886,10 +889,11 @@ def test_the_share_job_checks_the_online_gate_before_it_buys_a_translation(
     assert gates == [root] and len(jobs) == 2
 
 
-def test_a_video_card_dragged_onto_the_lane_is_added_at_the_end() -> None:
-    """W-110(D184) — 영상 목록 카드는 원본 아이디를 싣고 끌리며, 재생기 레인에 놓으면 그 원본
-    전체를 타임라인 끝에 넣는다(`place: "end"`). 끄는 동안 끝에 넣을 자리 선을 긋고, 이미 클립이
-    있거나 타임라인에 없던 원본은 까닭을 말하고 넣지 않는다. 「원본 넣기」 고르기는 그대로다."""
+def test_a_video_card_dragged_onto_the_lane_is_added_where_it_is_dropped() -> None:
+    """W-111(D185) — 영상 목록 카드는 원본 아이디를 싣고 끌리며, 재생기 레인에 놓으면 그 원본
+    전체를 커서에서 가장 가까운 클립 경계(맨 앞 · 사이 · 끝)에 넣는다(`at`). 같은 원본의 클립
+    사이는 건너뛰고, 끄는 동안 그 경계에 선을 긋는다. 이미 클립이 있거나 타임라인에 없던 원본은
+    까닭을 말하고 넣지 않는다. 「원본 넣기」 고르기(드롭다운)는 없앴다."""
     from ui import ui_facade
 
     drop_type = "application/x-vlogsrt-source"
@@ -900,7 +904,15 @@ def test_a_video_card_dragged_onto_the_lane_is_added_at_the_end() -> None:
     assert f'var DROP_TYPE = "{drop_type}";' in js
     for event in ("dragover", "dragleave", "drop"):
         assert f'lane.addEventListener("{event}",' in js
-    assert 'if (atEnd) { payload.place = "end"; }' in js
-    assert "addSourceAt(ev.dataTransfer.getData(DROP_TYPE), true);" in js
+    assert "sourceId: id, at: at };" in js
+    assert "addSourceAt(ev.dataTransfer.getData(DROP_TYPE), slot);" in js
+    assert "spans[i - 1].sourceId === spans[i].sourceId) { continue; }" in js
     assert "paintDropMark(ctx, view, width, height);" in js
-    assert "이미 타임라인에 있습니다" in js and "addSourceAt(pick ? pick.value" in js
+    assert "이미 타임라인에 있습니다" in js
+    # 끄는 동안 타임라인 전체를 보여 어느 자리든 놓게 하고, 놓거나 떠나면 보던 줌으로 돌아간다.
+    assert "S.dropView = laneView();" in js
+    assert "if (S.dropView) { S.lane = S.dropView; S.dropView = null; }" in js
+    for gone in ("tl-add-pick", "addSource(", "paintAddPicker", '"add-source"'):
+        assert gone not in js
+    html = timeline_player.timeline_player_html({"frame": {"width": 1920, "height": 1080}})
+    assert "tl-add" not in html and "원본 넣기" not in html

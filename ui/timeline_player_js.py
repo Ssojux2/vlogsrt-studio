@@ -21,7 +21,8 @@ PLAYER_APP_JS = r"""
     S = W.__vlTimelinePlayer = { epoch: null, doc: null, spans: [], total: 0, playhead: 0, span: 0,
       deck: 0, playing: false, loopGen: 0, media: {}, status: "", statusError: false,
       pollGen: 0, sel: 0, cursor: null, drag: null, dirty: false, saving: false,
-      history: { past: [], future: [] }, tool: "select", skimOn: true, skimX: null };
+      history: { past: [], future: [] }, tool: "select", skimOn: true, skimX: null,
+      dropAt: null, dropView: null };
   }
   S.server = server;
   var POLL_MS = 2000;
@@ -444,7 +445,6 @@ PLAYER_APP_JS = r"""
     if (redoButton) { redoButton.disabled = !S.history.future.length; }
     var force = $("tl-force");
     if (force) { force.hidden = !S.conflict; }
-    paintAddPicker();
     var prep = $("tl-prepare");
     if (prep && S.doc) {
       var waiting = notReady();
@@ -1327,12 +1327,8 @@ PLAYER_APP_JS = r"""
     saveNow(false);
     W.setTimeout(wait, S.settings.autosaveMs);
   }
-  function addSource() {
-    var pick = $("tl-add-pick");
-    addSourceAt(pick ? pick.value : "", false);
-  }
-  // `atEnd` — 영상 목록에서 끌어 놓은 원본(W-110, D184)은 촬영 차례 자리가 아니라 타임라인 끝이다.
-  function addSourceAt(id, atEnd) {
+  // `at` — 클립 차례(0…클립 수): 영상 목록에서 끌어 놓은 자리(W-111, D185).
+  function addSourceAt(id, at) {
     commitText();
     if (!S.doc || !id || S.adding) { return; }
     if (!S.doc.facts.sources.some(function (s) { return s.id === id; })) {
@@ -1350,14 +1346,13 @@ PLAYER_APP_JS = r"""
     }
     if (S.dirty || S.saving) {
       say("편집을 저장한 뒤 넣습니다…", false);
-      afterSaved(function () { addSourceAt(id, atEnd); });
+      afterSaved(function () { addSourceAt(id, at); });
       return;
     }
     if (S.playing) { stopPlayback(); }
     S.adding = true;
     var payload = { signature: S.signature, token: S.token, timelineId: S.timelineId,
-      baseRevision: S.baseRevision, doc: docPayload(), sourceId: id };
-    if (atEnd) { payload.place = "end"; }
+      baseRevision: S.baseRevision, doc: docPayload(), sourceId: id, at: at };
     S.server.tl_add_source(payload).then(function (got) {
       S.adding = false;
       if (!got || !got.ok) { say((got && got.error) || "원본을 넣지 못했습니다.", true); return; }
@@ -1367,11 +1362,13 @@ PLAYER_APP_JS = r"""
           "새로고침한 뒤 다시 넣으세요.", true);
         return;
       }
-      placeAdded(id, got, atEnd);
+      placeAdded(id, got);
     }, function () { S.adding = false; say("원본을 넣지 못했습니다.", true); });
   }
-  // ─── 끌어 놓기(W-110, D184): 영상 목록의 카드를 레인에 놓으면 타임라인 끝에 넣는다 ───
-  // 끄는 동안 레인 끝(마지막 클립 뒤)에 넣을 자리 선을 긋는다. 놓는 자리와 무관하게 끝이다.
+  // ─── 끌어 놓기(W-111, D185): 영상 목록의 카드를 레인에 놓은 자리에 넣는다 ───
+  // 놓을 자리는 커서에서 가장 가까운 클립 경계(맨 앞 · 클립 사이 · 끝)다 — 같은 원본의 클립 사이는
+  // 가를 수 없어 건너뛴다(D125). 끄는 동안 레인은 타임라인 전체를 보이고(줌 한도 무시 — 어느
+  // 자리든 놓을 수 있게) 그 경계에 선을 긋는다. 놓거나 떠나면 보던 줌으로 돌아간다.
   var DROP_TYPE = "application/x-vlogsrt-source";
   function carriesSource(ev) {
     var types = ev.dataTransfer ? ev.dataTransfer.types : null;
@@ -1379,49 +1376,71 @@ PLAYER_APP_JS = r"""
     for (var i = 0; i < types.length; i += 1) { if (types[i] === DROP_TYPE) { return true; } }
     return false;
   }
+  function slotTicks(slot) {
+    var spans = S.spans;
+    var frame = slot < spans.length ? spans[slot].outStart
+      : spans[slot - 1].outStart + spans[slot - 1].outFrames;
+    return frame * seqTicks();
+  }
+  function dropSlot(ev) {
+    var spans = S.spans;
+    var ticks = LN.ticksAt(laneView(), laneX(ev));
+    var best = spans.length;
+    var gap = Infinity;
+    for (var i = 0; i <= spans.length; i += 1) {
+      if (i > 0 && i < spans.length && spans[i - 1].sourceId === spans[i].sourceId) { continue; }
+      var d = Math.abs(slotTicks(i) - ticks);
+      if (d < gap) { gap = d; best = i; }
+    }
+    return best;
+  }
+  function slotWords(slot) {
+    var spans = S.spans;
+    if (!spans.length || slot >= spans.length) { return "타임라인 끝에"; }
+    if (slot === 0) { return "맨 앞(" + nameOf(spans[0].sourceId) + " 앞)에"; }
+    return nameOf(spans[slot - 1].sourceId) + "와(과) " + nameOf(spans[slot].sourceId) + " 사이에";
+  }
   function onDropOver(ev) {
     if (!S.doc || !carriesSource(ev)) { return; }
     ev.preventDefault();
     ev.dataTransfer.dropEffect = "copy";
-    if (!S.dropping) {
-      S.dropping = true;
-      say("놓으면 이 원본 전체를 타임라인 끝에 넣습니다.", false);
-      // 끝이 화면 밖이면 레인을 끝으로 옮겨 넣을 자리를 보인다.
+    if (S.dropAt === null && !S.dropView) {
       var lane = laneCanvas();
-      if (lane && S.spans.length) {
-        S.lane = LN.follow(laneView(), dropEndTicks(), lane.clientWidth);
-      }
+      S.dropView = laneView();
+      if (lane) { S.lane = { start: 0, tpp: laneTotal() / Math.max(1, lane.clientWidth) }; }
+    }
+    var slot = S.spans.length ? dropSlot(ev) : 0;
+    if (S.dropAt !== slot) {
+      S.dropAt = slot;
+      say("놓으면 이 원본 전체를 " + slotWords(slot) + " 넣습니다.", false);
       requestLane();
     }
   }
-  function dropEndTicks() {
-    var last = S.spans[S.spans.length - 1];
-    return (last.outStart + last.outFrames) * seqTicks();
-  }
   function onDropLeave() {
-    if (!S.dropping) { return; }
-    S.dropping = false;
+    if (S.dropAt === null && !S.dropView) { return; }
+    S.dropAt = null;
+    if (S.dropView) { S.lane = S.dropView; S.dropView = null; }
     requestLane();
   }
   function onDrop(ev) {
     if (!S.doc || !carriesSource(ev)) { return; }
     ev.preventDefault();
+    var slot = S.spans.length ? dropSlot(ev) : 0;
     onDropLeave();
-    addSourceAt(ev.dataTransfer.getData(DROP_TYPE), true);
+    addSourceAt(ev.dataTransfer.getData(DROP_TYPE), slot);
   }
   function paintDropMark(ctx, view, width, height) {
-    if (!S.dropping || !S.spans.length) { return; }
-    // 끝이 화면 밖이면 가장자리에 긋는다 — 어디에 놓아도 끝이라는 것을 늘 보인다.
-    var x = Math.min(Math.max(LN.x(view, dropEndTicks()), 2), width - 2);
+    if (S.dropAt === null || !S.spans.length) { return; }
+    var x = Math.min(Math.max(LN.x(view, slotTicks(S.dropAt)), 2), width - 2);
     ctx.fillStyle = cssVar("--vl-accent");
     ctx.fillRect(x - 2, 0, 4, height);
     ctx.font = CANVAS_FONT_PX + "px " + cssVar("--vl-font-sans");
     ctx.textBaseline = "top";
-    var label = "끝에 넣기";
+    var label = "여기에 넣기";
     var w = ctx.measureText(label).width;
     ctx.fillText(label, x + 6 + w > width ? x - 6 - w : x + 6, RULER_PX + 4);
   }
-  function placeAdded(id, got, atEnd) {
+  function placeAdded(id, got) {
     S.doc = Object.assign({ facts: S.doc.facts }, got.doc);
     S.baseRevision = got.revision;
     S.dirty = false;
@@ -1432,7 +1451,7 @@ PLAYER_APP_JS = r"""
     var notes = [];
     if (got.empty) { notes.push("빈 줄 " + got.empty + "개는 넣지 않음"); }
     if (got.clamped) { notes.push("원본 밖 시각 " + got.clamped + "줄은 원본 안으로"); }
-    say(nameOf(id) + " 원본 전체를 " + (atEnd ? "타임라인 끝에 " : "") + "넣었습니다 · 리비전 " +
+    say(nameOf(id) + " 원본 전체를 넣었습니다 · 리비전 " +
       got.revision + " · 새 자막 " + got.cues +
       "줄" + (notes.length ? " (" + notes.join(" · ") + ")" : "") +
       " — 되돌리기는 여기서 새로 시작합니다(빼려면 「클립 지우기」).", false);
@@ -1447,25 +1466,6 @@ PLAYER_APP_JS = r"""
       if (!S.playing) { seek(S.playhead); } else { paint(); }
       if (anyPreparing()) { poll(gen); }
     });
-  }
-  function paintAddPicker() {
-    var pick = $("tl-add-pick");
-    var button = $("tl-add");
-    if (!pick || !button) { return; }
-    var ids = unclipped();
-    var key = ids.join("\n");
-    if (pick.__tlKey !== key) {
-      pick.__tlKey = key;
-      pick.innerHTML = "";
-      ids.forEach(function (id) {
-        var option = document.createElement("option");
-        option.value = id;
-        option.textContent = nameOf(id);
-        pick.appendChild(option);
-      });
-    }
-    pick.hidden = button.hidden = !ids.length;
-    button.disabled = !!S.adding;
   }
 
 
@@ -3287,7 +3287,7 @@ PLAYER_APP_JS = r"""
       "tool-select": function () { setTool("select"); }, skimming: toggleSkim,
       snapping: toggleSnap, "center-play": toggleCenterPlay,
       "tool-blade": function () { setTool("blade"); },
-      join: function () { clipOp("join"); }, "add-source": addSource,
+      join: function () { clipOp("join"); },
       "cue-start": function () { cueOp("start", cueTargetOf(target)); },
       "cue-end": function () { cueOp("end", cueTargetOf(target)); },
       "cue-split": function () { cueOp("split", cueTargetOf(target)); },
