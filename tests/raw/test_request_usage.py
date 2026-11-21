@@ -254,10 +254,14 @@ def test_live_selection_records_luna_usage_and_the_status_line_shows_it(tmp_path
     assert server._quick["stage"] == "추천 구간 준비 완료", server._quick
     root = server.workspace_root()
     summary = server.raw.analysis_usage_summary(root, server._quick["revision"])
-    assert summary.attempts == len(sender.calls) + len(client.calls) == 4
-    assert (summary.received, summary.uncertain) == (4, 0)
+    # 전사 1 · Hydrogen 글자 귀 1(D187 — 처음 듣는 영상) · Luna 3
+    hydrogen = len(sender.text_calls)
+    assert hydrogen == 1
+    assert summary.attempts == len(sender.calls) + hydrogen + len(client.calls) == 5
+    assert (summary.received, summary.uncertain) == (5, 0)
     assert (summary.luna_input_tokens, summary.luna_output_tokens) == (3000, 1500)
-    assert summary.unpriced == 4  # 앱 기본 Luna 모델은 스냅샷 밖이고 가짜 전송은 사용량이 없다
+    # 앱 기본 Luna 모델은 스냅샷 밖이고 가짜 전사는 사용량이 없다 — Hydrogen은 공식 단가로 매긴다
+    assert summary.unpriced == 4
     assert server.raw.analysis_usage_summary(root, "no-such-revision").attempts == 0
     line = request_usage.format_usage_line(summary)
     assert "Luna 입력 3,000/출력 1,500 토큰" in line

@@ -33,6 +33,7 @@ from vlogsrt.project.raw import service as raw
 from vlogsrt.project.raw import timing_engine
 from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
 from vlogsrt.project.raw.config import (
+    HYDROGEN_TEXT,
     TIMING_ENGINE_GEMINI,
     TIMING_ENGINE_WHISPER,
     TIMING_ENGINES,
@@ -77,8 +78,10 @@ def test_only_a_gemini_quote_names_the_engine_its_price_and_its_binding_tag(
     minimum = Fraction(gemini.asr_seconds) / 60 * Fraction("0.005")
     assert Fraction(gemini.timing_usd) >= minimum
     (gemini_passes,) = with_text_passes(workspace, [gemini])
-    # 다른 귀·다시 묻기(D78)는 whisper와 함께 지웠다(D163) — 견적에 그 칸이 없다.
-    assert (gemini_passes.rescue_chunk_count, gemini_passes.text_chunk_count) == (None, None)
+    # 다시 묻기(D78)는 whisper와 함께 지웠다(D163) — 견적에 그 칸이 없다. 글자 칸은 Hydrogen 글자
+    # 귀(D187)의 것이다 — gpt 다른 귀가 아니다.
+    assert gemini_passes.rescue_chunk_count is None
+    assert gemini_passes.text_model == HYDROGEN_TEXT.model
     assert TAG in service.source_bindings(root, {asset.asset_id: asset})[asset.asset_id]
 
     # 옛 whisper 원본(차례가 whisper로 고정됐다) — 견적·결속은 칸 없이 바이트 그대로다.

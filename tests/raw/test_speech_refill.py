@@ -40,6 +40,7 @@ from vlogsrt.config import Config
 from vlogsrt.project.raw import (
     asr_epoch,
     glossary,
+    hydrogen_text_pass,
     source_transcript,
     speech_refill,
     sync_report,
@@ -49,6 +50,7 @@ from vlogsrt.project.raw import service as raw
 from vlogsrt.project.raw.analysis_approval import LiveAnalysisTransport
 from vlogsrt.project.raw.config import (
     GEMINI_TRANSCRIBE_PROFILE,
+    HYDROGEN_TEXT,
     TIMING_ENGINE_GEMINI,
     TIMING_ENGINE_WHISPER,
 )
@@ -329,8 +331,11 @@ def test_the_scope_asks_exactly_the_dropped_bursts_with_the_timing_engine_alone(
         assert span.start <= start * RATE and end * RATE <= span.end  # 덩어리를 통째로 묻는다
     assert quote.whisper_due == quote.pieces  # 처음이라 모두 새로 산다
     assert quote.timing_model == GEMINI_TRANSCRIBE_PROFILE.model
-    # Gemini 원본에는 다른 귀가 없다(D104·D163) — 글자 요청 칸이 비어 있다.
-    assert (quote.text_model, quote.text_identity, quote.text_due) == (None, None, ())
+    # Gemini 원본에는 gpt 다른 귀가 없다(D104·D163). 받은 줄의 글자는 Hydrogen이 다시 듣는다
+    # (W-114e, D187) — 시간 엔진을 새로 사는 조각만큼이 상한이다.
+    identity = hydrogen_text_pass.text_identity(HYDROGEN_TEXT)
+    assert (quote.text_model, quote.text_identity) == (HYDROGEN_TEXT.model, identity)
+    assert quote.text_due == quote.whisper_due
     assert not hasattr(quote, "usd") and not hasattr(quote, "text")  # 금액·문구가 없다(D110)
     assert service.refill_scope(root, asset_id).digest == quote.digest  # 결정적이다
 
@@ -482,10 +487,13 @@ def test_refill_inserts_engine_times_plus_the_slice_offset_and_sends_no_hints(
     assert [r["utterance_id"] for r in inserted] == record["inserted"]
     assert len(inserted) == 2 and after["edited"] is True
     _assert_engine_times(inserted, quote)
+    # 받은 줄의 글자는 Hydrogen이 다시 듣는다(W-114e) — 가짜 Hydrogen은 초안을 그대로 돌려준다.
+    assert len(sender.text_calls) == len(quote.pieces)
     for row in inserted:
         assert row["text"] == ENGINE_TEXT
-        assert "text_source" not in row  # 다른 귀가 없다 — 엔진 글자 그대로
-    assert record["asr_text"] is None
+        assert row["text_source"] == HYDROGEN_TEXT.model
+        assert row["whisper_text"] == ENGINE_TEXT  # 시간 엔진이 처음 들은 글이 남는다
+    assert record["asr_text"]["model"] == HYDROGEN_TEXT.model
     old = [json.dumps(r, ensure_ascii=False) for r in before["utterances"]]
     kept = [
         json.dumps(r, ensure_ascii=False)

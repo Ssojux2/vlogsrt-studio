@@ -430,10 +430,17 @@ def _rescue_approval_fields(estimate: AnalysisEstimate) -> dict[str, Any]:
 def _quoted_text_fields(
     quoted: Sequence[AnalysisEstimate], text_model: str, identity: str | None
 ) -> dict[str, dict[str, Any]]:
-    """사람이 본 견적 줄마다 승인의 글자 칸 — 물을 청크를 센 줄만(D59 19d), 신원이 없으면 없다."""
-    if not quoted or identity is None:
+    """사람이 본 견적 줄마다 승인의 글자 칸 — 물을 청크를 센 줄만(D59 19d).
+
+    gpt 다른 귀 줄은 digest가 묶은 신원(`identity`)이 없으면 없다. Gemini 글자 모델 줄(Hydrogen
+    글자 귀 D187 · Gemini 글자 경로 W-35b)은 신원을 그 모델에서 잰다(교차 확인 꼬리표 밖)."""
+    if not quoted:
         return {}
-    fields = {item.asset_id: _text_approval_fields(item, text_model, identity) for item in quoted}
+    fields = {
+        item.asset_id: _text_approval_fields(item, text_model, identity or "")
+        for item in quoted
+        if item.text_model is not None or identity is not None
+    }
     return {asset_id: values for asset_id, values in fields.items() if values}
 
 
@@ -447,23 +454,32 @@ def _text_approval_fields(
     if not estimate.text_chunk_count:
         return {}
     if estimate.text_model is not None:
-        from vlogsrt.project.raw import gemini_text
-        from vlogsrt.project.raw.config import GEMINI_TEXT_SETTINGS
-
-        if estimate.text_model != GEMINI_TEXT_SETTINGS.model:
-            raise BrowserRuntimeError(f"승인 범위의 글자 모델을 모른다: {estimate.text_model!r}")
         if estimate.text_usd is None:
             raise BrowserRuntimeError(
-                f"Gemini 글자 경로의 단가가 재확인 기한을 지나 가격 미정이다:"
-                f" {estimate.source_name} — 단가를 확인해 고친 뒤 다시 승인하라(W-35b)"
+                f"글자 귀 {estimate.text_model}의 단가가 재확인 기한을 지나 가격 미정이다:"
+                f" {estimate.source_name} — 단가를 확인해 고친 뒤 다시 승인하라(W-35b·D187)"
             )
-        text_model, identity = estimate.text_model, gemini_text.text_identity(GEMINI_TEXT_SETTINGS)
+        text_model, identity = estimate.text_model, _gemini_text_identity(estimate.text_model)
     return {
         "text_model": text_model,
         "text_identity": identity,
         "text_chunk_budget": int(estimate.text_chunk_count),
         "text_chunk_keys": estimate.text_chunk_keys,
     }
+
+
+def _gemini_text_identity(model: str) -> str:
+    """견적 줄의 글자 모델이 묻는 요청 신원 — Hydrogen 글자 귀(D187) 또는 Gemini 글자 경로(W-35b).
+
+    힌트가 없어 용어집이 신원에 들지 않는다. 그 밖의 모델은 승인 범위가 모르는 모델이다."""
+    from vlogsrt.project.raw import gemini_text, hydrogen_text_pass
+    from vlogsrt.project.raw.config import GEMINI_TEXT_SETTINGS, HYDROGEN_TEXT
+
+    if model == HYDROGEN_TEXT.model:
+        return hydrogen_text_pass.text_identity(HYDROGEN_TEXT)
+    if model == GEMINI_TEXT_SETTINGS.model:
+        return gemini_text.text_identity(GEMINI_TEXT_SETTINGS)
+    raise BrowserRuntimeError(f"승인 범위의 글자 모델을 모른다: {model!r}")
 
 
 def _phase_artifact_for(service: Any, root: Path, revision_id: str, asset_id: str) -> Any:

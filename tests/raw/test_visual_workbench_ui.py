@@ -1731,6 +1731,7 @@ def test_visual_server_functions_bind_client_revision(tmp_path: Path) -> None:
         "vl_sync_recheck",  # 자막 시각 「다시 재기」(D55)
         "vl_relisten",  # 「다시 듣기」(D59 19b) — 차례만 올린다(유료 호출 0회)
         "vl_refill",  # 「빈칸 재전사 승인」(D59 19f) — 보이는 견적·digest를 대조한 뒤에만 작업
+        "vl_hydrogen_retext",  # 「글자 다시 받기(Hydrogen)」(W-114d) — 범위 digest를 대조한다
         "vl_snap_apply",  # 「시각 맞춤 적용(무료)」(D59 19h) — 화면이 본 제안 sha를 대조한다
         "vl_snap_revert",  # 「되돌리기」(D59 19h) — 화면이 본 리비전에만
         "vl_timing_truth",  # 「참 시작」·「참 끝」(W-25b) — 자막과 따로, 화면이 본 리비전에만
@@ -3229,6 +3230,7 @@ def test_blocks_wire_workbench_outputs(tmp_path: Path, local_socket: None) -> No
         "vl_sync_recheck",  # 자막 시각 「다시 재기」(D55)
         "vl_relisten",  # 「다시 듣기」(D59 19b) — 차례만 올린다(유료 호출 0회)
         "vl_refill",  # 「빈칸 재전사 승인」(D59 19f) — 보이는 견적·digest를 대조한 뒤에만 작업
+        "vl_hydrogen_retext",  # 「글자 다시 받기(Hydrogen)」(W-114d) — 범위 digest를 대조한다
         "vl_snap_apply",  # 「시각 맞춤 적용(무료)」(D59 19h) — 화면이 본 제안 sha를 대조한다
         "vl_snap_revert",  # 「되돌리기」(D59 19h) — 화면이 본 리비전에만
         "vl_timing_truth",  # 「참 시작」·「참 끝」(W-25b) — 자막과 따로, 화면이 본 리비전에만

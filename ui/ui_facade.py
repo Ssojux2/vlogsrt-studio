@@ -2828,6 +2828,29 @@ VISUAL_BOOTSTRAP_JS = (
         out.push("</details>");
         return out.join("");
       }
+      // 「글자 다시 받기(Hydrogen)」(W-114d, D187) — 단추가 지금 범위의 digest를 싣고 서버가 누른
+      // 순간 다시 재어 대조한다. 견적은 없다(D110 — 누름이 승인).
+      function hydrogenPanel(info) {
+        var hy = info && info.hydrogen;
+        if (!hy) { return ""; }
+        var out = ['<details class="vl-details" data-vl-hydrogen="1"' +
+          (hy.state === "running" ? " open" : "") + "><summary>" + esc(hy.label) +
+          (hy.state === "running" ? ' <span class="vl-badge">진행 중</span>' : "") +
+          "</summary>"];
+        out.push('<p class="vl-kv">' + esc(hy.explanation) + "</p>");
+        if (hy.summary) { out.push('<p class="vl-kv">' + esc(hy.summary) + "</p>"); }
+        if (hy.note) { out.push('<p class="vl-kv"><small>' + esc(hy.note) + "</small></p>"); }
+        if (hy.state === "ready" && hy.digest) {
+          out.push('<button type="button" class="vl-btn vl-btn-primary" ' +
+            'data-vl-act="hydrogen-retext" data-vl-digest="' + esc(hy.digest) + '">' +
+            esc(hy.label) + "</button>");
+        } else if (hy.reason) {
+          out.push('<p class="vl-kv">' + esc(hy.reason) + "</p>");
+        }
+        if (hy.last) { out.push('<p class="vl-kv"><small>' + esc(hy.last) + "</small></p>"); }
+        out.push("</details>");
+        return out.join("");
+      }
       // 3단 등급(D51) — 글자 표지는 색과 별개로 등급을 말한다(색약·흑백에서도 읽힌다). 빨강의
       // 화면 이름은 「비추천」(W-46a) — 대기열·결정 상자의 「제외 제안」은 기다리는 제안이다.
       function tierWord(tier, hold) {
@@ -3756,6 +3779,7 @@ VISUAL_BOOTSTRAP_JS = (
         out.push(snapPanel(info));
         out.push(relistenPanel(info));
         out.push(refillPanel(info));
+        out.push(hydrogenPanel(info));
         ((info && info.crossSourceCandidates) || []).forEach(function(candidate) {
           out.push('<p class="vl-kv">다른 원본의 중복 후보 · ' +
             esc(candidate.other_source + ': ' + candidate.text) +
@@ -4538,6 +4562,11 @@ VISUAL_BOOTSTRAP_JS = (
         if (act === 'refill-approve') {
           call('vl_refill', {sourceId:curSourceId(),
             digest:node.getAttribute('data-vl-digest') || ''}, '빈칸 재전사를 시작하는 중…');
+          return;
+        }
+        if (act === 'hydrogen-retext') {
+          call('vl_hydrogen_retext', {sourceId:curSourceId(),
+            digest:node.getAttribute('data-vl-digest') || ''}, '글자 다시 받기를 시작하는 중…');
           return;
         }
         if (act === 'ear-take') { takeEar(node.getAttribute('data-vl-take')); return; }

@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from vlogsrt import log, oscompat
-from vlogsrt.project.raw import source_text
+from vlogsrt.project.raw import hydrogen_text_pass, source_text
 from vlogsrt.project.raw import understanding as stage1
 from vlogsrt.project.raw.analysis_approval import (
     AsrPhaseApproval,
@@ -41,6 +41,7 @@ from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
 from vlogsrt.project.raw.analysis_workflow import ApprovedPhaseAsrProvider, CountingAsrGate
 from vlogsrt.project.raw.caption_provider import timing_provider_for
 from vlogsrt.project.raw.config import (
+    HYDROGEN_TEXT,
     SOURCE_TEXT_SETTINGS,
     RawWorkflowConfig,
 )
@@ -114,6 +115,9 @@ class RefillPlan:
     failures_known: bool = True
     """1단계 기록이 있어 전사 실패 구간을 아는가 — 모르면 화면이 「실패 구간 안」을 말하지
     않는다."""
+    hydrogen: bool = False
+    """시간 엔진이 받은 줄의 글자를 Hydrogen이 같은 조각 WAV로 다시 듣는가(W-114e, D187) — 시각·
+    줄은 시간 엔진 그대로, 글자만 줄 아이디로 바뀐다. 범위 digest의 글자 모델·신원이 묶는다."""
 
     @property
     def folder(self) -> Path:
@@ -182,11 +186,16 @@ def scope_for(plan: RefillPlan) -> RefillScope:
     slices = _slice_shas(plan)
     whisper_due = tuple(p for p in pieces if not _whisper_cached(plan, slices.get(p), p))
     identity = _identity(plan)
+    text_model = plan.workflow.models.text_model if identity is not None else None
     text_due = (
         tuple(p for p in pieces if not _text_cached(plan, slices.get(p), p))
         if identity is not None
         else ()
     )
+    if plan.hydrogen:  # 줄 골격은 시간 엔진이 답한 뒤에야 안다 — 시간 엔진을 새로 사는 조각이
+        # 상한이다(같이 산 답은 같이 캐시된다 · 사람이 본 것보다 많이 묻지 않는다)
+        identity = hydrogen_text_pass.text_identity(HYDROGEN_TEXT)
+        text_model, text_due = HYDROGEN_TEXT.model, whisper_due
     base = RefillScope(
         asset_id=plan.asset_id,
         transcript_revision=plan.transcript_revision,
@@ -199,7 +208,7 @@ def scope_for(plan: RefillPlan) -> RefillScope:
         whisper_due=whisper_due,
         text_due=text_due,
         timing_model=plan.workflow.models.timing_model,
-        text_model=plan.workflow.models.text_model if identity is not None else None,
+        text_model=text_model,
         text_identity=identity,
         digest="",
         failures_known=plan.failures_known,
@@ -530,7 +539,8 @@ def _approval(
 ) -> AsrPhaseApproval:
     """범위가 잰 값 그대로의 1단계 승인 — whisper 상한은 새로 살 조각 수, 글자 칸은 켜졌을 때만."""
     text: dict[str, Any] = {}
-    if scope.text_identity is not None and scope.text_due:
+    gpt = scope.text_model != HYDROGEN_TEXT.model  # Hydrogen은 `_ears`가 따로 묶는다
+    if gpt and scope.text_identity is not None and scope.text_due:
         keys = tuple(_text_key(plan, shas[p], p) for p in scope.text_due)
         text = {
             "text_model": scope.text_model,
@@ -608,12 +618,37 @@ def _ears(
 ) -> tuple[tuple[UtteranceEvidence, ...], dict[str, object] | None]:
     """시간 엔진이 들은 발화 — 아이디만 넣을 줄의 아이디로 바꾼다(시각·순서는 그대로).
 
-    같은 WAV를 두 번째 귀(gpt)에 묻던 글자 경로(D59 19c)는 whisper와 함께 지웠다(D163)."""
+    같은 WAV를 두 번째 귀(gpt)에 묻던 글자 경로(D59 19c)는 whisper와 함께 지웠다(D163). Hydrogen
+    글자 귀(W-114e, D187)가 범위에 묶였으면 같은 조각 WAV를 Hydrogen에 묻고 줄 아이디로 글자만
+    얹는다 — 실패는 시간 엔진 글자 그대로 + WARN(규칙 9)."""
+    del approval
     utterances = tuple(
         replace(item, utterance_id=f"refill_{scope.refill_id}_{ordinal:04d}")
         for ordinal, item in enumerate(stage1.utterance_evidence(audio, evidence))
     )
-    return utterances, None  # 두 번째 귀(gpt)는 whisper와 함께 지웠다(D163)
+    if scope.text_model != HYDROGEN_TEXT.model:
+        return utterances, None  # 두 번째 귀(gpt)는 whisper와 함께 지웠다(D163)
+    request = hydrogen_text_pass.HydrogenPassRequest(
+        settings=HYDROGEN_TEXT,
+        on=on,
+        request_id=f"refill:{scope.refill_id}:{plan.asset_id}",
+        workdir=workdir,
+        cache_dir=plan.folder / "hydrogen",
+        origin=ORIGIN_LIVE,
+    )
+    client = getattr(transport, "timing_client", None)
+    provider = (
+        None
+        if client is None
+        else hydrogen_text_pass.LiveHydrogenProvider(
+            client=client, model=HYDROGEN_TEXT.model, budget=len(scope.text_due)
+        )
+    )
+    if provider is None:
+        log.warn("빈칸 재전사: Gemini 클라이언트가 없어 Hydrogen 글자를 묻지 않습니다")
+    outcomes = hydrogen_text_pass.run_pass(audio, evidence, utterances, request, provider)
+    result = hydrogen_text_pass.apply_pass(utterances, outcomes, request)
+    return result.utterances, result.record
 
 
 def _rows(

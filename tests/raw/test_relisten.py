@@ -28,7 +28,13 @@ from tests.raw.test_transcription_identity import PRE_W18_DEFAULT, SPANS, pre_w1
 from tests.raw.test_understanding import BEFORE_SHUTDOWN, SETTINGS, FakeTimingProvider, make_audio
 from tests.raw.test_visual_workbench_ui import _model_of
 from ui import workspace_service
-from vlogsrt.project.raw import asr_epoch, media_refs, source_transcript
+from vlogsrt.project.raw import (
+    asr_epoch,
+    cross_check,
+    hydrogen_text_pass,
+    media_refs,
+    source_transcript,
+)
 from vlogsrt.project.raw import service as raw
 from vlogsrt.project.raw.analysis_config import (
     UNDERSTANDING_SCHEMA_VERSION,
@@ -41,7 +47,7 @@ from vlogsrt.project.raw.analysis_workflow import (
     source_input_fingerprint,
 )
 from vlogsrt.project.raw.browser_runtime import asr_estimate_digest
-from vlogsrt.project.raw.config import RawWorkflowConfig
+from vlogsrt.project.raw.config import HYDROGEN_TEXT, RawWorkflowConfig
 from vlogsrt.project.raw.models import RawWorkspaceError
 from vlogsrt.project.raw.understanding import (
     AnalysisPlanningError,
@@ -239,6 +245,20 @@ def pre_19b_bindings(ui: Any, root: Path, asset_ids: tuple[str, ...]) -> dict[st
 
 GEMINI_TAG = "timing-engine/gemini"
 """Gemini 시간 엔진 원본의 결속 꼬리표(D92) — 실제(가짜) 흐름은 Gemini로 듣는다(D163)."""
+HYDROGEN_TAG = cross_check.HYDROGEN_TAG_PREFIX + hydrogen_text_pass.text_identity(HYDROGEN_TEXT)
+"""처음 듣는 Gemini 원본의 Hydrogen 글자 귀 꼬리표(D187)."""
+
+
+def hydrogen_bindings(ui: Any, root: Path, asset_ids: tuple[str, ...]) -> dict[str, list[str]]:
+    """Hydrogen 글자 귀 꼬리표가 붙은 결속 — 자막 지문은 두 번째 귀가 얹은 글자를 뺀 것이다(19d)."""
+    workspace = ui.raw._workspace(root)
+    return {
+        a: [
+            source_transcript.binding_fingerprint(workspace, a, True),
+            media_refs.fingerprint(workspace, a),
+        ]
+        for a in asset_ids
+    }
 
 
 def pre_19b_digest(ui: Any, root: Path, quote: Any) -> str:
@@ -287,7 +307,9 @@ def test_relisten_rebuys_only_that_video_and_a_full_run_then_buys_no_transcripti
     every = ui._library_ids(root)
     # 차례 0 — 결속은 19b 이전 조립에 Gemini 시간 엔진 꼬리표 하나만 더한 것이다(D92·D163 —
     # whisper 작업공간의 바이트 그대로는 `test_transcribe_only`가 본다).
-    expected = {a_id: [*row, GEMINI_TAG] for a_id, row in pre_19b_bindings(ui, root, every).items()}
+    # 처음 듣는 영상은 Hydrogen 글자 귀 꼬리표도 붙는다(D187).
+    tags = [GEMINI_TAG, HYDROGEN_TAG]
+    expected = {a_id: [*row, *tags] for a_id, row in pre_19b_bindings(ui, root, every).items()}
     assert ui.raw.source_bindings(root, dict.fromkeys(every)) == expected
     approve(ui, FULL)
     wait_until(lambda: all(stage(ui, root, i) == DONE for i in (a, b)))
@@ -314,8 +336,8 @@ def test_relisten_rebuys_only_that_video_and_a_full_run_then_buys_no_transcripti
     assert ui.raw.approval_mode(root) == TRANSCRIBE  # 다시 듣기는 「전사만」이 기본이다
     assert stage(ui, root, a) == raw.RELISTEN_STAGE and stage(ui, root, b) == DONE
     bound = ui.raw.source_bindings(root, dict.fromkeys(every))
-    assert bound[b] == [*pre_19b_bindings(ui, root, (b,))[b], GEMINI_TAG]  # 다른 영상은 그대로
-    assert bound[a] == [*pre_19b_bindings(ui, root, (a,))[a], "asr-epoch/1", GEMINI_TAG]
+    assert bound[b] == [*hydrogen_bindings(ui, root, (b,))[b], *tags]  # 다른 영상은 그대로
+    assert bound[a] == [*hydrogen_bindings(ui, root, (a,))[a], "asr-epoch/1", *tags]
     assert ui.raw.cached_selection_analysis(root, (a,)) is None  # 끝난 분석을 다시 쓰지 않는다
     assert ui.raw.cached_selection_analysis(root, (b,)) is not None
     # 끝난 b와 남은 a가 섞였다 — 승인은 남은 a만 묶는다(D64 E).

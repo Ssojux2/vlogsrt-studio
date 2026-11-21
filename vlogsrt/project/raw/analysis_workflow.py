@@ -44,6 +44,7 @@ from vlogsrt.project.raw import (
     cross_check,
     gemini_text,
     glossary,
+    hydrogen_text_pass,
     media_refs,
     request_usage,
     source_text,
@@ -57,6 +58,7 @@ from vlogsrt.project.raw import understanding_luna as luna
 from vlogsrt.project.raw.analysis_approval import (
     AsrPhaseApproval,
     require_live_asr_approval,
+    require_text_approval,
 )
 from vlogsrt.project.raw.analysis_config import (
     ANALYSIS_PROXY_LIMITS,
@@ -77,6 +79,7 @@ from vlogsrt.project.raw.caption_provider import (
 from vlogsrt.project.raw.config import (
     ANALYSIS_PROVIDER_GOOGLE,
     GEMINI_TEXT_SETTINGS,
+    HYDROGEN_TEXT,
     SOURCE_TEXT_SETTINGS,
     TIMING_ENGINE_GEMINI,
     RawWorkflowConfig,
@@ -1423,8 +1426,12 @@ def _hear_source(
     evidence = _first_hearing(
         revision, asset, settings, workflow, providers, audio, source_dir, hearing
     )
-    if ear == text_ear.EAR_NONE:  # Gemini 시간 엔진 — 다른 귀가 없다(D104)
+    if ear == text_ear.EAR_NONE:  # 이미 들은 Gemini 시간 엔진 원본 — 다른 귀가 없다(D104)
         return evidence, stage1.utterance_evidence(audio, evidence), None
+    if ear == text_ear.EAR_HYDROGEN:  # Gemini 원본의 줄 글자를 Hydrogen이 다시 듣는다(D187)
+        return _hydrogen_text(
+            workspace, revision, asset, workflow, providers, audio, evidence, source_dir
+        )
     if ear == text_ear.EAR_GEMINI:
         return _gemini_text(
             workspace, revision, asset, settings, workflow, providers, audio, evidence, source_dir
@@ -1545,6 +1552,75 @@ def _gemini_text(
         utterances, outcomes, request, audio.sample_rate, _seeded_rows(workspace, asset)
     )
     return evidence, result.utterances, result.record
+
+
+def _hydrogen_text(
+    workspace: RawWorkspace,
+    revision: AnalysisRevision,
+    asset: SourceAsset,
+    workflow: RawWorkflowConfig,
+    providers: AnalysisProviders,
+    audio: SelectedAudio,
+    evidence: AsrEvidence,
+    source_dir: Path,
+) -> tuple[AsrEvidence, tuple[UtteranceEvidence, ...], dict[str, object]]:
+    """Hydrogen 글자 귀(W-114c, D187) — Transcribe가 들은 같은 WAV를 Hydrogen에 묻고 줄 아이디로
+    글자를 얹는다. 시각·줄은 Transcribe 그대로다. 제공자가 없으면(승인이 글자를 묶지 않았다·재생)
+    아무것도 보내지 않고 캐시에 있는 답만 쓴다."""
+    request = hydrogen_text_pass.HydrogenPassRequest(
+        settings=HYDROGEN_TEXT,
+        on=providers.on or datetime.now(UTC).date(),
+        request_id=f"{revision.revision_id}:{asset.asset_id}",
+        workdir=source_dir,
+        cache_dir=workspace.root / "cache" / hydrogen_text_pass.TEXT_CACHE_DIRNAME / asset.asset_id,
+        origin=providers.origin,
+    )
+    utterances = stage1.utterance_evidence(audio, evidence)
+    provider = _hydrogen_provider_for(providers, workflow, asset.asset_id, request)
+    outcomes = hydrogen_text_pass.run_pass(audio, evidence, utterances, request, provider)
+    result = hydrogen_text_pass.apply_pass(
+        utterances, outcomes, request, _seeded_rows(workspace, asset)
+    )
+    return evidence, result.utterances, result.record
+
+
+def _hydrogen_provider_for(
+    providers: AnalysisProviders,
+    workflow: RawWorkflowConfig,
+    asset_id: str,
+    request: hydrogen_text_pass.HydrogenPassRequest,
+) -> hydrogen_text_pass.LiveHydrogenProvider | None:
+    """Hydrogen 글자 귀의 실제 제공자 — 1단계 승인이 글자 모델·신원·상한을 묶었을 때만(D110).
+
+    재생·승인이 글자를 묶지 않음은 조용히 None(캐시만)이다. 묶었는데 문이 닫히면(모델·신원
+    어긋남·단가 만료·키 없음) WARN하고 None이다 — 글자 실패는 전사를 막지 않는다(Transcribe
+    글자 그대로)."""
+    if not providers.is_live():
+        return None
+    approval = (providers.asr_approvals or {}).get(asset_id)
+    if approval is None or approval.text_model is None:
+        return None
+    try:
+        require_text_approval(
+            approval,
+            workflow=workflow,
+            identity=hydrogen_text_pass.text_identity(request.settings),
+            on=request.on,
+            model=request.settings.model,
+        )
+    except AnalysisApprovalError as error:
+        log.warn(f"Hydrogen 글자 귀를 묻지 않습니다 — Transcribe 글자 그대로: {error}")
+        return None
+    if providers.timing_client is None:
+        log.warn(
+            "Hydrogen 글자 귀를 묻지 않습니다 — Gemini 클라이언트가 없다(Transcribe 글자 그대로)"
+        )
+        return None
+    return hydrogen_text_pass.LiveHydrogenProvider(
+        client=providers.timing_client,
+        model=request.settings.model,
+        budget=approval.text_chunk_budget,
+    )
 
 
 def _word_provider_for(
