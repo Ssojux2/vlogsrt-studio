@@ -1076,6 +1076,47 @@ HYDROGEN_TEXT_PLAN_VERSION = "hydrogen-text-plan/v1"
 올린다(W-114c가 글자 캐시 열쇠에 싣는다)."""
 
 
+WAV_MIME_TYPE = "audio/wav"
+"""1단계 청크 WAV를 인라인 오디오 부분으로 실을 때의 MIME — 요청과 상한 재기가 같은 값을 쓴다."""
+
+
+@dataclass(frozen=True, slots=True)
+class HydrogenTextSettings:
+    """Hydrogen 글자 귀의 요청(W-114b, D187) — 같은 청크 WAV + 줄 목록 + Transcribe 초안.
+
+    모델은 등록된 Hydrogen 분석 프로파일이고 문은 `transcribe.request_gemini_generate`(규칙 7)다.
+    판(`prompt_revision`·`plan_version`)·모델·생각은 W-114c가 글자 캐시 열쇠에 싣는다. 생각 수준·
+    응답 한도·줄 시각 자릿수는 **외부 근거 없는 조정 대상**이다(받아쓰기는 판정이 아니라 생각을
+    적게 — 번역과 같다). 시간 엔진이 아니다 — 줄 시각은 Transcribe가 준 값을 닻으로 싣기만 한다."""
+
+    model: str = GEMINI_HYDROGEN_ANALYSIS_PROFILE.model
+    prompt_revision: str = "hydrogen-text/v1"
+    plan_version: str = HYDROGEN_TEXT_PLAN_VERSION
+    thinking_level: str = "LOW"
+    max_output_tokens: int = 16000
+    """응답 한도(생각 포함) — 180초 청크의 줄 JSON(수천 토큰)에 생각 몫을 넉넉히."""
+    time_decimals: int = 3
+    """요청 줄 시각(청크 국소 초)의 소수 자릿수 — 밀리초."""
+    audio_mime_type: str = WAV_MIME_TYPE
+
+    def __post_init__(self) -> None:
+        tokens = self.max_output_tokens
+        if isinstance(tokens, bool) or not 1 <= tokens <= GEMINI_MAX_OUTPUT_TOKENS_LIMIT:
+            raise ValueError(f"max_output_tokens가 1~{GEMINI_MAX_OUTPUT_TOKENS_LIMIT}가 아니다")
+        if isinstance(self.time_decimals, bool) or self.time_decimals < 0:
+            raise ValueError(f"time_decimals는 0 이상의 정수여야 한다: {self.time_decimals!r}")
+        if self.thinking_level not in GEMINI_THINKING_LEVELS:
+            raise ValueError(f"thinking_level이 허용 값이 아니다: {self.thinking_level!r}")
+        if self.model not in GEMINI_ANALYSIS_PROFILES:
+            raise ValueError(f"Hydrogen 글자 모델 {self.model!r}은(는) 등록된 분석 모델이 아니다")
+        if self.plan_version != HYDROGEN_TEXT_PLAN_VERSION or not self.prompt_revision.strip():
+            raise ValueError("Hydrogen 글자 판이 비었거나 계획 판과 다르다")
+
+
+HYDROGEN_TEXT = HydrogenTextSettings()
+"""지금 쓰는 Hydrogen 글자 귀 요청 설정(D187)."""
+
+
 @dataclass(frozen=True)
 class GeminiTextSettings:
     """whisper 원본의 Gemini 글자 경로(W-35b, D95)의 동결 설정 — `RawWorkflowConfig`의 칸이 아니다.

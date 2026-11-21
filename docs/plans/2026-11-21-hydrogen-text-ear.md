@@ -32,6 +32,15 @@ Gemini 글자)와 같은 모양이다. D95의 `word_text.place`는 단어 가운
   (`check_no_audio_transcription_call`은 OpenAI 전사만 막는다).
 - 모델·생각·응답 한도·판은 설정(`HydrogenTextSettings` — 외부 근거 없는 조정 대상)에서 온다(규칙 8).
 
+**W-114b 확정(2026-11-21, `raw/hydrogen_text_io.py`)**: 부분은 안내문 → 인라인 WAV(`audio/wav`) → 줄 목록 JSON
+`{"lines": [{id, start, end, draft}]}`(압축 표기 · 시각은 `time_decimals = 3`으로 반올림 — 같은 입력이면 바이트가 같다).
+응답 schema의 `after_id`는 **빼도 되는 글자 칸**이다(첫 줄 앞이면 뺀다 — null 합집합은 오프라인에서 확인할 수 없어 쓰지 않는다).
+schema·안내문에 시각 칸이 없다. 인라인 한도(20 MB)를 넘으면 보내기 전에 닫는다. 상한은 `gemini_cost.payload_bound`가 실제
+본문으로 잰다 — 인라인 WAV는 머리 길이의 올림 초 × 초당 32토큰. 기본 생각 LOW · 응답 16000. 응답 읽기(`read_reply`)는 늘 계획을
+낸다(읽지 못하면 `unreadable` + 까닭). 문(승인·취소·전송)이 던지는 것은 호출자에게 올라간다. 가짜 opener로 맨몸·관찰자 두 길
+모두 본문이 바이트 그대로 지나고 영수증이 Hydrogen 단가로 매겨짐을 시험이 본다. 사람 녹화: `scripts/record_hydrogen_text.py
+<조각.wav> --transcribe <전사응답.json> --out <녹화.json> --confirm-cost`.
+
 ## 3. 세션(한 세션 한 태스크)
 
 | 태스크 | 할 일 | 유료 |

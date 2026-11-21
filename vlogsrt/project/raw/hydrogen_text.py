@@ -35,6 +35,8 @@ REASON_DUPLICATE_ID = "duplicate-id"
 REASON_MISSING_ID = "missing-id"
 REASON_EMPTY_TEXT = "empty-text"
 """말이 있다(`speech=true`)는 줄의 글자가 비었다."""
+REASON_UNREADABLE = "unreadable"
+"""응답 본문을 읽지 못했다(막힘·출력 한도·STOP 아님·빈 글·JSON 아님) — `draft_only`로 남긴다."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,11 +174,16 @@ def _planned(line: DraftLine, heard: _Heard) -> PlannedLine:
 
 
 def _draft_plan(lines: Sequence[DraftLine], rejected: _Rejected) -> LineTextPlan:
+    return draft_only(lines, rejected.reason, rejected.detail)
+
+
+def draft_only(lines: Sequence[DraftLine], reason: str, detail: str) -> LineTextPlan:
+    """받지 않은 청크 — 줄마다 Transcribe 초안 글자 그대로 + 까닭(응답을 읽지 못한 때도 같다)."""
     return LineTextPlan(
         version=HYDROGEN_TEXT_PLAN_VERSION,
         accepted=False,
-        reason=rejected.reason,
-        detail=rejected.detail,
+        reason=reason,
+        detail=detail,
         lines=tuple(PlannedLine(line.line_id, line.text, SOURCE_DRAFT, False) for line in lines),
         extra=(),
     )
@@ -188,11 +195,13 @@ __all__ = [
     "REASON_MISSING_ID",
     "REASON_SHAPE",
     "REASON_UNKNOWN_ID",
+    "REASON_UNREADABLE",
     "SOURCE_DRAFT",
     "SOURCE_HYDROGEN",
     "DraftLine",
     "ExtraSpeech",
     "LineTextPlan",
     "PlannedLine",
+    "draft_only",
     "plan",
 ]

@@ -12,6 +12,8 @@
 - 단가는 공식 표가 미리 알린 인상 전 마지막 날까지만 쓴다(`price_valid_through`).
 - 창 클립(D85)은 초당 한 장으로 표본된다 — 영상 장당 280 · 소리 초당 32토큰(두 문서 값 가운데 큰
   쪽)으로 센다. 클립 길이는 부분의 `videoMetadata.endOffset`이 말한다(그 칸이 없으면 잴 수 없다).
+- 인라인 WAV 오디오(Hydrogen 글자 귀, D187)는 소리만이라 초당 32토큰(올림 초)으로 센다 — 길이는
+  WAV 머리(프레임 수 ÷ 표본율)가 말한다(머리를 읽지 못하면 잴 수 없다).
 
 가정(D84, Claude와 같다): 텍스트 토큰 수는 UTF-8 바이트 수 이하다 — 문서화된 값이 아니므로 첫 사람
 실행의 영수증이 확인한다. 응답 schema도 입력으로 센다(보수적).
@@ -21,9 +23,11 @@ from __future__ import annotations
 
 import base64
 import binascii
+import io
 import json
 import math
 import re
+import wave
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
@@ -37,6 +41,7 @@ from vlogsrt.project.raw.config import (
     GEMINI_MAX_OUTPUT_TOKENS_LIMIT,
     GEMINI_TRANSCRIBE_PROFILES,
     PRICE_TOKEN_UNIT,
+    WAV_MIME_TYPE,
     RawGeminiAnalysisProfile,
     gemini_transcribe_price_per_minute,
 )
@@ -53,6 +58,7 @@ JPEG_MIME_TYPE = "image/jpeg"
 VIDEO_MIME_TYPE = "video/mp4"
 IMAGE_PART_KEYS = frozenset({"inlineData", "mediaResolution"})
 VIDEO_PART_KEYS = frozenset({"inlineData", "mediaResolution", "videoMetadata"})
+AUDIO_PART_KEYS = frozenset({"inlineData"})
 USER_ROLE = "user"
 DURATION = re.compile(r"(0|[1-9][0-9]{0,5})(\.[0-9]{1,9})?s")
 """protobuf Duration의 JSON 표기(`19.5s`) — 음수·지수·단위 없는 값은 받지 않는다."""
@@ -91,6 +97,11 @@ def clip_tokens(profile: RawGeminiAnalysisProfile, seconds: Fraction) -> int:
     whole = math.ceil(seconds)
     frames = math.ceil(seconds * profile.video_frames_per_second) + 1
     return frames * profile.video_frame_tokens + whole * profile.audio_tokens_per_second
+
+
+def audio_tokens(profile: RawGeminiAnalysisProfile, seconds: Fraction) -> int:
+    """소리만인 부분 하나의 토큰 상한 — 올림 초 × 초당 소리 토큰(클립의 소리 몫과 같은 셈)."""
+    return math.ceil(seconds) * profile.audio_tokens_per_second
 
 
 def window_ceiling_usd(
@@ -172,13 +183,39 @@ def _contents_measure(contents: object, profile: RawGeminiAnalysisProfile) -> tu
         elif _fixed_image(part, profile):
             media_tokens += profile.image_tokens
         else:
-            seconds = _clip_seconds(part, profile)
-            if seconds is None:
-                raise ValueError(
-                    "토큰을 잴 수 없는 부분이다(글자·고정 해상도 JPEG·길이를 적은 클립만)"
-                )
-            media_tokens += clip_tokens(profile, seconds)
+            media_tokens += _media_tokens(part, profile)
     return text_bytes, media_tokens
+
+
+def _media_tokens(part: object, profile: RawGeminiAnalysisProfile) -> int:
+    """클립 또는 인라인 WAV 하나의 토큰 상한 — 둘 다 아니면 잴 수 없다."""
+    seconds = _clip_seconds(part, profile)
+    if seconds is not None:
+        return clip_tokens(profile, seconds)
+    audio = _audio_seconds(part)
+    if audio is not None:
+        return audio_tokens(profile, audio)
+    raise ValueError(
+        "토큰을 잴 수 없는 부분이다(글자·고정 해상도 JPEG·길이를 적은 클립·인라인 WAV만)"
+    )
+
+
+def _audio_seconds(part: object) -> Fraction | None:
+    """인라인 WAV 부분이면 머리가 말하는 길이 — 아니거나 머리를 못 읽으면 None(잴 수 없다)."""
+    if not isinstance(part, Mapping) or set(part) != AUDIO_PART_KEYS:
+        return None
+    inline = part["inlineData"]
+    if not _inline_base64(inline, WAV_MIME_TYPE):
+        return None
+    raw = base64.b64decode(inline["data"], validate=True)
+    try:
+        with wave.open(io.BytesIO(raw), "rb") as audio:
+            frames, rate = audio.getnframes(), audio.getframerate()
+    except (wave.Error, EOFError):
+        return None
+    if rate <= 0:
+        return None
+    return Fraction(frames, rate)
 
 
 def _clip_seconds(part: object, profile: RawGeminiAnalysisProfile) -> Fraction | None:
