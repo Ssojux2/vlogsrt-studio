@@ -178,7 +178,7 @@ def test_the_cue_keys_follow_the_draft_editor_and_delete_prefers_a_picked_cue() 
 
 def test_an_unconfirmed_cue_text_is_committed_before_saving_rendering_adding_or_hiding() -> None:
     """글 칸에 쓴 채로 렌더·넣기·⌘S·창 숨기기를 해도 그 글이 빠지지 않는다."""
-    for head in ("function render() {", "function addSource() {"):
+    for head in ("function render() {", "function addSourceAt(id, atEnd) {"):
         body = PLAYER_JS[PLAYER_JS.index(head) :]
         assert body.index("commitText();") < body.index("\n  }\n"), head
     assert "commitText(); saveNow(false);" in PLAYER_JS
@@ -313,8 +313,10 @@ def test_adding_a_source_needs_the_token_and_passes_the_document_revision_and_so
     player = server._timeline_player
     calls: list[tuple[Any, ...]] = []
 
-    def add(_root: Path, timeline_id: str, base: int, doc: Any, source_id: str) -> Any:
-        calls.append((timeline_id, base, doc, source_id))
+    def add(
+        _root: Path, timeline_id: str, base: int, doc: Any, source_id: str, *, at_end: bool
+    ) -> Any:
+        calls.append((timeline_id, base, doc, source_id, at_end))
         return {"revision": base + 1, "doc": doc, "cues": 3, "empty": 1, "clamped": 0}
 
     monkeypatch.setattr(server.raw, "timeline_add_source", add)
@@ -332,7 +334,10 @@ def test_adding_a_source_needs_the_token_and_passes_the_document_revision_and_so
     payload["token"] = server._visual_lifetime_token
     got = player.action(payload, "add")
     assert got == {"ok": True, "revision": 4, "doc": doc, "cues": 3, "empty": 1, "clamped": 0}
-    assert calls == [("t1", 3, doc, "s2")]
+    assert calls == [("t1", 3, doc, "s2", False)]
+    # 영상 목록에서 끌어 놓으면(W-110) 자리는 타임라인 끝이다.
+    player.action({**payload, "place": "end"}, "add")
+    assert calls[-1] == ("t1", 3, doc, "s2", True)
     broken = player.action({**payload, "sourceId": ""}, "add")
     assert broken["ok"] is False and broken["stale"] is False
     assert "tl_add_source" in [f.__name__ for f in player.server_functions()]
@@ -818,6 +823,39 @@ def test_final_output_with_english_buys_the_translation_only_when_it_is_missing(
     assert "영어 번역(Gemini, 유료)" in PLAYER_JS
 
 
+def test_a_refused_final_output_always_answers_and_is_logged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """최종출력 거절은 늘 화면 글이다 — 연결의 승인 오류(`AnalysisApprovalError`, RuntimeError)도
+    서버 함수 밖으로 새지 않고 값으로 돌아오며 서버 로그(활동 띠 · 「기록」)에도 남는다. 브라우저는
+    누른 순간 「거는 중」을 말하고, 답이 없어도(서버 함수가 터져도) 까닭을 남긴다."""
+    from vlogsrt.project.raw.understanding_luna import AnalysisApprovalError
+
+    server, _root, signature = _server(tmp_path)
+    player = server._timeline_player
+    monkeypatch.setattr(server.raw, "timeline_korean_srt", lambda *_a: tmp_path / "k.srt")
+    monkeypatch.setattr(server.raw, "srt_translation_cached", lambda _r, _s: False)
+
+    def unpriced(model: str) -> object:
+        raise AnalysisApprovalError(f"{model} 가격 미정")
+
+    transport = SimpleNamespace(semantic_client=unpriced)
+    monkeypatch.setattr(server, "_live_transport_for_action", lambda: transport)
+    warned: list[str] = []
+    monkeypatch.setattr(server, "_serve_warn", warned.append)
+    payload = {"signature": signature, "token": server._visual_lifetime_token,
+               "timelineId": "t1", "revision": 5, "burn": "ko-en"}  # fmt: skip
+    got = player.action(payload, "render")
+    assert got["ok"] is False and "가격 미정" in str(got["error"])
+    assert len(warned) == 1 and warned[0].startswith("최종출력을 걸지 못했다: ")
+    stale = player.action({**payload, "token": "old"}, "render")
+    assert stale["ok"] is False and stale["stale"] is True and len(warned) == 2
+    assert player.action({**payload, "jobId": "x"}, "job")["ok"] is False and len(warned) == 2
+    assert "S.server.tl_render(payload).catch(" in PLAYER_JS
+    assert 'say("최종출력을 거는 중 — 리비전 "' in PLAYER_JS
+    assert "button.disabled = !!S.rendering" in PLAYER_JS
+
+
 def test_the_share_job_checks_the_online_gate_before_it_buys_a_translation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -846,3 +884,23 @@ def test_the_share_job_checks_the_online_gate_before_it_buys_a_translation(
     server.raw.start_timeline_share(root, "t1", 1, "ko", object())
     server.raw.start_timeline_share(root, "t1", 1, "ko-en")
     assert gates == [root] and len(jobs) == 2
+
+
+def test_a_video_card_dragged_onto_the_lane_is_added_at_the_end() -> None:
+    """W-110(D184) — 영상 목록 카드는 원본 아이디를 싣고 끌리며, 재생기 레인에 놓으면 그 원본
+    전체를 타임라인 끝에 넣는다(`place: "end"`). 끄는 동안 끝에 넣을 자리 선을 긋고, 이미 클립이
+    있거나 타임라인에 없던 원본은 까닭을 말하고 넣지 않는다. 「원본 넣기」 고르기는 그대로다."""
+    from ui import ui_facade
+
+    drop_type = "application/x-vlogsrt-source"
+    source = Path(ui_facade.__file__).read_text(encoding="utf-8")
+    assert 'draggable="true" data-vl-source="' in source
+    assert f'ev.dataTransfer.setData("{drop_type}", sourceId)' in source
+    js = PLAYER_JS
+    assert f'var DROP_TYPE = "{drop_type}";' in js
+    for event in ("dragover", "dragleave", "drop"):
+        assert f'lane.addEventListener("{event}",' in js
+    assert 'if (atEnd) { payload.place = "end"; }' in js
+    assert "addSourceAt(ev.dataTransfer.getData(DROP_TYPE), true);" in js
+    assert "paintDropMark(ctx, view, width, height);" in js
+    assert "이미 타임라인에 있습니다" in js and "addSourceAt(pick ? pick.value" in js

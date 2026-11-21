@@ -511,6 +511,18 @@ def test_add_source_goes_first_or_last_by_shooting_order() -> None:
     assert last.document.seeded == (("c", "r"),)
 
 
+def test_add_source_at_the_end_ignores_shooting_order() -> None:
+    """W-110(D184) — 영상 목록에서 끌어 놓은 원본은 촬영 차례와 무관하게 타임라인 끝이다.
+    다른 원본끼리의 차례는 검사가 묻지 않는다(같은 원본만 붙어 있으면 된다)."""
+    empty: tuple[str, tuple[rp.SourceCue, ...]] = ("r", ())
+    document = _doc([("b", 0, 24), ("c", 0, 30)])
+    ended = te.add_source(document, "a", empty, at_end=True)
+    assert _clips(ended.document) == [("b", 0, 24), ("c", 0, 30), ("a", 0, 300)]
+    te.validate(ended.document)
+    with pytest.raises(TimelineEditError):
+        te.add_source(document, "b", empty, at_end=True)
+
+
 def test_add_source_refuses_an_unknown_source_or_one_that_has_a_clip() -> None:
     document = _doc([("a", 0, 30)])
     with pytest.raises(TimelineEditError):

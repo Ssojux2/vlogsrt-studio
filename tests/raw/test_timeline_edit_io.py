@@ -419,6 +419,25 @@ def test_adding_a_never_clipped_source_seeds_its_transcript_and_writes_a_revisio
     assert saved["revision"] == 3
 
 
+def test_a_source_dropped_from_the_list_lands_at_the_end(trip: Folder) -> None:
+    """W-110(D184) — 끌어 놓은 원본은 촬영 차례 자리가 아니라 타임라인 끝에 원본 전체로 선다."""
+    created = _strict(trip, 1)
+    clipped = {clip.source_id for clip in created.document.clips}
+    source = next(s for s in created.document.facts.sources if s.source_id not in clipped)
+    payload = timeline_edit.to_payload(created.document)
+    trip.service.timeline_add_source(
+        trip.root, created.folder.name, 1, payload, source.source_id, at_end=True
+    )
+    _, revision, document = timeline_edit_io.read_document(trip.root, created.folder.name)
+    last = document.clips[-1]
+    assert revision == 2 and len(document.clips) == len(created.document.clips) + 1
+    assert (last.source_id, last.start_frame, last.end_frame) == (
+        source.source_id,
+        0,
+        source.frame_count,
+    )
+
+
 def test_adding_a_source_refuses_a_stale_revision_or_a_clipped_source_and_writes_nothing(
     trip: Folder,
 ) -> None:

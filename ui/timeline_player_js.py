@@ -1328,23 +1328,36 @@ PLAYER_APP_JS = r"""
     W.setTimeout(wait, S.settings.autosaveMs);
   }
   function addSource() {
-    commitText();
     var pick = $("tl-add-pick");
-    var id = pick ? pick.value : "";
+    addSourceAt(pick ? pick.value : "", false);
+  }
+  // `atEnd` — 영상 목록에서 끌어 놓은 원본(W-110, D184)은 촬영 차례 자리가 아니라 타임라인 끝이다.
+  function addSourceAt(id, atEnd) {
+    commitText();
     if (!S.doc || !id || S.adding) { return; }
+    if (!S.doc.facts.sources.some(function (s) { return s.id === id; })) {
+      say("이 타임라인을 만들 때 없던 원본이라 넣지 못합니다(분석 지원 밖이거나 새로 불러온" +
+        " 영상) — 「타임라인으로 보내기」로 새 타임라인을 만드세요.", true);
+      return;
+    }
+    if (unclipped().indexOf(id) < 0) {
+      say(nameOf(id) + "은(는) 이미 타임라인에 있습니다 — 원본 띠의 손잡이로 늘리세요.", true);
+      return;
+    }
     if (S.conflict) {
       say("저장이 충돌한 채로는 원본을 넣지 않습니다 — 먼저 정리하세요.", true);
       return;
     }
     if (S.dirty || S.saving) {
       say("편집을 저장한 뒤 넣습니다…", false);
-      afterSaved(addSource);
+      afterSaved(function () { addSourceAt(id, atEnd); });
       return;
     }
     if (S.playing) { stopPlayback(); }
     S.adding = true;
     var payload = { signature: S.signature, token: S.token, timelineId: S.timelineId,
       baseRevision: S.baseRevision, doc: docPayload(), sourceId: id };
+    if (atEnd) { payload.place = "end"; }
     S.server.tl_add_source(payload).then(function (got) {
       S.adding = false;
       if (!got || !got.ok) { say((got && got.error) || "원본을 넣지 못했습니다.", true); return; }
@@ -1354,10 +1367,61 @@ PLAYER_APP_JS = r"""
           "새로고침한 뒤 다시 넣으세요.", true);
         return;
       }
-      placeAdded(id, got);
+      placeAdded(id, got, atEnd);
     }, function () { S.adding = false; say("원본을 넣지 못했습니다.", true); });
   }
-  function placeAdded(id, got) {
+  // ─── 끌어 놓기(W-110, D184): 영상 목록의 카드를 레인에 놓으면 타임라인 끝에 넣는다 ───
+  // 끄는 동안 레인 끝(마지막 클립 뒤)에 넣을 자리 선을 긋는다. 놓는 자리와 무관하게 끝이다.
+  var DROP_TYPE = "application/x-vlogsrt-source";
+  function carriesSource(ev) {
+    var types = ev.dataTransfer ? ev.dataTransfer.types : null;
+    if (!types) { return false; }
+    for (var i = 0; i < types.length; i += 1) { if (types[i] === DROP_TYPE) { return true; } }
+    return false;
+  }
+  function onDropOver(ev) {
+    if (!S.doc || !carriesSource(ev)) { return; }
+    ev.preventDefault();
+    ev.dataTransfer.dropEffect = "copy";
+    if (!S.dropping) {
+      S.dropping = true;
+      say("놓으면 이 원본 전체를 타임라인 끝에 넣습니다.", false);
+      // 끝이 화면 밖이면 레인을 끝으로 옮겨 넣을 자리를 보인다.
+      var lane = laneCanvas();
+      if (lane && S.spans.length) {
+        S.lane = LN.follow(laneView(), dropEndTicks(), lane.clientWidth);
+      }
+      requestLane();
+    }
+  }
+  function dropEndTicks() {
+    var last = S.spans[S.spans.length - 1];
+    return (last.outStart + last.outFrames) * seqTicks();
+  }
+  function onDropLeave() {
+    if (!S.dropping) { return; }
+    S.dropping = false;
+    requestLane();
+  }
+  function onDrop(ev) {
+    if (!S.doc || !carriesSource(ev)) { return; }
+    ev.preventDefault();
+    onDropLeave();
+    addSourceAt(ev.dataTransfer.getData(DROP_TYPE), true);
+  }
+  function paintDropMark(ctx, view, width, height) {
+    if (!S.dropping || !S.spans.length) { return; }
+    // 끝이 화면 밖이면 가장자리에 긋는다 — 어디에 놓아도 끝이라는 것을 늘 보인다.
+    var x = Math.min(Math.max(LN.x(view, dropEndTicks()), 2), width - 2);
+    ctx.fillStyle = cssVar("--vl-accent");
+    ctx.fillRect(x - 2, 0, 4, height);
+    ctx.font = CANVAS_FONT_PX + "px " + cssVar("--vl-font-sans");
+    ctx.textBaseline = "top";
+    var label = "끝에 넣기";
+    var w = ctx.measureText(label).width;
+    ctx.fillText(label, x + 6 + w > width ? x - 6 - w : x + 6, RULER_PX + 4);
+  }
+  function placeAdded(id, got, atEnd) {
     S.doc = Object.assign({ facts: S.doc.facts }, got.doc);
     S.baseRevision = got.revision;
     S.dirty = false;
@@ -1368,7 +1432,8 @@ PLAYER_APP_JS = r"""
     var notes = [];
     if (got.empty) { notes.push("빈 줄 " + got.empty + "개는 넣지 않음"); }
     if (got.clamped) { notes.push("원본 밖 시각 " + got.clamped + "줄은 원본 안으로"); }
-    say(nameOf(id) + " 원본 전체를 넣었습니다 · 리비전 " + got.revision + " · 새 자막 " + got.cues +
+    say(nameOf(id) + " 원본 전체를 " + (atEnd ? "타임라인 끝에 " : "") + "넣었습니다 · 리비전 " +
+      got.revision + " · 새 자막 " + got.cues +
       "줄" + (notes.length ? " (" + notes.join(" · ") + ")" : "") +
       " — 되돌리기는 여기서 새로 시작합니다(빼려면 「클립 지우기」).", false);
     seek(S.spans[S.sel].outStart);
@@ -2049,6 +2114,7 @@ PLAYER_APP_JS = r"""
     paintLaneClips(ctx, view, width);
     ctx.restore();
     paintSkimmer(ctx, height);
+    paintDropMark(ctx, view, width, height);
     paintHead(ctx, LN.x(view, head), height);
     paintZoomSlider(view);
     paintNav();
@@ -2809,10 +2875,21 @@ PLAYER_APP_JS = r"""
     var burnPick = $("tl-burn");
     var payload = { signature: S.signature, token: S.token, timelineId: S.timelineId,
       revision: S.baseRevision, burn: burnPick ? burnPick.value : "none" };
+    if (S.rendering) { return; }
     if (W.__vlServer) { W.__vlServer.wake(true); }
-    S.server.tl_render(payload).then(function (got) {
+    // 누른 순간 답한다 — 번역 연결 확인 · 리비전 SRT 쓰기가 몇 초 걸릴 수 있다. 답이 오지 않거나
+    // 서버 함수가 터져도 상태 줄에 까닭을 남긴다(예전에는 거절이 아무 말 없이 사라졌다).
+    S.rendering = true;
+    paintRenderButton();
+    say("최종출력을 거는 중 — 리비전 " + payload.revision + "…", false);
+    S.server.tl_render(payload).catch(function () {
+      return { ok: false, error: "서버가 답하지 않았습니다(「기록」의 서버 로그를 보세요)." };
+    }).then(function (got) {
+      S.rendering = false;
+      paintRenderButton();
       if (!got || !got.ok) {
-        say((got && got.error) || "최종출력을 걸지 못했습니다.", true);
+        say("최종출력을 걸지 못했습니다 — " + ((got && got.error) || "까닭을 받지 못했습니다."),
+          true);
         return;
       }
       say("최종출력 중 — 리비전 " + payload.revision + "(렌더" +
@@ -2821,6 +2898,10 @@ PLAYER_APP_JS = r"""
         " 보고, 끝나면 결과 카드와 초안 폴더에 나옵니다.", false);
       watchRender(got.jobId);
     });
+  }
+  function paintRenderButton() {
+    var button = $("tl-render");
+    if (button) { button.disabled = !!S.rendering; }
   }
   // 「영어 만들기」(W-99, D174) — 저장한 리비전의 자막을 옮긴다(유료 · 누름이 승인, D110).
   // 저장 대기 편집을 먼저 보낸다. 끝나면 영어를 다시 찾아 영어 열·자막 겹에 보인다
@@ -3344,6 +3425,9 @@ PLAYER_APP_JS = r"""
       lane.addEventListener("pointerleave", onLaneLeave);
       lane.addEventListener("wheel", onLaneWheel, { passive: false });
       lane.addEventListener("contextmenu", onLaneMenu);
+      lane.addEventListener("dragover", onDropOver);
+      lane.addEventListener("dragleave", onDropLeave);
+      lane.addEventListener("drop", onDrop);
       if (W.ResizeObserver) { new W.ResizeObserver(requestLane).observe(lane); }
     }
     var deckEl = S.rootEl && S.rootEl.closest ? S.rootEl.closest("#vl-timeline-deck") : null;

@@ -6891,6 +6891,11 @@ class RawWorkspaceUi:
         return str(error)
 
     @staticmethod
+    def _serve_warn(message: str) -> None:
+        """서버 함수의 거절을 서버 로그(활동 띠 · 「기록」)에 남긴다 — 화면 모듈은 로그를 모른다."""
+        log.warn(message)
+
+    @staticmethod
     def _serve_str(payload: Mapping[str, object], key: str) -> str:
         value = payload.get(key)
         return value.strip() if isinstance(value, str) else ""
