@@ -242,6 +242,25 @@ REFILL_ORDER_WARNING = (
     " 재시도가 이 자막을 덮지 않습니다. 그 둘을 먼저 끝낸 뒤에 채우세요."
 )
 """계획의 「비용을 한 번만 내기 위한 순서」(D59) — 빈칸 넣기는 재시도·다시 듣기 뒤다."""
+HYDROGEN_EXPLANATION = (
+    "Gemini 4 Hydrogen이 이 영상의 1단계 청크 소리를 다시 듣고, 지금 원본 자막의 줄마다 글자만"
+    " 바꿉니다 — 줄의 시각·나눔은 그대로입니다(유료, 누르면 바로 시작합니다). 받은 글자는 새"
+    " 원본 자막 리비전이 되고, 직접 고친 줄은 덮지 않습니다."
+)
+HYDROGEN_APPROVE_LABEL = "글자 다시 받기(Hydrogen)"
+HYDROGEN_STARTED_TEXT = (
+    "글자 다시 받기를 시작했습니다 — 끝나면 바뀐 글자가 원본 자막 목록에 보입니다."
+)
+HYDROGEN_RUNNING_TEXT = "Hydrogen이 글자를 다시 듣는 중입니다."
+HYDROGEN_CHANGED_TEXT = (
+    "원본 자막이나 받을 범위가 바뀌었습니다 — 바뀐 화면을 확인하고 다시 누르세요. 아무것도"
+    " 시작하지 않았습니다."
+)
+HYDROGEN_KEY_TEXT = (
+    "연결 설정이 필요합니다 — Gemini 결제 연결 키가 없어 글자를 받지 않았습니다. `.env`에"
+    " `GEMINI_API_KEY`를 넣고 앱을 다시 띄워 주세요."
+)
+HYDROGEN_CACHED_TEXT = "받은 답이 모두 남아 있습니다 — 눌러도 새로 사지 않고 글자만 얹습니다."
 REFILL_APPROVE_LABEL = "빈칸 재전사 승인"
 REFILL_STARTED_TEXT = "빈칸 재전사를 시작했습니다 — 끝나면 넣은 자막이 원본 자막 목록에 보입니다."
 REFILL_CHANGED_TEXT = (
@@ -394,6 +413,7 @@ WORKBENCH_TOKEN_ACTIONS = (
     "sync-recheck",
     "relisten",
     "refill",
+    "hydrogen-retext",
     "snap-apply",
     "snap-revert",
     "timing-truth",
@@ -757,6 +777,7 @@ ACTIVITY_JOB_LABELS = {
     raw_service.UPKEEP_JOB_KIND: "작업공간 정리",
     raw_service.SYNC_CHECK_JOB_KIND: "자막 시각 확인",
     raw_service.REFILL_JOB_KIND: "말소리 빈칸 재전사",
+    raw_service.HYDROGEN_RETEXT_JOB_KIND: "글자 다시 받기(Hydrogen)",
     "automatic_cleanup": "자동 정리",
     "cleanup_pipeline": "영상 정리",
     "selection_analysis": "분석 준비",
@@ -1271,6 +1292,17 @@ def _refill_notes(scope: Any, sync_view: Mapping[str, Any] | None) -> list[str]:
     if sync_view is not None and sync_view.get("level") == "red":
         notes.append(REFILL_NOTE_RED)
     return notes
+
+
+def _hydrogen_last_line(record: Mapping[str, Any] | None) -> str | None:
+    """지난 글자 다시 받기 한 줄 — 바꾼 줄 수 · 실패 청크 수, 거절이면 그 까닭."""
+    if record is None:
+        return None
+    failed = sum(chunk.get("status") == "unavailable" for chunk in record.get("chunks", []))
+    tail = f" · 받지 못한 청크 {failed}개(글자 그대로)" if failed else ""
+    if record.get("refusal"):
+        return f"지난 글자 다시 받기: 쓰지 않았습니다 — {record['refusal']}{tail}"
+    return f"지난 글자 다시 받기: Hydrogen 글자 {record.get('changed', 0)}줄{tail}"
 
 
 def _refill_last_line(record: Mapping[str, Any] | None) -> str | None:
@@ -7504,6 +7536,7 @@ class RawWorkspaceUi:
             fields["syncCheck"] = sync_view
         fields["relisten"] = self._relisten_view(root, sid, transcript)
         fields["refill"] = self._refill_view(root, sid, transcript, sync_view)
+        fields["hydrogen"] = self._hydrogen_view(root, sid)
         fields["snap"] = self._snap_view(root, sid)
         return fields
 
@@ -7628,6 +7661,7 @@ class RawWorkspaceUi:
             "sync-recheck": self._visual_sync_recheck,
             "relisten": self._visual_relisten,
             "refill": self._visual_refill,
+            "hydrogen-retext": self._visual_hydrogen_retext,
             "snap-apply": self._visual_snap_apply,
             "snap-revert": self._visual_snap_revert,
             "timing-truth": self._visual_timing_truth,
@@ -7693,6 +7727,56 @@ class RawWorkspaceUi:
             after=lambda: self._after_transcript_change(root, source_id),
         )
         return self._source_reply(root, source_id, echo, REFILL_STARTED_TEXT)
+
+    def _hydrogen_view(self, root: Path, source_id: str) -> dict[str, object]:
+        """「글자 다시 받기(Hydrogen)」 칸의 값(W-114d, D187) — 상태·지난 결과(무료, 표시).
+
+        견적은 없다(D110). 단추는 지금 범위의 digest를 싣고 서버가 누른 순간 다시 재어 대조한다."""
+        view: dict[str, object] = {
+            "explanation": HYDROGEN_EXPLANATION,
+            "label": HYDROGEN_APPROVE_LABEL,
+            "last": _hydrogen_last_line(self.raw.hydrogen_retext_last(root, source_id)),
+        }
+        if self.raw.hydrogen_retext_running(root, source_id):
+            return {**view, "state": "running", "reason": HYDROGEN_RUNNING_TEXT}
+        scope = self.raw.hydrogen_retext_scope(root, source_id)
+        if isinstance(scope, str):
+            return {**view, "state": "blocked", "reason": scope}
+        lines = sum(len(chunk.lines) for chunk in scope.chunks)
+        view["summary"] = f"보낼 줄 {lines}개 · 청크 {len(scope.chunks)}개"
+        if not scope.pieces:
+            view["note"] = HYDROGEN_CACHED_TEXT
+        return {**view, "state": "ready", "digest": scope.digest}
+
+    def _visual_hydrogen_retext(self, root: Path, payload: Mapping[str, object], echo: str) -> dict:
+        """「글자 다시 받기(Hydrogen)」 — 단추가 실은 digest가 지금 범위와 같을 때만 작업을 건다.
+
+        누름이 승인이다(D110). 다르면 아무것도 시작하지 않고 지금 화면을 보인다(0송신). 작업
+        본문이 유료 호출 전에 범위를 한 번 더 재어 맞춘다."""
+        source_id = self._serve_str(payload, "sourceId")
+        task = self._task_for(root, (source_id,))
+        busy = task is not None and self._task_running(root, task)
+        running = self.raw.hydrogen_retext_running(root, source_id)
+        if busy or running or self.raw.refill_running(root, source_id):
+            raise gr.Error(raw_service.HYDROGEN_RETEXT_BUSY)
+        current = self.raw.hydrogen_retext_scope(root, source_id)
+        if isinstance(current, str):
+            raise gr.Error(current)
+        if self._serve_str(payload, "digest") != current.digest:
+            return self._source_reply(root, source_id, echo, HYDROGEN_CHANGED_TEXT)
+        if self._startup_credentials is None and self._live_transport is None:
+            raise gr.Error(HYDROGEN_KEY_TEXT)
+        transport = self._live_transport_for_action()
+        if getattr(transport, "timing_client", None) is None:
+            raise gr.Error(HYDROGEN_KEY_TEXT)
+        self.raw.hydrogen_retext_start(
+            root,
+            source_id,
+            current.digest,
+            transport,
+            after=lambda: self._after_transcript_change(root, source_id),
+        )
+        return self._source_reply(root, source_id, echo, HYDROGEN_STARTED_TEXT)
 
     def _snap_view(self, root: Path, source_id: str) -> dict[str, object]:
         """「시각 맞춤 제안」 칸의 값(D59 19h) — 상태·센 어긋남·판정 수·예측·먼저 들을 줄·되돌리기.
@@ -7926,6 +8010,7 @@ class RawWorkspaceUi:
             self._vl_sync_recheck_function(),
             self._vl_relisten_function(),
             self._vl_refill_function(),
+            self._vl_hydrogen_function(),
             *self._vl_snap_functions(),
             self._vl_timing_truth_function(),
             *self._vl_snap_all_functions(),
@@ -7964,6 +8049,14 @@ class RawWorkspaceUi:
             return self.visual_workbench_action(payload, "refill")
 
         return vl_refill
+
+    def _vl_hydrogen_function(self) -> Callable[[dict[str, object]], dict[str, object]]:
+        """「글자 다시 받기(Hydrogen)」(W-114d) — 같은 토큰 문, 범위 digest를 서버가 대조한다."""
+
+        def vl_hydrogen_retext(payload: dict[str, object]) -> dict[str, object]:
+            return self.visual_workbench_action(payload, "hydrogen-retext")
+
+        return vl_hydrogen_retext
 
     def _vl_snap_functions(self) -> list[Callable[[dict[str, object]], dict[str, object]]]:
         """「시각 맞춤 적용(무료)」·「되돌리기」(D59 19h) — 같은 토큰 문, 화면이 본 sha·리비전을

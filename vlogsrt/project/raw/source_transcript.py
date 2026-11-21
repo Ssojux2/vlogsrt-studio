@@ -523,7 +523,10 @@ SNAP_FIELD = "snap"
 SNAP_UNDO_FIELD = "snap_undo"
 """시각 맞춤을 되돌린 리비전의 기록 — 그 리비전에만 있다."""
 
-REVISION_ONLY_FIELDS = (SNAP_FIELD, SNAP_UNDO_FIELD)
+HYDROGEN_FIELD = "hydrogen_text"
+"""「글자 다시 받기(Hydrogen)」(W-114d, D187)로 글자를 바꾼 리비전의 출처 기록 — 그 리비전에만."""
+
+REVISION_ONLY_FIELDS = (SNAP_FIELD, SNAP_UNDO_FIELD, HYDROGEN_FIELD)
 """리비전 하나에만 속하는 기록 — 다음 편집·넣기·적용·되돌리기가 새 리비전으로 옮기지 않는다."""
 
 SNAP_SCHEMA = "sync-snap-apply/v1"
@@ -548,6 +551,86 @@ SNAP_ALREADY_APPLIED = (
 )
 UNDO_NOTHING = "되돌릴 시각 맞춤이 없습니다 — 아무것도 바꾸지 않았습니다."
 UNDO_MISSING = "적용 전 원본 자막을 찾지 못해 되돌리지 않습니다 — 아무것도 바꾸지 않았습니다."
+
+
+HYDROGEN_SCHEMA = "source-hydrogen-text/v1"
+HYDROGEN_REASON = "hydrogen"
+"""Hydrogen이 그 줄 아이디에 준 글자로 바꿨다(D187) — 1단계 글자 귀와 같은 이유 값이다."""
+HYDROGEN_REVISION_CHANGED = (
+    "원본 자막이 그사이 바뀌었습니다 — 글자를 다시 받아 주세요. 받은 답은 캐시에 남아 다시 사지"
+    " 않습니다. 아무것도 바꾸지 않았습니다."
+)
+HYDROGEN_NO_CHANGE = "Hydrogen이 들은 글자가 지금 자막과 같습니다 — 아무것도 바꾸지 않았습니다."
+HUMAN_TEXT_SOURCES = (TEXT_SOURCE_MANUAL, TEXT_SOURCE_MIXED)
+"""사람이 준 글자 — 「글자 다시 받기」가 덮지 않는다."""
+
+
+def replace_texts(
+    workspace: Any,
+    asset_id: str,
+    expected_revision: str,
+    texts: Mapping[str, str],
+    *,
+    model: str,
+    identity: str,
+    digest: str,
+    origin: str,
+    guard: StoreGuard | None = None,
+) -> dict:
+    """「글자 다시 받기(Hydrogen)」(W-114d, D187) — 줄 아이디마다 글자만 바꾼 새 리비전 하나.
+
+    시각·아이디·순서·수·틱은 손대지 않는다(규칙 1·5) — 바뀌는 칸은 글자와 그 증거(처음 들은 글
+    `whisper_text`는 처음 값 그대로 남는다)뿐이다. 사람이 준 글자(`manual`·`mixed`)와 빈 글자는
+    덮지 않는다. 바뀐 줄이 없으면 쓰지 않고 거절한다. 새 리비전은 `edited=True`, 바뀐 줄마다
+    `dirty_ranges` 하나, 출처 기록(`HYDROGEN_FIELD`)을 싣는다."""
+    current = _read_latest(workspace, asset_id)
+    if not current or current["revision"] != expected_revision:
+        raise RawWorkspaceError(HYDROGEN_REVISION_CHANGED)
+    rows = [dict(row) for row in current["utterances"]]
+    spans: list[dict] = []
+    for row in rows:
+        new = " ".join(str(texts.get(row["utterance_id"], "")).split())
+        if not new or new == row["text"] or row.get("text_source") in HUMAN_TEXT_SOURCES:
+            continue
+        first = row.get("whisper_text", row["text"]) if "text_source" in row else row["text"]
+        row.update(
+            text=new,
+            whisper_text=first,
+            text_source=model,
+            retext_reason=HYDROGEN_REASON,
+            alt_text=str(row.get("alt_text") or ""),
+            text_origin=origin,
+        )
+        spans.append({"start": row["start"], "end": row["end"]})
+    if not spans:
+        raise RawWorkspaceError(HYDROGEN_NO_CHANGE)
+    revision = uuid.uuid4().hex
+    payload = dict(
+        _carried(current),
+        sequence=current["sequence"] + 1,
+        edited=True,
+        revision=revision,
+        utterances=rows,
+        dirty_ranges=current["dirty_ranges"] + spans,
+    )
+    payload[HYDROGEN_FIELD] = {
+        "schema": HYDROGEN_SCHEMA,
+        "revision": revision,
+        "from_revision": expected_revision,
+        "model": model,
+        "identity": identity,
+        "digest": digest,
+        "changed": len(spans),
+    }
+    _store_edit(
+        workspace,
+        asset_id,
+        expected_revision,
+        payload,
+        guard=guard,
+        stale=HYDROGEN_REVISION_CHANGED,
+    )
+    return payload
 
 
 def _carried(current: Mapping[str, Any]) -> dict:

@@ -311,9 +311,10 @@ def test_blocks_put_the_approval_mode_in_the_approval_cell_and_wire_it(
     names = [fn.__name__ for fn in ui._visual_workbench_block.server_fns]
     # 19f가 빈칸 재전사 승인을, 19h가 시각 맞춤 적용·되돌리기를, W-25b가 시각 정답을, W-25e가
     # 모든 영상 시각 맞춤 확인·적용을, W-71이 고르지 않은 영상의 패널 칸 읽기를 끝에 더했다.
-    assert names[-8:] == [
+    assert names[-9:] == [
         "vl_relisten",
         "vl_refill",
+        "vl_hydrogen_retext",
         "vl_snap_apply",
         "vl_snap_revert",
         "vl_timing_truth",

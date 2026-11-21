@@ -97,6 +97,7 @@ from vlogsrt.project.raw.config import (
     GEMINI_ANALYSIS_PROFILES,
     GEMINI_MODEL_PREFIX,
     GEMINI_TRANSCRIBE_PROFILES,
+    HYDROGEN_TEXT,
     MODE_AUTO,
     MODE_CHOICES,
     MODE_LANDSCAPE,
@@ -565,6 +566,28 @@ RELISTEN_MEDIA_MISSING_REFUSAL = (
     "원본 파일을 읽지 못했습니다 — 원본 연결을 확인하세요. 아무것도 바꾸지 않았습니다."
 )
 CONTEXT_NOTHING = "맥락을 평가할 분석이 없습니다 — 영상 분석을 먼저 마치세요"
+HYDROGEN_RETEXT_JOB_KIND = "hydrogen_retext"
+"""「글자 다시 받기(Hydrogen)」 작업(W-114d, D187) — 지금 원본 자막 줄의 글자만 Hydrogen에 다시
+묻는다(유료). 작업 지문은 `<원본>:<범위 digest>`다."""
+HYDROGEN_RETEXT_WHISPER = (
+    "whisper로 들은 영상입니다 — 「다시 듣기」로 Gemini에 다시 들으면 Hydrogen 글자를 함께"
+    " 받습니다."
+)
+HYDROGEN_RETEXT_PENDING = (
+    "다시 듣기를 기다리는 영상입니다 — 다시 들으면 Hydrogen 글자를 함께 받으니 따로 받지 않습니다."
+)
+HYDROGEN_RETEXT_BUSY = (
+    "이 영상의 분석·빈칸 재전사·글자 다시 받기가 진행 중입니다 — 끝난 뒤 다시 눌러 주세요."
+    " 아무것도 시작하지 않았습니다."
+)
+HYDROGEN_RETEXT_CHANGED = (
+    "원본 자막이나 받을 범위가 바뀌었습니다 — 바뀐 화면을 확인하고 다시 누르세요. 유료 호출은"
+    " 시작하지 않았습니다."
+)
+HYDROGEN_RETEXT_NO_CLIENT = (
+    "Gemini 결제 연결 키가 없어 글자를 받지 않았습니다 — .env에 GEMINI_API_KEY를 넣고 앱을 다시"
+    " 켜세요. 유료 호출은 시작하지 않았습니다."
+)
 REFILL_JOB_KIND = "speech_refill"
 """말소리 빈칸 재전사 작업(D59 19f) — 승인한 범위의 조각만 whisper(·두 번째 귀)에 다시
 묻는다(유료)."""
@@ -2147,6 +2170,138 @@ class RawWorkspaceService:
     # ── 시각 맞춤 적용·되돌리기(D59 19h) — 제안은 무료로 다시 재고, 적용은 사람이 누를 때만 ──────
     # 제안 계산(`sync_snap`)과 원본 자막 쓰기(`apply_changes`·`restore`)는 이 아래의 `apply_snap*`·
     # `revert_snap*`만 부른다(불변식). 화면은 이 메서드들로만 닿는다.
+
+    # ── 「글자 다시 받기(Hydrogen)」(W-114d, D187) — 이미 들은 영상의 글자만 다시 듣는다 ──────
+
+    def hydrogen_retext_running(self, root: Path, asset_id: str) -> bool:
+        """그 원본의 글자 다시 받기 작업이 도는 중인가 — 작업 지문은 `<원본>:<digest>`다."""
+        return any(
+            job.input_fingerprint.startswith(f"{asset_id}:")
+            for job in self.active_jobs(root, (HYDROGEN_RETEXT_JOB_KIND,))
+        )
+
+    def hydrogen_retext_scope(self, root: Path, asset_id: str) -> Any:
+        """지금 받을 범위(무료, 보내지 않는다) — 받을 수 없으면 그 이유(존댓말 한 줄)."""
+        from vlogsrt.project.raw import asr_epoch, hydrogen_retext, source_transcript
+
+        workspace = self._workspace(root)
+        document = source_transcript.load(workspace, asset_id)
+        if document is None:
+            return hydrogen_retext.NO_TRANSCRIPT
+        if timing_engine.resolve(workspace, asset_id) == TIMING_ENGINE_WHISPER:
+            return HYDROGEN_RETEXT_WHISPER
+        if asr_epoch.state(workspace, asset_id).pending:
+            return HYDROGEN_RETEXT_PENDING
+        return hydrogen_retext.scope_for(workspace.root, asset_id, document, HYDROGEN_TEXT)
+
+    def hydrogen_retext_last(self, root: Path, asset_id: str) -> dict | None:
+        """가장 최근 글자 다시 받기 기록 — 화면의 「지난 결과」 한 줄. 읽기만 한다."""
+        path = self._hydrogen_retext_record_path(root, asset_id)
+        if not path.is_file():
+            return None
+        body = json.loads(path.read_text(encoding="utf-8"))
+        return body if isinstance(body, dict) else None
+
+    def _hydrogen_retext_record_path(self, root: Path, asset_id: str) -> Path:
+        return self._workspace(root).root / "analysis" / "hydrogen_retext" / f"{asset_id}.json"
+
+    def hydrogen_retext_start(
+        self,
+        root: Path,
+        asset_id: str,
+        digest: str,
+        transport: Any,
+        after: Callable[[], None] | None = None,
+    ) -> JobHandle:
+        """누른 범위로 작업을 건다(누름이 승인, D110) — 본문이 유료 호출 전에 범위를 다시 잰다."""
+
+        def body(context: JobContext) -> None:
+            self.hydrogen_retext_source(root, asset_id, digest, transport, context)
+            if after is not None:
+                after()
+
+        return self.submit_job(root, HYDROGEN_RETEXT_JOB_KIND, f"{asset_id}:{digest}", body)
+
+    def hydrogen_retext_source(
+        self, root: Path, asset_id: str, digest: str, transport: Any, context: JobContext
+    ) -> dict[str, Any]:
+        """글자 다시 받기(작업 본문, 유료) — 범위가 누른 것과 같을 때만 묻고, 받은 글자로 새
+        리비전 하나를 쓴다(`source_transcript.replace_texts` — 시각·줄은 그대로)."""
+        from vlogsrt.project.raw import hydrogen_retext, request_log
+        from vlogsrt.project.raw.understanding_luna import online_env_blocked
+
+        workspace = self._workspace(root)
+        scope = self.hydrogen_retext_scope(root, asset_id)
+        if isinstance(scope, str):
+            raise RawWorkspaceError(scope)
+        if scope.digest != digest:
+            raise RawWorkspaceError(HYDROGEN_RETEXT_CHANGED)
+        client = getattr(transport, "timing_client", None)
+        if client is None:
+            raise RawWorkspaceError(HYDROGEN_RETEXT_NO_CLIENT)
+        blocked = online_env_blocked()
+        if blocked is not None:
+            raise RawWorkspaceError(blocked)
+        context.check_cancel()
+        on = getattr(transport, "on", None) or datetime.now(UTC).date()
+        with request_log.scope(workspace, context.job_id, live=True):
+            result = hydrogen_retext.run(workspace.root, scope, client, HYDROGEN_TEXT, on=on)
+        return self._hydrogen_retext_settle(root, scope, result)
+
+    def _hydrogen_retext_settle(self, root: Path, scope: Any, result: Any) -> dict[str, Any]:
+        """받은 글자를 새 리비전 하나로 쓰고 기록한다(쓰기는 여기 하나). 받은 답은 캐시에 남는다."""
+        from vlogsrt.project.raw import asr_epoch, hydrogen_text_pass, source_transcript
+        from vlogsrt.project.raw.understanding_luna import ORIGIN_LIVE
+
+        workspace = self._workspace(root)
+
+        def guard(db: Any) -> None:
+            if asr_epoch.pending_on(db, scope.asset_id):
+                raise RawWorkspaceError(HYDROGEN_RETEXT_PENDING)
+
+        record: dict[str, Any] = {
+            "schema": "raw-hydrogen-retext-record/v1",
+            "asset_id": scope.asset_id,
+            "from_revision": scope.revision,
+            "digest": scope.digest,
+            "model": HYDROGEN_TEXT.model,
+            "asked": result.asked,
+            "chunks": list(result.chunks),
+            "left_out": scope.left_out,
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        try:
+            payload = source_transcript.replace_texts(
+                workspace,
+                scope.asset_id,
+                scope.revision,
+                result.texts,
+                model=HYDROGEN_TEXT.model,
+                identity=hydrogen_text_pass.text_identity(HYDROGEN_TEXT),
+                digest=scope.digest,
+                origin=ORIGIN_LIVE,
+                guard=guard,
+            )
+        except RawWorkspaceError as error:
+            record.update(changed=0, refusal=str(error))
+            self._write_hydrogen_retext_record(root, scope.asset_id, record)
+            log.warn(f"글자 다시 받기: {error}")
+            raise
+        changed = int(payload[source_transcript.HYDROGEN_FIELD]["changed"])
+        record.update(changed=changed, revision=payload["revision"])
+        self._write_hydrogen_retext_record(root, scope.asset_id, record)
+        log.out(f"글자 다시 받기: Hydrogen 글자 {changed}줄 — 새 원본 자막 리비전")
+        self._queue_sync_checks(root, (scope.asset_id,))  # 리비전이 바뀌었다 — 시각 확인을 다시
+        return record
+
+    def _write_hydrogen_retext_record(
+        self, root: Path, asset_id: str, record: Mapping[str, Any]
+    ) -> None:
+        path = self._hydrogen_retext_record_path(root, asset_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_suffix(".tmp")
+        temp.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+        oscompat.replace(temp, path)
 
     def apply_snap_preview(self, root: Path, asset_id: str) -> Any:
         """「시각 맞춤 제안」 칸의 값(무료) — 지금 제안의 sha·센 어긋남·판정 수·예측·먼저 들을 줄.

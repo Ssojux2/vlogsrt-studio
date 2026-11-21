@@ -226,7 +226,7 @@ def _hydrogen_chunk(
         return replace(base, status=STATUS_TIMING_FAILED)
     if not lines:
         return replace(base, status=STATUS_NO_LINES)
-    cached = _cached(request.cache_dir / f"{base.key}.json", base.key, lines)
+    cached = cached_plan(request.cache_dir / f"{base.key}.json", base.key, lines)
     if cached is not None:
         return replace(base, status=STATUS_RECEIVED, plan=cached, cached=True)
     if provider is None:
@@ -252,7 +252,7 @@ def _ask(
         attempt = request_log.begin(TEXT_REQUEST_STAGE, base.key)
         response = provider.generate(body)
         request_log.finish(attempt, received=True)
-        _record_usage(response, request, attempt)
+        record_usage(response, request, attempt)
     except Exception as exc:  # noqa: BLE001 - 글자 실패는 이 청크의 기록이다(규칙 9)
         category, note, uncertain = provider_error(exc)
         request_log.finish(attempt, received=not uncertain, note=category)
@@ -261,11 +261,11 @@ def _ask(
     plan = hio.read_reply(response, lines)
     if not plan.accepted:  # 받아 줄 수 없는 응답 — 캐시하지 않는다(다음 실행이 다시 묻는다)
         return _unavailable(base, f"{plan.reason}: {plan.detail}")
-    _write_cache(request.cache_dir, base.key, request.settings, response)
+    write_cache(request.cache_dir, base.key, request.settings, response)
     return replace(base, status=STATUS_RECEIVED, plan=plan)
 
 
-def _record_usage(
+def record_usage(
     response: Mapping[str, Any], request: HydrogenPassRequest, attempt: str | None
 ) -> None:
     """받은 응답의 실측 사용량을 그 요청 줄에 단다 — 못 매기면 가격 미정이다(0원이 아니다)."""
@@ -282,7 +282,7 @@ def _unavailable(base: HydrogenChunkOutcome, note: str) -> HydrogenChunkOutcome:
     return replace(base, status=STATUS_UNAVAILABLE, error=note)
 
 
-def _cached(
+def cached_plan(
     path: Path, key: str, lines: Sequence[hio.ChunkLine]
 ) -> hydrogen_text.LineTextPlan | None:
     """성공 캐시의 계획 — 읽지 못하거나 받지 못한 항목은 없는 것으로 치고 경고한다."""
@@ -303,7 +303,7 @@ def _cached(
     return plan
 
 
-def _write_cache(
+def write_cache(
     directory: Path, key: str, settings: HydrogenTextSettings, response: Mapping[str, Any]
 ) -> None:
     directory.mkdir(parents=True, exist_ok=True)
@@ -478,6 +478,9 @@ class LiveHydrogenProvider:
 
 __all__ = [
     "REASON_HEARD",
+    "cached_plan",
+    "record_usage",
+    "write_cache",
     "STATUS_NO_LINES",
     "TEXT_CACHE_DIRNAME",
     "TEXT_REQUEST_STAGE",
