@@ -248,6 +248,10 @@ HYDROGEN_EXPLANATION = (
     " 원본 자막 리비전이 되고, 직접 고친 줄은 덮지 않습니다."
 )
 HYDROGEN_APPROVE_LABEL = "글자 다시 받기(Hydrogen)"
+HYDROGEN_EXTRA_NOTE = (
+    "Hydrogen이 자막 줄 밖에서 들은 말이 {count}곳 있습니다 — 원본 자막의 「확인 필요」 표시에서"
+    " 어느 줄 곁인지 볼 수 있습니다. 그 자리의 빈칸은 말소리 측정이 고릅니다."
+)
 HYDROGEN_STARTED_TEXT = (
     "글자 다시 받기를 시작했습니다 — 끝나면 바뀐 글자가 원본 자막 목록에 보입니다."
 )
@@ -7535,8 +7539,15 @@ class RawWorkspaceUi:
         if sync_view is not None:
             fields["syncCheck"] = sync_view
         fields["relisten"] = self._relisten_view(root, sid, transcript)
-        fields["refill"] = self._refill_view(root, sid, transcript, sync_view)
-        fields["hydrogen"] = self._hydrogen_view(root, sid)
+        running = self.raw.running_source_jobs(
+            root, sid, (raw_service.REFILL_JOB_KIND, raw_service.HYDROGEN_RETEXT_JOB_KIND)
+        )  # 두 칸의 「도는 중」을 연결 하나로 본다
+        fields["refill"] = self._refill_view(
+            root, sid, transcript, sync_view, running=raw_service.REFILL_JOB_KIND in running
+        )
+        fields["hydrogen"] = self._hydrogen_view(
+            root, sid, running=raw_service.HYDROGEN_RETEXT_JOB_KIND in running
+        )
         fields["snap"] = self._snap_view(root, sid)
         return fields
 
@@ -7675,6 +7686,7 @@ class RawWorkspaceUi:
         source_id: str,
         transcript: Mapping[str, Any],
         sync_view: Mapping[str, Any] | None,
+        running: bool | None = None,
     ) -> dict[str, object]:
         """「말소리 빈칸 재전사」 칸의 값(D59 19f) — 상태·빈칸·순서 경고·지난 결과(무료, 표시).
 
@@ -7687,12 +7699,16 @@ class RawWorkspaceUi:
             "last": _refill_last_line(self.raw.refill_last(root, source_id)),
             **_refill_skipped(self.raw.refill_skipped(root, source_id)),
         }
-        if self.raw.refill_running(root, source_id):
+        if self.raw.refill_running(root, source_id) if running is None else running:
             return {**view, "state": "running", "reason": REFILL_RUNNING_TEXT}
         scope = self.raw.refill_scope(root, source_id)
         if isinstance(scope, str):
             return {**view, "state": "blocked", "reason": scope}
         notes = _refill_notes(scope, sync_view)
+        _silent, extra = self.raw.hydrogen_flags(root, source_id)
+        heard = sum(len(texts) for texts in extra.values())
+        if heard:  # 줄 밖 말(W-114e) — 시각이 없어 빈칸을 고르지는 않는다(재료로 보일 뿐이다)
+            notes = [*notes, HYDROGEN_EXTRA_NOTE.format(count=heard)]
         view.update(_refill_spans(scope), notes=notes)
         if not scope.spans:
             return {**view, "state": "none", "reason": REFILL_NONE_TEXT}
@@ -7728,7 +7744,9 @@ class RawWorkspaceUi:
         )
         return self._source_reply(root, source_id, echo, REFILL_STARTED_TEXT)
 
-    def _hydrogen_view(self, root: Path, source_id: str) -> dict[str, object]:
+    def _hydrogen_view(
+        self, root: Path, source_id: str, running: bool | None = None
+    ) -> dict[str, object]:
         """「글자 다시 받기(Hydrogen)」 칸의 값(W-114d, D187) — 상태·지난 결과(무료, 표시).
 
         견적은 없다(D110). 단추는 지금 범위의 digest를 싣고 서버가 누른 순간 다시 재어 대조한다."""
@@ -7737,7 +7755,8 @@ class RawWorkspaceUi:
             "label": HYDROGEN_APPROVE_LABEL,
             "last": _hydrogen_last_line(self.raw.hydrogen_retext_last(root, source_id)),
         }
-        if self.raw.hydrogen_retext_running(root, source_id):
+        busy = self.raw.hydrogen_retext_running(root, source_id) if running is None else running
+        if busy:
             return {**view, "state": "running", "reason": HYDROGEN_RUNNING_TEXT}
         scope = self.raw.hydrogen_retext_scope(root, source_id)
         if isinstance(scope, str):

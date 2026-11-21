@@ -448,6 +448,26 @@ def _report(record: Mapping[str, Any]) -> None:
         )
 
 
+def record_flags(
+    record: Mapping[str, Any] | None,
+) -> tuple[frozenset[str], dict[str, tuple[str, ...]]]:
+    """Hydrogen 기록(1단계 `asr_text` · 글자 다시 받기 기록)의 표시 재료 — (말 없음 줄, 줄 밖 말).
+
+    줄 밖 말은 앞 줄 아이디 → 들은 말(첫 줄 앞이면 빈 아이디)이다. 모양이 다르면 빈 재료다(표시를
+    지어내지 않는다). 「확인 필요」 표시만 읽는다(W-114e)."""
+    silent: set[str] = set()
+    extra: dict[str, list[str]] = {}
+    chunks = record.get("chunks") if isinstance(record, Mapping) else None
+    for chunk in chunks if isinstance(chunks, list) else ():
+        if not isinstance(chunk, Mapping):
+            continue
+        silent.update(str(line) for line in chunk.get("no_speech") or ())
+        for item in chunk.get("extra") or ():
+            if isinstance(item, Mapping) and str(item.get("text") or "").strip():
+                extra.setdefault(str(item.get("after_id") or ""), []).append(str(item["text"]))
+    return frozenset(silent), {key: tuple(texts) for key, texts in extra.items()}
+
+
 # ─────────────────────────────────────────────────────────────
 #  제공자 — 승인이 묶은 실제 전송
 # ─────────────────────────────────────────────────────────────
@@ -490,6 +510,7 @@ __all__ = [
     "LiveHydrogenProvider",
     "apply_pass",
     "ceiling_usd",
+    "record_flags",
     "chunk_key",
     "run_pass",
     "text_identity",

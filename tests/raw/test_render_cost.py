@@ -569,7 +569,7 @@ def test_reprepare_fills_the_selected_video_beyond_the_first_page(
 
 # ── UI 모델 나누기(W-71, D122) — 상세 칸은 고른 영상만 ─────────────────────────────
 
-DETAIL_KEYS = ("crossSourceCandidates", "syncCheck", "relisten", "refill", "snap")
+DETAIL_KEYS = ("crossSourceCandidates", "syncCheck", "relisten", "refill", "hydrogen", "snap")
 """고른 영상에만 싣는 원본 자막 칸 — 「고급 도구」 패널이 그 영상 것만 그린다."""
 SYNC_BADGE_KEYS = {"tone", "level", "label", "stale"}
 """카드 배지(`syncBadge`)가 읽는 자막 시각 확인 칸 — 고르지 않은 영상은 이것만 싣는다."""

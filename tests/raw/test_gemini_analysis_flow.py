@@ -25,7 +25,7 @@ from tests.raw.test_browser_runtime import _make_media
 from tests.raw.test_claude_analysis_flow import DONE, judgment, make_server, settle
 from vlogsrt import preprocess
 from vlogsrt.gemini_messages import GeminiClient
-from vlogsrt.project.raw import gemini_cost
+from vlogsrt.project.raw import gemini_cost, hydrogen_text_pass
 from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
 from vlogsrt.project.raw.analysis_store import AnalysisStore
 from vlogsrt.project.raw.config import GEMINI_ANALYSIS_PROFILES, gemini_profile
@@ -149,7 +149,13 @@ def test_a_new_workspace_analyzes_with_the_default_gemini_clips_and_frames(
     assert revision is not None and json.loads(revision.models_json)["luna"] == FLASH
     with sqlite3.connect(root / "project.sqlite3") as db:
         db.row_factory = sqlite3.Row
-        rows = list(db.execute("SELECT * FROM analysis_requests WHERE model=?", (FLASH,)))
+        # 의미 분석 창만 센다 — 1단계 Hydrogen 글자 귀(D187)도 같은 모델이라 단계로 가른다.
+        rows = list(
+            db.execute(
+                "SELECT * FROM analysis_requests WHERE model=? AND stage!=?",
+                (FLASH, hydrogen_text_pass.TEXT_REQUEST_STAGE),
+            )
+        )
     assert len(rows) == 3 and all(row["unpriced_reason"] is None for row in rows)
     # 같은 토큰 · Hydrogen 단가($1.50 · $7.50)는 Flash($0.75 · $3.75)의 정확히 두 배 — 0.00975 ×
     # 2(D168)

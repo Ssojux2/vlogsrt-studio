@@ -280,6 +280,10 @@ def test_no_speech_keeps_the_line_and_its_text_and_is_only_recorded(
     (chunk,) = record["chunks"]
     first = service.source_transcript(root, asset.asset_id)["utterances"][0]["utterance_id"]
     assert (record["no_speech"], record["replaced"], chunk["no_speech"]) == (1, 2, [first])
+    # 「확인 필요」 표시로만 보인다(W-114e) — 줄·글자는 그대로다.
+    transcript = service.source_transcript(root, asset.asset_id)
+    timing = service.subtitle_timing(root, asset.asset_id, transcript)
+    assert timing.hydrogen_silent == frozenset({first})
 
 
 @needs_ffmpeg

@@ -198,7 +198,8 @@ def test_partial_failure_requotes_only_the_failed_piece_and_counts_only_its_spee
     wait_sync(service, root)
     again = _quote(service, root, asset_id)
     assert again.pieces == (quote.pieces[1],)
-    assert again.whisper_due == again.pieces and again.text_due == ()
+    # Hydrogen 글자(W-114e, D187)는 시간 엔진을 새로 사는 조각만큼 — 실패한 조각이다.
+    assert again.whisper_due == again.pieces and again.text_due == again.whisper_due
     # 이번에 묻는 조각 안의 말소리만 센다 — 이미 물은 조각 안의 나머지는 뺀다.
     asking = again.asking_speech_seconds
     assert 0 < asking < again.speech_seconds

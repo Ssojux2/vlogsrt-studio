@@ -30,6 +30,9 @@
 - **다른 귀가 다르게 들음**: 다른 귀(GPT-Transcribe)가 그 줄의 조각을 다르게 들어 D37 조각
   게이트가 거절했다 — whisper 글자가 환각일 수 있다.
 
+Hydrogen 글자 귀(W-114e, D187)가 남긴 재료 둘도 값으로만 받는다 — **말이 없다고 한 줄**
+(`speech=false`)과 **줄 밖에서 들은 말**(`extra`, 앞 줄에 단다 — 시각이 없어 줄로 넣지 않는다).
+
 이 모듈은 「이 줄은 말이 아니다」라고 판정하지 않는다(규칙 4). 큐를 지우거나 숨기거나 고치지
 않고 이유만 돌려준다(규칙 9) — 사람이 듣고 정한다. 「치즈」×9도 표시될 뿐이다. 입출력·프로세스·
 서비스·확인 계층을 모른다(`check_invariants`의 「자막 의심 표시는 순수하고 표시만 한다」).
@@ -64,6 +67,8 @@ GEMINI_DISAGREED = "gemini_disagreed"
 SMALL_VOCABULARY = "small_vocabulary"
 SYMBOLS_ONLY = "symbols_only"
 ENGINE_WORDS = "engine_words"
+HYDROGEN_SILENT = "hydrogen_silent"
+HYDROGEN_EXTRA = "hydrogen_extra"
 
 BOILERPLATE_TEXT = "영상 끝 인사말이 끼었을 수 있습니다"
 NO_SPEECH_TEXT = "말소리를 못 찾음 (측정 한계일 수 있음)"
@@ -80,6 +85,13 @@ EAR_DISAGREED_TEXT = "다른 귀가 이 조각을 다르게 들었습니다"
 GEMINI_DISAGREED_TEXT = "Gemini가 이 구간에서 다른 말을 들었습니다"
 GEMINI_HEARD_NOTHING_TEXT = "Gemini가 이 구간에서 말을 듣지 못했습니다 (판정 한계일 수 있음)"
 """Gemini가 들은 말이 빈 창의 줄(D88) — 「말이 아니다」라고 말하지 않는다(규칙 4)."""
+HYDROGEN_SILENT_TEXT = "Hydrogen이 이 줄 시간에 말을 듣지 못했습니다 (판정 한계일 수 있음)"
+"""Hydrogen 글자 귀가 `speech=false`라 한 줄(W-114e, D187) — 「말이 아니다」라고 말하지 않는다."""
+HYDROGEN_EXTRA_TEXT = (
+    "Hydrogen이 이 줄 {where} 자막에 없는 말을 들었습니다 — 「{heard}」 (시각이 없어 싣지"
+    " 않았습니다 · 말소리 빈칸 재전사로 채울 수 있습니다)"
+)
+"""Hydrogen 글자 귀의 줄 밖 말(`extra`, W-114e) — 시각이 없어 줄로 넣지 않는다(규칙 1)."""
 SMALL_VOCABULARY_TEXT = "몇 가지 말이 {count}줄 번갈아 이어집니다"
 SYMBOLS_ONLY_TEXT = "글자 없이 부호만 있습니다"
 ENGINE_WORD_TEXTS: Mapping[str, str] = {
@@ -125,6 +137,10 @@ class CueTiming:
     gemini_disagreed: frozenset[str] = frozenset()
     # Gemini 시간 엔진이 그 줄에서 센 것(W-52b1) — 줄 아이디 → `ENGINE_WORD_TEXTS`의 이름들.
     engine_words: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    # Hydrogen 글자 귀(W-114e, D187) — 말이 없다고 한 줄 · 줄 밖 말(앞 줄 아이디 → 들은 말,
+    # 첫 줄 앞이면 빈 아이디). 표시만 한다.
+    hydrogen_silent: frozenset[str] = frozenset()
+    hydrogen_extra: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -215,6 +231,7 @@ def suspects(
         *_low_confidence(cues, timing, settings, frozenset(no_speech) & loud),
         *_ear_disagreements(cues, timing.ear_disagreed),
         *_gemini_disagreements(cues, timing),
+        *_hydrogen_flags(cues, timing),
     ):
         found.setdefault(cue_id, []).append(reason)
     return {cue_id: tuple(found[cue_id]) for cue_id, _text in cues if cue_id in found}
@@ -321,6 +338,24 @@ def _gemini_disagreements(
                     GEMINI_DISAGREED,
                     GEMINI_HEARD_NOTHING_TEXT if nothing else GEMINI_DISAGREED_TEXT,
                 ),
+            )
+
+
+def _hydrogen_flags(
+    cues: Sequence[tuple[str, str]], timing: CueTiming
+) -> Iterator[tuple[str, Suspect]]:
+    """Hydrogen이 말이 없다고 한 줄과 줄 밖 말 — 첫 줄 앞의 말은 첫 줄에 단다(「앞에서」)."""
+    first = cues[0][0] if cues else None
+    for cue_id, _text in cues:
+        if cue_id in timing.hydrogen_silent:
+            yield cue_id, Suspect(HYDROGEN_SILENT, HYDROGEN_SILENT_TEXT)
+        heard = [(cue_id, "뒤에서", text) for text in timing.hydrogen_extra.get(cue_id, ())]
+        if cue_id == first:
+            heard = [(cue_id, "앞에서", text) for text in timing.hydrogen_extra.get("", ())] + heard
+        for _id, where, text in heard:
+            yield (
+                cue_id,
+                Suspect(HYDROGEN_EXTRA, HYDROGEN_EXTRA_TEXT.format(where=where, heard=text)),
             )
 
 
