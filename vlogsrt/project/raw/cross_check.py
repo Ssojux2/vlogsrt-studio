@@ -21,7 +21,9 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from datetime import date
 from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -29,11 +31,12 @@ from vlogsrt import log
 from vlogsrt.project.raw import (
     gemini_text,
     glossary,
+    hydrogen_text_pass,
     read_scope,
     source_text,
     text_ear,
 )
-from vlogsrt.project.raw.config import GEMINI_TEXT_SETTINGS, SOURCE_TEXT_SETTINGS
+from vlogsrt.project.raw.config import GEMINI_TEXT_SETTINGS, HYDROGEN_TEXT, SOURCE_TEXT_SETTINGS
 from vlogsrt.project.raw.models import AnalysisEstimate
 from vlogsrt.project.raw.understanding import CHUNK_PLAN_FIXED, SampleSpan
 from vlogsrt.project.raw.understanding_luna import ORIGIN_LIVE
@@ -45,6 +48,9 @@ TAG_PREFIX = "cross-check/"
 """결속·입력 지문 끝에 붙는 꼬리표의 머리 — `cross-check/<글자 요청 신원>`."""
 GEMINI_TAG_PREFIX = "gemini-text/"
 """글자 귀가 Gemini인 원본(W-35b)의 꼬리표 머리 — `gemini-text/<Gemini 글자 요청 신원>`."""
+HYDROGEN_TAG_PREFIX = "hydrogen-text/"
+"""글자 귀가 Hydrogen인 Gemini 원본(W-114c, D187)의 꼬리표 머리 — `hydrogen-text/<요청 신원>`.
+처음 듣거나 다시 듣는 원본에만 붙는다 — 이미 들은 Gemini 원본(`none`)은 바이트 그대로다."""
 
 STAGE1_RECORDS = ("asr_outcome.json", "asr_phase.json", "analysis_transcript.json")
 """청크 WAV·범위를 실은 1단계 기록 — 한 폴더에 여럿이면 앞의 것(전사 직후 기록)을 읽는다."""
@@ -89,11 +95,13 @@ def source_tag(workspace: Any, asset_id: str) -> str | None:
     글자 귀(`text_ear`)가 Gemini면 `gemini-text/<신원>`, gpt면 작업공간 꼬리표 그대로다 — W-35b
     이전에 들은 영상은 gpt 귀로 남으므로 결속·지문이 바이트 그대로다(끝난 분석을 다시 사지
     않는다)."""
+    ear = text_ear.resolve(workspace, asset_id)
+    if ear == text_ear.EAR_HYDROGEN:  # 켬·끔 칸 밖이다 — 그 칸은 화면에서 사라졌다(D187)
+        return HYDROGEN_TAG_PREFIX + hydrogen_text_pass.text_identity(HYDROGEN_TEXT)
     if not enabled(workspace):
         return None
-    ear = text_ear.resolve(workspace, asset_id)
     if ear == text_ear.EAR_NONE:
-        return None  # Gemini 시간 엔진 원본 — 다른 귀가 없다(D104)
+        return None  # 이미 들은 Gemini 시간 엔진 원본 — 다른 귀가 없다(D104)
     if ear == text_ear.EAR_GEMINI:
         return GEMINI_TAG_PREFIX + gemini_text.text_identity(GEMINI_TEXT_SETTINGS)
     return TAG_PREFIX + request_identity(workspace)
@@ -115,13 +123,34 @@ class _RecordedChunk:
 
 
 def with_text_passes(
-    workspace: Any, estimates: Sequence[AnalysisEstimate]
+    workspace: Any, estimates: Sequence[AnalysisEstimate], *, on: date | None = None
 ) -> tuple[AnalysisEstimate, ...]:
-    """견적 줄마다 교차 확인 글자 분량 칸을 비운다 — gpt·whisper 귀는 은퇴했다(D163, 바이트 그대로).
+    """견적 줄마다 글자 분량 칸 — Hydrogen 글자 귀 원본(D187)만 채우고 나머지는 비운다(gpt·whisper
+    귀는 은퇴했다, D163 — 이미 들은 원본의 줄은 바이트 그대로다).
 
-    켬·끔 표지는 이미 들은 원본의 결속 꼬리표(`source_tag`)로만 읽는다."""
-    del workspace
-    return tuple(_without_text(item) for item in estimates)
+    Hydrogen 원본은 그 오디오의 청크 전부를 센다 — 줄 골격이 Transcribe 답에서 나오므로 듣기 전에는
+    글자 캐시 열쇠를 잴 수 없다(`text_chunk_keys`는 None). 「다른 귀로 교차 확인」 켬·끔 표지는 보지
+    않는다 — 그 칸은 화면에서 사라져, 예전에 끈 작업공간이 Hydrogen을 다시 켤 길이 없다(D187)."""
+    today = on or date.today()
+    return tuple(
+        _hydrogen_text(item, today)
+        if item.has_audio and text_ear.resolve(workspace, item.asset_id) == text_ear.EAR_HYDROGEN
+        else _without_text(item)
+        for item in estimates
+    )
+
+
+def _hydrogen_text(item: AnalysisEstimate, on: date) -> AnalysisEstimate:
+    """Hydrogen 글자 귀의 견적 칸 — 청크 전부 · 그 길이 · 보수적 상한 · 모델(신원은 승인이 잰다)."""
+    chunks = max(1, int(item.asr_chunk_count))
+    seconds = Fraction(item.asr_seconds)
+    return replace(
+        _without_text(item),
+        text_chunk_count=chunks,
+        text_seconds=item.asr_seconds,
+        text_usd=hydrogen_text_pass.ceiling_usd(seconds, chunks, HYDROGEN_TEXT, on=on),
+        text_model=HYDROGEN_TEXT.model,
+    )
 
 
 def _without_text(item: AnalysisEstimate) -> AnalysisEstimate:
@@ -195,6 +224,7 @@ __all__ = [
     "SETTING_ON",
     "TAG_PREFIX",
     "GEMINI_TAG_PREFIX",
+    "HYDROGEN_TAG_PREFIX",
     "binding_tag",
     "enabled",
     "request_identity",

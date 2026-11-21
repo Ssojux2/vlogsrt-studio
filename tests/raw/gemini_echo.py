@@ -3,7 +3,10 @@
 whisper가 은퇴해 실제 1단계는 Gemini 문으로만 듣는다. 예전 시험은 whisper 응답 모양의 가짜
 전송(`segments`)으로 실제 호출 경로를 쟀다 — 이 가짜는 같은 세그먼트를 Gemini `word_info`로 옮겨
 같은 경로를 Gemini로 잰다. 세그먼트 하나가 낱말 몇 개가 되고, 낱말은 모두 그 세그먼트의 시각을
-가진다(시각을 나누지 않는다 — 단어 묶기는 그 시각을 그대로 쓴다). 보낸 요청은 `calls`에 쌓인다.
+가진다(시각을 나누지 않는다 — 단어 묶기는 그 시각을 그대로 쓴다). 보낸 전사 요청은 `calls`에 쌓인다.
+
+Hydrogen 글자 귀(D187)의 generateContent 요청은 `text_calls`에 따로 쌓이고, 받은 줄마다 초안 글자를
+그대로 돌려준다 — 전사 수를 세는 시험이 그대로 전사 수를 센다.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from vlogsrt.gemini_messages import GeminiClient
+from vlogsrt.project.raw.config import HYDROGEN_TEXT
 
 
 class _Reply:
@@ -73,15 +77,32 @@ def interaction_body(segments: Sequence[Mapping[str, object]]) -> dict[str, Any]
     }
 
 
+def hydrogen_echo(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Hydrogen 글자 귀 요청 → 받은 줄마다 초안 글자를 그대로 들은 응답(generateContent) 한 벌."""
+    rows = json.loads(payload["contents"][0]["parts"][2]["text"])["lines"]
+    items = [{"id": row["id"], "ko": row["draft"], "speech": True} for row in rows]
+    text = json.dumps({"items": items, "extra": []}, ensure_ascii=False)
+    return {
+        "candidates": [{"content": {"parts": [{"text": text}]}, "finishReason": "STOP"}],
+        "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 10},
+        "modelVersion": f"{HYDROGEN_TEXT.model}-001",
+    }
+
+
 class GeminiEcho:
     """가짜 opener — 요청을 세고 정해진 세그먼트를 Gemini 응답으로 돌려준다."""
 
     def __init__(self, segments: Sequence[Mapping[str, object]] | None = None) -> None:
         self.segments: list[Mapping[str, object]] = list(segments or ())
         self.calls: list[dict[str, Any]] = []
+        self.text_calls: list[dict[str, Any]] = []
 
     def __call__(self, request: Any, timeout: float) -> _Reply:
-        self.calls.append(json.loads(request.data))
+        payload = json.loads(request.data)
+        if ":generateContent" in request.full_url:
+            self.text_calls.append(payload)
+            return _Reply(json.dumps(hydrogen_echo(payload), ensure_ascii=False).encode("utf-8"))
+        self.calls.append(payload)
         body = json.dumps(interaction_body(self.segments), ensure_ascii=False)
         return _Reply(body.encode("utf-8"))
 

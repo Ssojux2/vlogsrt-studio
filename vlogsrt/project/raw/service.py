@@ -94,6 +94,7 @@ from vlogsrt.project.raw.config import (
     ANALYSIS_PROVIDER_GOOGLE,
     DEFAULT_ANALYSIS_MODEL,
     FOLDER_WORKSPACE,
+    GEMINI_ANALYSIS_PROFILES,
     GEMINI_MODEL_PREFIX,
     GEMINI_TRANSCRIBE_PROFILES,
     MODE_AUTO,
@@ -2111,9 +2112,11 @@ class RawWorkspaceService:
             audio_start=measured.audio_start,
             spans=spans,
             workflow=replace(self.source_settings(root, asset.asset_id), network_mode="online"),
-            # Gemini 시간 엔진 원본에는 다른 귀가 없다(D104) — 빈칸 재전사도 gpt를 묻지 않는다.
+            # Gemini 시간 엔진 원본에는 gpt 다른 귀가 없다(D104) — 빈칸 재전사도 gpt를 묻지 않는다.
+            # Hydrogen 글자 귀(D187) 원본의 빈칸 재전사 글자는 W-114e다 — 그때까지 묻지 않는다.
             cross_check=cross_check.enabled(workspace)
-            and text_ear.resolve(workspace, asset.asset_id) != text_ear.EAR_NONE,
+            and text_ear.resolve(workspace, asset.asset_id)
+            not in (text_ear.EAR_NONE, text_ear.EAR_HYDROGEN),
             glossary=glossary.current(workspace).terms,
             chunk_bound=_refill_bound(int(measured.report["pcm"]["channels"])),
             refill_ids=refill_ids,
@@ -6026,6 +6029,13 @@ class RawWorkspaceService:
             raise AnalysisError(
                 f"{name}은(는) {engine.label}로 듣는다 — .env에 {ANALYSIS_GEMINI_KEY_ENV}(결제 연결"
                 " 키)를 넣고 앱을 다시 켜세요. 유료 호출은 시작하지 않았습니다"
+            )
+        text_ear = GEMINI_ANALYSIS_PROFILES.get(approval.text_model or "")
+        if text_ear is not None and timing_client is None:
+            raise AnalysisError(
+                f"{name}의 자막 글자는 {text_ear.label}로"
+                f" 다시 듣는다 — .env에 {ANALYSIS_GEMINI_KEY_ENV}(결제 연결 키)를 넣고 앱을 다시"
+                " 켜세요. 유료 호출은 시작하지 않았습니다(D187)"
             )
         if approval.text_model in GEMINI_TRANSCRIBE_PROFILES and timing_client is None:
             raise AnalysisError(
