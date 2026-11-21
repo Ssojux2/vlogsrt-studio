@@ -195,3 +195,12 @@ def test_same_input_same_plan_and_no_class_carries_time() -> None:
         hydrogen_text.LineTextPlan,
     ):
         assert not time_fields & {field.name for field in dataclasses.fields(cls)}
+
+
+def test_draft_only_keeps_every_line_with_the_given_reason() -> None:
+    plan = hydrogen_text.draft_only(LINES, hydrogen_text.REASON_UNREADABLE, "응답이 막혔다")
+    assert not plan.accepted and plan.version == HYDROGEN_TEXT_PLAN_VERSION
+    assert (plan.reason, plan.detail, plan.extra) == ("unreadable", "응답이 막혔다", ())
+    assert [(row.line_id, row.text, row.source) for row in plan.lines] == [
+        (line.line_id, line.text, hydrogen_text.SOURCE_DRAFT) for line in LINES
+    ]
