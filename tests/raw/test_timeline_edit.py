@@ -511,16 +511,34 @@ def test_add_source_goes_first_or_last_by_shooting_order() -> None:
     assert last.document.seeded == (("c", "r"),)
 
 
-def test_add_source_at_the_end_ignores_shooting_order() -> None:
-    """W-110(D184) — 영상 목록에서 끌어 놓은 원본은 촬영 차례와 무관하게 타임라인 끝이다.
+def test_add_source_at_a_dropped_slot_ignores_shooting_order() -> None:
+    """W-111(D185) — 영상 목록에서 끌어 놓은 원본은 촬영 차례와 무관하게 놓은 자리(클립 차례)다.
     다른 원본끼리의 차례는 검사가 묻지 않는다(같은 원본만 붙어 있으면 된다)."""
     empty: tuple[str, tuple[rp.SourceCue, ...]] = ("r", ())
     document = _doc([("b", 0, 24), ("c", 0, 30)])
-    ended = te.add_source(document, "a", empty, at_end=True)
+    ended = te.add_source(document, "a", empty, at=2)
     assert _clips(ended.document) == [("b", 0, 24), ("c", 0, 30), ("a", 0, 300)]
     te.validate(ended.document)
+    middle = te.add_source(document, "a", empty, at=1)
+    assert _clips(middle.document) == [("b", 0, 24), ("a", 0, 300), ("c", 0, 30)]
+    te.validate(middle.document)
     with pytest.raises(TimelineEditError):
-        te.add_source(document, "b", empty, at_end=True)
+        te.add_source(document, "b", empty, at=2)
+
+
+def test_a_dropped_slot_must_be_inside_and_never_split_one_source() -> None:
+    """W-111(D185) — 자리는 0…클립 수이고, 같은 원본의 두 클립 사이에는 넣지 않는다(D125)."""
+    empty: tuple[str, tuple[rp.SourceCue, ...]] = ("r", ())
+    document = _doc([("b", 0, 10), ("b", 12, 24), ("c", 0, 30)])
+    with pytest.raises(TimelineEditError, match="클립 사이"):
+        te.add_source(document, "a", empty, at=1)
+    for outside in (-1, 4):
+        with pytest.raises(TimelineEditError, match="밖"):
+            te.add_source(document, "a", empty, at=outside)
+    first = te.add_source(document, "a", empty, at=0)
+    assert _clips(first.document)[0] == ("a", 0, 300)
+    between = te.add_source(document, "a", empty, at=2)
+    assert [clip[0] for clip in _clips(between.document)] == ["b", "b", "a", "c"]
 
 
 def test_add_source_refuses_an_unknown_source_or_one_that_has_a_clip() -> None:

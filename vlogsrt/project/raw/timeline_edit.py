@@ -854,31 +854,50 @@ def add_source(
     transcript: tuple[str, Sequence[render_plan.SourceCue]],
     settings: FinalEditSettings = FINAL_EDIT_SETTINGS,
     *,
-    at_end: bool = False,
+    at: int | None = None,
 ) -> Seeded:
-    """클립이 없는 원본을 원본 전체 클립 하나로 촬영 차례 자리에 넣는다(W-71g).
+    """클립이 없는 원본을 원본 전체 클립 하나로 넣는다(W-71g).
 
-    같은 원본은 붙어 있어야 하므로 자리는 사실의 원본 차례로 정한다 — 차례가 뒤인 원본의 첫
-    클립 앞, 없으면 끝. `at_end`면 차례와 무관하게 타임라인 끝이다(영상 목록에서 끌어 놓기,
-    W-110 · D184 — 다른 원본끼리의 차례는 검사가 묻지 않는다). 한 번도 심지 않은 원본만
-    `transcript`(리비전, 원본 자막)를 `seed`와 같은 규칙으로 심는다 — 이미 심은 원본(클립을 다
-    지운 것)은 자막과 리비전이 문서에 그대로 있다.
+    `at`(클립 차례 0…클립 수)이 있으면 그 자리다 — 영상 목록에서 끌어 놓은 자리(W-111 · D185, 끝이면
+    클립 수). 다른 원본끼리의 차례는 검사가 묻지 않지만 같은 원본의 클립 사이는 가를 수 없다(D125).
+    없으면 사실의 원본 차례로 정한다 — 차례가 뒤인 원본의 첫 클립 앞, 없으면 끝. 한 번도 심지
+    않은 원본만 `transcript`(리비전, 원본 자막)를 `seed`와 같은 규칙으로 심는다 — 이미 심은
+    원본(클립을 다 지운 것)은 자막과 리비전이 문서에 그대로 있다.
     """
     source = _source(document.facts, source_id)
     if any(clip.source_id == source_id for clip in document.clips):
         raise TimelineEditError(f"원본 {source_id}에는 이미 클립이 있다 — 원본 띠로 늘리세요")
-    order = _source_order(document.facts)
-    at = len(document.clips)
-    if not at_end:
-        at = next(
-            (i for i, c in enumerate(document.clips) if order[c.source_id] > order[source_id]), at
-        )
-    clips = (*document.clips[:at], Clip(source_id, 0, source.frame_count), *document.clips[at:])
+    slot = _add_slot(document, source_id) if at is None else _drop_slot(document, at)
+    clips = (
+        *document.clips[:slot],
+        Clip(source_id, 0, source.frame_count),
+        *document.clips[slot:],
+    )
     placed = _with_clips(document, clips)
     if source_id in dict(document.seeded):
         validate(placed, settings)
         return Seeded(placed, 0, 0)
     return _seed_added(placed, source, transcript, settings)
+
+
+def _add_slot(document: TimelineDocument, source_id: str) -> int:
+    """촬영 차례 자리 — 차례가 뒤인 원본의 첫 클립 앞, 없으면 끝."""
+    order = _source_order(document.facts)
+    clips = document.clips
+    later = (i for i, c in enumerate(clips) if order[c.source_id] > order[source_id])
+    return next(later, len(clips))
+
+
+def _drop_slot(document: TimelineDocument, at: int) -> int:
+    """놓은 자리 — 타임라인 안이고 같은 원본의 클립 사이가 아니어야 한다."""
+    clips = document.clips
+    if not 0 <= at <= len(clips):
+        raise TimelineEditError(f"넣을 자리 {at}이 클립 0…{len(clips)} 밖이다")
+    if 0 < at < len(clips) and clips[at - 1].source_id == clips[at].source_id:
+        raise TimelineEditError(
+            f"원본 {clips[at].source_id}의 클립 사이에는 넣지 않는다 — 같은 원본은 붙어 있어야 한다"
+        )
+    return at
 
 
 def _seed_added(

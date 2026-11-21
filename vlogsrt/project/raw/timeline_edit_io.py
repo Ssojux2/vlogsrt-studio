@@ -470,12 +470,12 @@ def add_source_to_timeline(
     payload: Mapping[str, Any],
     source_id: str,
     *,
-    at_end: bool = False,
+    at: int | None = None,
     settings: FinalEditSettings = FINAL_EDIT_SETTINGS,
     now: Callable[[], datetime] = _utc_now,
 ) -> dict[str, Any]:
     """클립이 없는 원본을 원본 전체 클립으로 넣고 새 리비전으로 쓴다(W-71g) — 저장과 같은 검사.
-    `at_end`면 촬영 차례 자리 대신 타임라인 끝이다(끌어 놓기, W-110).
+    `at`(클립 차례)이 있으면 촬영 차례 자리 대신 그 자리다(끌어 놓기, W-111 · D185).
 
     한 번도 심지 않은 원본이면 지금 원본 자막을 심는다(그래서 화면 편집이 아니라 서버 쓰기다 —
     `seeded`는 저장으로 바꿀 수 없다). 화면이 본 리비전이 지금과 다르면 쓰지 않고 `conflict`다.
@@ -488,7 +488,7 @@ def add_source_to_timeline(
         if current != base_revision:
             return {"conflict": True, "revision": current}
         transcript = _added_transcript(service, root, document, source_id)
-        added = timeline_edit.add_source(document, source_id, transcript, settings, at_end=at_end)
+        added = timeline_edit.add_source(document, source_id, transcript, settings, at=at)
         saved = _write_revision(folder, record, added.document, now)
     return {
         "revision": current + 1,

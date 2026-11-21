@@ -39,8 +39,6 @@ REFUSAL_LOGGED = {"render": "최종출력", "translate": "영어 만들기"}
 """거절을 서버 로그(활동 띠 · 「기록」)에도 남기는 요청 — 화면 상태 줄 하나로는 놓치기 쉽다."""
 ANSWERED_ERRORS = (ValueError, TypeError, KeyError, OSError)
 """서버 함수가 500 대신 화면 글로 돌려주는 그 밖의 예외."""
-PLACE_END = "end"
-"""「원본 넣기」의 자리 — 타임라인 끝(끌어 놓기, W-110). 없으면 촬영 차례 자리다."""
 JOB_ENDED = frozenset({"succeeded", "failed", "cancelled"})
 """끝난 작업 상태 — 렌더 작업을 묻는 `tl_job`이 끝을 알린다."""
 PLAYER_JS = (
@@ -238,11 +236,6 @@ def timeline_player_html(model: dict[str, Any] | None) -> str:
             ' 누르거나 끌면 그 자리로 가고 아래 스토리라인이 따라간다"></canvas></div>'
             '<div class="tl-range"><div class="tl-range-head"><span id="tl-source-head"></span>'
             '<span class="tl-gap"></span>'
-            '<select id="tl-add-pick" class="tl-add-pick" aria-label="클립이 없는 원본" hidden>'
-            "</select>"
-            '<button type="button" data-tl="add-source" id="tl-add" hidden'
-            ' title="고른 원본 전체를 촬영 차례 자리에 클립으로 넣는다 — 영상 목록의 카드를'
-            ' 레인에 끌어 놓으면 타임라인 끝에 넣는다">원본 넣기</button>'
             '<button type="button" data-tl="trim-start"'
             ' title="클립 앞을 커서로 (⌥[)">앞 ⌥[</button>'
             '<button type="button" data-tl="trim-end" title="클립 뒤를 커서로 (⌥])">뒤 ⌥]</button>'
@@ -788,16 +781,18 @@ class TimelinePlayer:
         self, root: Any, timeline_id: str | None, payload: dict[str, object]
     ) -> dict[str, object]:
         """클립이 없는 원본을 넣는다(W-71g) — 서버가 지금 자막을 심어 새 리비전으로 쓴다.
-        `place`가 「end」면 촬영 차례 자리 대신 타임라인 끝이다(영상 목록에서 끌어 놓기, W-110)."""
+        `at`(클립 차례 — 영상 목록에서 끌어 놓은 자리, W-111 · D185)이 있으면 그 자리다."""
         base = payload.get("baseRevision")
         document = payload.get("doc")
         source_id = self.owner._serve_str(payload, "sourceId")
         shape = isinstance(base, int) and not isinstance(base, bool) and isinstance(document, dict)
         if timeline_id is None or not shape or not source_id:
             raise ValueError("원본 넣기 요청의 모양이 틀렸습니다(타임라인 · 리비전 · 문서 · 원본).")
-        at_end = self.owner._serve_str(payload, "place") == PLACE_END
+        at = payload.get("at")
+        if at is not None and (not isinstance(at, int) or isinstance(at, bool)):
+            raise ValueError("원본 넣기 자리가 정수가 아닙니다.")
         result = self.owner.raw.timeline_add_source(
-            root, timeline_id, base, document, source_id, at_end=at_end
+            root, timeline_id, base, document, source_id, at=at
         )
         return {"ok": True, **result}
 
