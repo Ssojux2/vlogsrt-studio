@@ -176,7 +176,7 @@ D24–D37·D55–D95에 남아 있다.)
    바꾸는 길은 「다시 듣기」뿐이다.** 소리 없는 원본도 1단계에서 엔진을 고정한다(D163).
    **whisper-1·gpt-transcribe에 새로 묻는 코드를 쓰지 마라(D163).** 이미 whisper로 들은 원본은 저장된 세그먼트 시각·
    글자를 **읽기만** 한다 — `timing_provider_for`는 whisper 모델을 `TranscriptionRetired`로 거부한다.
-   **글자는 Hydrogen 글자 귀가 줄 아이디로 다시 들을 수 있다(D187, 2026-11-21 사용자 승인 — W-114로 연결 중).**
+   **글자는 Hydrogen 글자 귀가 줄 아이디로 다시 들을 수 있다(D187, 2026-11-21 사용자 승인 — 1단계·「글자 다시 받기」·빈칸 재전사에 연결됨, W-114c–e).**
    Gemini 원본의 줄 글자는 Gemini 4 Hydrogen이 같은 청크 WAV를 듣고 **그 줄 아이디에 준 글자**일 수 있다. 시각·
    경계·줄 아이디·줄 수·차례의 원천은 Transcribe `word_info` 그대로이고 글자 귀는 그것을 못 건드린다 — Hydrogen은
    단어 시각을 주지 않으며, 그 글에 적힌 시각은 엔진이 잰 시각이 아니다(그것으로 줄을 정하면 D24다). 보낸 줄 아이디와
@@ -211,7 +211,9 @@ D24–D37·D55–D95에 남아 있다.)
 6. **시간 엔진에 힌트를 보내지 마라.** Gemini 3.5 Transcribe(D92)에 `prompt`·`keywords`·`custom_vocabulary`·
    `system_instruction`을 보내지 않는다(공급자도 custom_vocabulary와 단어 시각을 함께 받지 않는다 — 옛 whisper가
    `prompt`를 직전 자막으로 읽어 한 줄이 138회·564초를 낳았다, D13·D16). `language_codes`(`ko-KR`)는 힌트가 아니라
-   언어 잠금이다. `check_invariants.py`가 검사한다.
+   언어 잠금이다. `check_invariants.py`가 검사한다. Hydrogen 글자 귀(D187)의 요청은 Transcribe에 가지 않는다 —
+   Hydrogen에만 같은 청크 WAV · 줄 `{id, start, end}`(Transcribe가 준 시각을 닻으로) · Transcribe 초안 `draft`를 싣고,
+   응답 schema에는 시각 칸이 없다(`hydrogen_text_io.payload`).
 
 7. **경계는 두 곳뿐이다.** API 호출은 `transcribe.py`에서만, ffmpeg 호출은 `preprocess.py`에서만.
    Claude도 같다(D54) — 승인 문·관찰·취소는 `transcribe.request_claude_messages`가 지고,
@@ -255,6 +257,7 @@ D24–D37·D55–D95에 남아 있다.)
      → Gemini 3.5 Transcribe (verbatim + 단어 시각, 힌트 없음, ko-KR 잠금 — 승인 문·관찰·취소는 transcribe.py)
      → word_info 단어 시각 + 청크 오프셋   ← 원본 오디오 시각 그대로
      → word_cues: 엔진이 준 단어 경계에서 줄을 끊는다(32자·7초·쉼 0.6초·문장 끝)
+     → Hydrogen 글자 귀(같은 청크 WAV · 줄 아이디로 글자만 — 시각·경계·줄 수 그대로, 실패면 Transcribe 글자 + 까닭, D187)
      → 원본 자막 리비전(사람 편집·시각 맞춤·빈칸 재전사만 새 리비전을 더한다)
      → 2단계 의미 분석(Gemini 3.8 Flash 등) → 3단 등급 → 타임라인 → 공유(렌더·번인·SRT)
 ```
@@ -340,6 +343,7 @@ whisper 시절 녹화(`tests/fixtures/api/*.whisper.json` 등)와 합성 whisper
 | `WordCueSettings` (`WORD_CUE_SETTINGS`, W-31b — 32자 · 7초 · 쉼 0.6초 · 문장 끝 부호 7개 · 판 `word-cues/v1`) | 32자·7초는 엔진 `Config`의 `max_chars_per_cue`·`max_duration` **그대로**다 — 시험이 같음을 못 박는다(엔진 값을 바꾸면 같이 바꾼다). 쉼 0.6초는 **외부 근거 없는 조정 대상**(W-31f에서 시각 정답으로 잰다). Gemini 원본의 큐 경계를 고를 뿐 시각을 만들지 않는다(D92). 값이나 규칙을 바꾸면 판을 올린다 |
 | `EngineCompareSettings` (`ENGINE_COMPARE_SETTINGS`, W-31f — 끝 적중 여유 5pp · 시작 MAE 여유 0.05초 · 환각류 줄 몫 1/2 · 재현율 여유 2pp) | 외부 근거 없는 조정 대상(D92 — W-31 계획에서 사람에게 제안한 「더 낫다」 기준 그대로). 비교 보고서(`scripts/engine_compare_report.py`)가 판정을 적을 뿐 기본 엔진을 바꾸지 않는다. 어느 지문·캐시 열쇠·승인·견적에도 없다 |
 | `TranslationSettings` (`raw/config.py`의 `TRANSLATION` — Gemini 4 Hydrogen(D187) · 생각 LOW · 응답 16000 · 묶음 150줄 · 맥락 5줄 · 한 줄 42자 · 판 `translation/v1`) | 42자만 **Netflix 영어 TTSG** 한 줄 한도다. 나머지는 외부 근거 없는 조정 대상(D105). 한국어 SRT → 영어 SRT 변환(D114)의 번역 캐시 열쇠에만 실리고(바꾸면 다시 옮긴다) 어느 분석 지문·결제 열쇠·승인·등급·한국어 자막에도 없다 |
+| `HydrogenTextSettings` (`raw/config.py`의 `HYDROGEN_TEXT` — Gemini 4 Hydrogen · 생각 LOW · 응답 16000 · 줄 시각 소수 3자리 · 판 `hydrogen-text/v1`) | 외부 근거 없는 조정 대상(D187 — 받아쓰기는 판정이 아니라 생각을 적게, 번역과 같다). 모든 칸과 안내문·응답 schema가 글자 요청 신원(`hydrogen_text_pass.text_identity`)이고 1단계 승인·결속 꼬리표(`hydrogen-text/<신원>`)가 그것을 묶는다(바꾸면 글자를 다시 산다). 시간 엔진이 아니다 — 줄 시각은 Transcribe 값을 닻으로 싣기만 하고 어느 시각·경계·줄 수에도 닿지 않는다 |
 | `BurnSettings` (`raw/burn_config.py`의 `BURN_SETTINGS` — Pretendard SemiBold · 글자 54 · 외곽선 4 · 여백 60 px @1080(짧은 변 기준, D171) · 흰 글자 · 검은 외곽선 · 영어 4/5 · 좌우 여백 너비 1/20 · 미리보기 960·q3·120초 · libass ffmpeg 후보 `ffmpeg-full`) | **외부 근거 없는 조정 대상**(D116) — 영화 자막 관행(화면 높이 약 1/20 글자, 아래 여백)에서 고른 기본값이고 사람이 손잡이로 덮는다(작업공간 표지 `burn_style`). 자막 입히기에만 쓰고 어느 지문·캐시 열쇠·승인·견적·등급에도 없다 — 바꾸면 다음 번인만 달라진다. `position_scale = 1000`(D181)은 화면에서 옮긴 자리의 단위(천분율)다. `inline_graph_chars = 24000`(D118)은 컷 번인의 필터 그래프를 명령 줄에 싣는 상한 — Windows 명령 줄 32767자에서 나머지 몫을 남겼고, 넘으면 작업 폴더 파일(ffmpeg 7 이상)이다 |
 | `REVIEW_TICK_SECONDS = 2` (`ui/workspace_service.py`, 「영상 정리」 화면 틱) | 외부 근거 없는 조정 대상(D143). 디스패치마다 그라디오가 모든 칸의 진행 상태를 다시 매기므로 주기가 곧 주 스레드 몫이다 — 실측(헤드리스 크롬) 2초에 디스패치 하나로 타이머 몫 약 0.3초 / 10초. 머리줄 상태 칸 갱신이 이 주기다(예전 1초). 어느 지문·캐시 열쇠·승인·견적·등급에도 없다 |
 | `FinalEditSettings` (`raw/final_edit_config.py`의 `FINAL_EDIT_SETTINGS` — 자막 경고 850·7000·80 ms·12자/초 · 되돌리기 200칸 · 합치기 500 ms · 최소 클립 1프레임 · 글 500자 · 자막 5000개 · 자동 저장 1500 ms · 새 자막 2000 ms · 역재생 100 ms · 파형 4000 Hz·20 ms · 줌 2–400 px/s·125% · 스냅 8 px · 클립 띠 26 px · 필름 띠 40 px · 파형 줄 24 px · 필름 장면 400개 · 큰 걸음 10프레임 · 셔틀 1·2·4·8배 · 자막 창 걸음 1000·500 ms) | 자막 경고 넷은 **refine 값 그대로**다(D117 — 시험이 `Config`와 정확 유리수로 같음을 못 박는다). 자막 창 걸음 둘(`caption_step_ms`·`caption_small_step_ms`, D164)은 **Subtitle Edit 기본값 그대로**다(←/→ 1초 · ⌥←/→ 500 ms — 키 이름도 그 값이고 시험이 같음을 못 박는다). 나머지는 **외부 근거 없는 조정 대상** — 화면을 쓰는 감으로 골랐다. 휠 줌 한 걸음의 델타 100 px(`wheel_zoom_notch_px`, D134 — 크롬 픽셀 모드 휠 한 칸)도 조정 대상이다. 파형 자막 레인의 처음 줌 100 px/s(`lane_px_per_s`, D149 — 줌 범위 안)도 조정 대상이다. 화면 자막 끌기가 시작되는 3 px(`style_drag_px`)·도구 막대 글자 걸음 2 px(`style_font_step`, D181)도 조정 대상이다. 클립 띠 높이 26 px(`lane_clip_px`, D169)와 한 화면 맞춤의 파형 레인 최소 높이 96 px(`fit_lane_min_px`, D175 — 필름 띠가 생긴 뒤로는 그 높이를 더해 잰다), 필름 띠 높이 40 px(`lane_film_px`)·클립 안 파형 줄 24 px(`lane_wave_px`, D177)·브라우저가 기억하는 필름 장면 수 400(`film_cache_tiles`, D176)도 조정 대상이다. 숫자는 `client_settings()`로 브라우저에 데이터로 간다. 어느 지문·캐시 열쇠·승인·견적·등급에도 없다 |
@@ -402,7 +406,7 @@ python scripts/record_gemini_transcribe.py ...          # Gemini 시간 엔진 �
 | polish / 정리 | 영화 자막 관행으로 **문장부호만** 다듬는다. 글자는 못 지운다(D30) |
 | time engine / 시간 엔진 | 작업대 1단계 원본 자막의 시각을 주는 전사 모델 — Gemini 3.5 Transcribe(단어 시각, D92) 하나다. 원본마다 고정되고 바꾸는 길은 「다시 듣기」뿐이다. whisper-1은 은퇴했다(D163) — 그 엔진으로 들은 원본은 읽기만 한다 |
 | retired / 은퇴 | whisper-1·gpt-transcribe와 그것만 쓰던 기능(옛 CLI·옛 엔진·다른 귀·다시 묻기·D95 단어 배정·W2)을 지웠다는 뜻(D163). 저장된 결과는 읽고, 새 호출은 유료 호출 앞에서 까닭을 대고 닫는다 |
-| hydrogen text ear / Hydrogen 글자 귀 | Gemini 원본 줄의 글자를 Gemini 4 Hydrogen이 같은 청크 WAV로 다시 듣는 일(D187 — W-114로 연결 중). 계획은 `hydrogen_text.py`(순수)의 `plan` — 보낸 줄 아이디와 같은 아이디가 꼭 한 번씩 와야 받고, 모양 틀림·모르는 아이디·겹친 아이디·빠진 줄·빈 글자면 그 청크 전체가 Transcribe 초안 글자 그대로 + 까닭이다. 시각·경계·아이디·줄 수·차례는 Transcribe 그대로다. `speech=false`는 초안 글자를 두고 표시만, `extra`(줄 밖 말)는 시각이 없어 기록만 한다. 시간 엔진이 아니다 |
+| hydrogen text ear / Hydrogen 글자 귀 | Gemini 원본 줄의 글자를 Gemini 4 Hydrogen이 같은 청크 WAV로 다시 듣는 일(D187 — 연결됨, W-114c–e). 계획은 `hydrogen_text.py`(순수)의 `plan` — 보낸 줄 아이디와 같은 아이디가 꼭 한 번씩 와야 받고, 모양 틀림·모르는 아이디·겹친 아이디·빠진 줄·빈 글자면 그 청크 전체가 Transcribe 초안 글자 그대로 + 까닭이다. 시각·경계·아이디·줄 수·차례는 Transcribe 그대로다. `speech=false`는 초안 글자를 두고 표시만, `extra`(줄 밖 말)는 시각이 없어 기록만 한다. 시간 엔진이 아니다 |
 | word cue / 단어 묶음 | Gemini 단어 시각을 자막 줄로 묶는 일(`word_cues.py`, 순수). 줄 경계는 엔진이 준 단어 경계에서만 고른다 — 시작 = 첫 시각 단어 시작, 끝 = 단어 끝의 최대값. 단어를 쪼개거나 시각을 만들지 않는다(D92) |
 | suspect / 확인 필요 | 원본 자막 줄의 무료 의심 표시(같은 말 런 · 끝 인사말 · 다른 문자 · 말소리 측정상 없음 · Gemini가 다르게 들음(D88)). **표시만** 한다 — 줄을 지우거나 숨기지 않는다(D59 19e) |
 | asr epoch / 다시 듣기 차례 | 작업대 원본의 내부 전사를 처음부터 다시 사려고 사람이 올리는 수. **0이 아닐 때만** 청크 열쇠·입력 지문·결속·견적에 실린다(D59 19b). 재전사(repair)와 다르다 |
