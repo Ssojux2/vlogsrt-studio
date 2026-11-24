@@ -631,15 +631,23 @@ def window_css() -> str:
 /* 타임라인 뷰어의 「분석」 탭은 자막 칸이다 — 원본의 승인 범위는 원본 뷰어에서 보인다. */
 #{STAGE_ID}[data-vl-workspace="{BASIC}"][data-vl-viewer="{PROGRAM}"]
   #{INSPECTOR_ID}:has(#{CAPTIONS_ID} .tl-cues-body) #vl-approval-mode {{ display: none; }}
+/* 그 빈 틀(그라디오 form — 테두리 2px + 간격 6px)까지 접는다(2026-11-24 — 16:10 화면). */
+#{STAGE_ID}[data-vl-workspace="{BASIC}"][data-vl-viewer="{PROGRAM}"]
+  #{INSPECTOR_ID}:has(#{CAPTIONS_ID} .tl-cues-body)
+  .form:has(> #vl-approval-mode) {{ display: none; }}
 #{STAGE_ID}[data-vl-workspace="{BASIC}"][data-vl-viewer="{PROGRAM}"]
   #{INSPECTOR_ID}[data-vl-inspector="{ANALYSIS}"]:has(#{CAPTIONS_ID} .tl-cues-body) {{
-  overflow: hidden; max-height: none; display: flex; flex-direction: column; }}
+  overflow: hidden auto; max-height: none; display: flex; flex-direction: column; }}
 #{STAGE_ID}[data-vl-workspace="{CAPTIONS}"]:has(#{CAPTIONS_ID} .tl-cues-body) #vl-thumbs {{
   display: none; }}
 #{STAGE_ID}[data-vl-workspace="{CAPTIONS}"] #{CAPTIONS_ID}:has(.tl-cues-body) {{ display: flex;
   grid-area: thumbs; flex-direction: column; gap: 6px; min-width: 0; min-height: 0;
   overflow: auto; }}
 #{STAGE_ID}[data-vl-workspace="{CAPTIONS}"] .tl-lane {{ height: var(--vl-caption-lane-h); }}
+/* 맞춤이면 레인은 덱 남은 높이를 받되 그 높이 아래로 줄지 않는다 — 고정 높이가 덱 밖으로 18px
+   넘쳐 숨었다(2026-11-24 — 16:10 화면, 바닥은 실행본이 이 최소로 잰다). */
+#{STAGE_ID}[data-vl-workspace="{CAPTIONS}"] .tl-root.is-fit .tl-lane {{ height: 100%;
+  min-height: var(--vl-caption-lane-h); }}
 .vl-workspaces {{ display: inline-flex; margin-right: auto; }}
 .vl-workspaces button + button {{ border-left: 0; }}
 .vl-workspaces button[aria-pressed="true"] {{ background: var(--vl-accent-soft); }}
@@ -653,9 +661,23 @@ def window_css() -> str:
     height: max(var(--vl-stage-min-h), calc(100vh - var(--vl-stage-top)));
     grid-template-areas: "thumbs player quote" "thumbs timeline ranges" "deck deck deck"
       "foot foot foot";
-    grid-template-rows: minmax(0, var(--vl-upper-deck-fr)) auto
-      minmax(0, var(--vl-lower-deck-fr)) var(--vl-statusline-h);
+    /* 줄 바닥은 재생기 실행본이 잰다(fitFloors, 2026-11-24 — 16:10 화면) — 영상 · 자막 목록이
+       먼저 줄고, 바닥의 합이 화면보다 크면 무대가 길어진다(숨기지 않는다). */
+    grid-template-rows:
+      minmax(max(var(--vl-upper-floor, 0px), var(--vl-deck-min)), var(--vl-upper-deck-fr)) auto
+      minmax(var(--vl-deck-floor, 0px), var(--vl-lower-deck-fr)) var(--vl-statusline-h);
+    min-height: var(--vl-fit-need, 0px);
     --vl-viewer-video-h: auto; --vl-viewer-video-flex: 1 1 auto; }}
+  /* 덱 머리 한 줄 — 작업공간 단추 · 요약 · 「화면 맞춤」. 도구 묶음은 풀 뿐(누름 배선 그대로). */
+  #{STAGE_ID}[data-vl-fit="{FIT_ON}"] #{DECK_ID} {{ display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto; column-gap: 8px; align-content: start; }}
+  #{STAGE_ID}[data-vl-fit="{FIT_ON}"] #{DECK_ID} > * {{ grid-column: 1 / -1; }}
+  #{STAGE_ID}[data-vl-fit="{FIT_ON}"] #{DECK_ID} > .vl-deck-tools {{ display: contents; }}
+  #{STAGE_ID}[data-vl-fit="{FIT_ON}"] #{DECK_ID} .vl-workspaces {{ grid-column: 1; grid-row: 1;
+    margin-right: 0; }}
+  #{STAGE_ID}[data-vl-fit="{FIT_ON}"] #{DECK_ID} #vl-fit-toggle {{ grid-column: 3; grid-row: 1; }}
+  #{STAGE_ID}[data-vl-fit="{FIT_ON}"] #{DECK_ID} > #vl-timeline-summary {{ grid-column: 2;
+    grid-row: 1; align-self: center; min-width: 0 !important; }}
   /* 인스펙터는 위 덱 칸 안에서 스크롤 · 패널은 「고급 도구」 길이라 맞춤에서는 접는다. */
   #{STAGE_ID}[data-vl-fit="{FIT_ON}"] #{INSPECTOR_ID} {{ max-height: none; min-height: 0; }}
   #{STAGE_ID}[data-vl-fit="{FIT_ON}"] #vl-panel {{ display: none; }}

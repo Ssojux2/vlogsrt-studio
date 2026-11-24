@@ -103,8 +103,8 @@ def test_fit_window_splits_the_decks_by_tokens_and_folds_source_rows_for_the_pro
     css = window_js.window_css()
     wide = css[css.index("@media (min-width: 1051px)") :]
     assert '#visual-stage[data-vl-fit="on"]:has(#vl-timeline-deck' in wide
-    assert "minmax(0, var(--vl-upper-deck-fr))" in wide
-    assert "minmax(0, var(--vl-lower-deck-fr))" in wide
+    # 토큰 비율로 나누되 바닥은 실측(2026-11-24 — 16:10 화면에서 잘리지 않게, 아래 시험).
+    assert "var(--vl-upper-deck-fr))" in wide and "var(--vl-lower-deck-fr))" in wide
     assert '"thumbs player quote" "thumbs timeline ranges" "deck deck deck"' in wide
     assert '[data-vl-viewer="program"] #visual-timeline' in wide
     from ui import design_tokens
@@ -278,3 +278,30 @@ def test_alt_digits_move_to_the_final_cut_panes(tmp_path: Path) -> None:
     bind = window_js.window_bind_js()
     assert '"paneKeys": [["Digit1", "vl-thumbs"]' in bind
     assert "WIN.paneFor(CFG.paneKeys, ev, inText)" in bind
+
+
+def test_the_fit_window_never_hides_the_deck_or_the_caption_editor_on_a_16_10_screen() -> None:
+    """2026-11-24 사용자 지시 「16:10 맥북에서도 UI가 다 보이게」 — 14인치 크롬 창(1512×860)에서
+    아래 덱의 스토리라인이 37px 잘리고(덱 안 스크롤) 번역 모드 자막 편집 칸의 단추 두 줄이 인스펙터
+    `overflow: hidden`에 숨었다. 맞춤의 위·아래 덱 줄은 실측 바닥(재생기 실행본이 단다) 아래로 줄지
+    않고 영상 · 자막 목록이 먼저 줄며, 바닥의 합이 화면보다 크면 숨기지 않고 무대가 길어진다(문서가
+    스크롤한다). 덱 머리의 도구는 요약과 한 줄이다."""
+    css = window_js.window_css()
+    wide = css[css.index("@media (min-width: 1051px)") :]
+    assert (
+        "minmax(max(var(--vl-upper-floor, 0px), var(--vl-deck-min)), var(--vl-upper-deck-fr))"
+        in wide
+    )
+    assert "minmax(var(--vl-deck-floor, 0px), var(--vl-lower-deck-fr))" in wide
+    assert "min-height: var(--vl-fit-need, 0px);" in wide
+    # 바닥이 모자라도 편집 칸은 숨지 않는다 — 인스펙터는 스크롤한다.
+    assert "overflow: hidden auto; max-height: none; display: flex; flex-direction: column;" in css
+    assert "overflow: hidden; max-height: none; display: flex" not in css
+    # 덱 머리 한 줄 — 도구 묶음을 풀어(display: contents) 요약 양옆에 세운다(누름 배선 그대로).
+    assert f'#visual-stage[data-vl-fit="on"] #{window_js.DECK_ID} > .vl-deck-tools' in wide
+    assert "display: contents;" in wide and "#vl-timeline-summary" in wide
+    # 자막 칸이 인스펙터에 있으면 숨긴 승인 범위의 빈 틀(테두리 · 간격 8px)까지 접는다.
+    assert "\n  .form:has(> #vl-approval-mode) { display: none; }" in css
+    # 「자막」 작업공간의 레인 — 맞춤이면 남은 높이를 받되 토큰 높이 아래로 줄지 않는다.
+    assert '[data-vl-workspace="captions"] .tl-root.is-fit .tl-lane { height: 100%;' in css
+    assert "min-height: var(--vl-caption-lane-h); }" in css

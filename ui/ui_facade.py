@@ -1531,6 +1531,8 @@ WORKBENCH_CSS = (
    CSS가 모르므로 무대 높이를 화면에서 무대 위쪽을 뺀 값으로 맞춘다. */
 #visual-stage {
   --vl-stage-top: 320px;
+  /* 한 화면 맞춤의 실측 바닥(D188) — 재생기 실행본(fitFloors)이 덮어쓴다. 없으면 0(예전 그대로). */
+  --vl-upper-floor: 0px; --vl-deck-floor: 0px; --vl-fit-need: 0px;
   /* 바닥값 = 타임라인 렠 칸(≈200) + 각주·간격(≈30) + 자막 줄·안내(≈60) + 최소 영상(≈110).
      560이면 800px 높이 창(무대 위쪽 279–335px 실측)에서 렠이 6–62px 잘렸다(D50). */
   --vl-stage-min-h: 400px;

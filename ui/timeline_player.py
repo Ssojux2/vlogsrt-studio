@@ -546,6 +546,10 @@ TIMELINE_PLAYER_CSS = """
   .tl-root.is-fit .tl-cues-body { grid-area: body; flex-direction: column; min-height: 0; }
   .tl-root.is-fit .tl-cue-list { flex: 1 1 auto; max-height: none; min-height: 0; }
   .tl-root.is-fit .tl-cue-edit { flex: none; }
+  /* 상태 줄은 제 글 폭만큼 자리를 잡는다(2026-11-24 — 16:10 화면): 비면 줄을 먹지 않고, 둘째 줄
+     (영상에 넣을 자막 · 최종출력 · 목록) 옆에 다 들어가면 거기 서고, 길면 예전처럼 제 줄로 내려간다
+     — 거절 까닭(D184)을 좁은 틈에 자르지 않는다. 이동 막대가 자라면 바닥을 다시 잰다. */
+  .tl-root.is-fit .tl-status { flex: 1 0 auto; max-width: 100%; }
   /* 자막 칸이 재생기 밖이면(D178) 한 열 — 타임라인이 덱 폭 전체를 쓴다. */
   .tl-root.is-fit.is-solo { grid-template-columns: minmax(0, 1fr);
     grid-template-areas: "transport" "strip" "range" "lane"; }
@@ -601,7 +605,8 @@ TIMELINE_PLAYER_CSS = """
 .tl-cue-times .tl-tc { width: 9em; font-family: var(--vl-font-mono); font-size: 12px;
   padding: 1px 4px; border: 1px solid var(--vl-line-strong); border-radius: 4px;
   background: var(--vl-surface-raised); color: var(--vl-ink); }
-.tl-cue-times .tl-cue-num { text-align: left; padding: 0 4px; border-radius: 4px; }
+.tl-cue-headline { display: flex; flex-wrap: wrap; gap: 2px 10px; align-items: baseline; }
+.tl-cue-headline .tl-cue-num { text-align: left; padding: 0 4px; border-radius: 4px; }
 @media (max-width: 720px) { .tl-cues-body { flex-direction: column; } }
 """
 
