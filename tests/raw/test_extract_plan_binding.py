@@ -23,14 +23,12 @@ from pathlib import Path
 
 import pytest
 
+from tests.raw.gemini_echo import write_utterance_replay
 from tests.raw.test_review_workspace import keep_luna_workspace
 from vlogsrt import preprocess
 from vlogsrt.project.raw import runner as extract_runner
 from vlogsrt.project.raw import service as raw
 from vlogsrt.project.raw.analysis_store import AnalysisStore
-
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
 
 needs_ffmpeg = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
@@ -108,9 +106,7 @@ def _write_replay_fixtures(root: Path, source_sha: str) -> None:
     """재생 픽스처 — 받아들인 경계가 없어 의미 계획이 전체 보존 한 조각이 된다."""
     fixtures = root / "analysis" / "replay"
     fixtures.mkdir(parents=True)
-    (fixtures / "asr-fixtures.json").write_text(
-        json.dumps({"sources": {source_sha: []}}), encoding="utf-8"
-    )
+    write_utterance_replay(fixtures, {source_sha: []})
     (fixtures / "luna-fixtures.json").write_text(
         json.dumps(
             {

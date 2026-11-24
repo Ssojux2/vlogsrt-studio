@@ -5,10 +5,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from pathlib import Path
-
-BASE_KEYWORDS = Path("keywords/base.txt")
 
 
 def parse_keywords(text: str) -> list[str]:
@@ -35,23 +33,9 @@ def dedupe(entries: Iterable[str]) -> list[str]:
     return list(dict.fromkeys(entry.strip() for entry in entries if entry.strip()))
 
 
-def load_keywords(
-    episode_file: Path | None = None,
-    inline: Sequence[str] = (),
-    base_file: Path = BASE_KEYWORDS,
-) -> list[str]:
-    return dedupe([*read_keywords(base_file), *_episode(episode_file), *inline])
-
-
 def _episode(episode_file: Path | None) -> list[str]:
     if episode_file is None:
         return []
     if not episode_file.is_file():
         raise RuntimeError(f"회차 사전을 찾지 못했습니다: {episode_file}")
     return read_keywords(episode_file)
-
-
-def split_inline(value: str | None) -> list[str]:
-    if not value:
-        return []
-    return [part.strip() for part in value.split(",") if part.strip()]

@@ -58,11 +58,13 @@ COLOR_TOKENS: dict[str, tuple[str, str]] = {
     "ink": ("#15181c", "#e8ebee"),
     "ink-muted": ("#4d5560", "#a8b0b9"),
     "ink-faint": ("#6b737d", "#858d97"),
-    "accent": ("#2f6db3", "#2f6db3"),
-    "accent-hover": ("#27599a", "#27599a"),
+    # 어두움 짝은 Final Cut 보라 쪽이다(W-90, Final Cut Pro 12.4 `FinalCutPurple` #706BFF).
+    # #706BFF 위 흰 글자는 4.01:1이라 채움은 한 단 짙은 #645FF0(4.73:1) · 글자·선은 밝은 #A9A6FF다.
+    "accent": ("#2f6db3", "#645ff0"),
+    "accent-hover": ("#27599a", "#5852e0"),
     "on-accent": ("#ffffff", "#ffffff"),
-    "accent-ink": ("#245a96", "#8db9ee"),
-    "accent-soft": ("#dde9f7", "#1c3352"),
+    "accent-ink": ("#245a96", "#a9a6ff"),
+    "accent-soft": ("#dde9f7", "#25234a"),
     "tier-green": ("#4a9e72", "#86dcaa"),
     "on-tier-green": ("#0b2416", "#0c2a19"),
     "tier-green-ink": ("#1d6b43", "#8fe2b2"),
@@ -83,6 +85,15 @@ COLOR_TOKENS: dict[str, tuple[str, str]] = {
     "draft": ("#b4600f", "#e7913a"),
     "playhead": ("#121417", "#f4f6f8"),
     "playhead-casing": ("#ffffff", "#0a0b0d"),
+    # 스키머(W-103, D176 — Final Cut): 마우스를 올린 자리의 선. 플레이헤드처럼 casing을 두른다.
+    "skimmer": ("#d0273f", "#ff5c73"),
+    # 화면 자막 모양의 가운데 안내선(W-107, D181) — 영상 위라 두 테마 모두 어두운 바닥 위의 노랑.
+    "snap-guide": ("#ffd43b", "#ffd43b"),
+    # 재생기 클립 띠의 클립 — 원본이 바뀔 때마다 두 채움을 번갈아(원본 경계가 보이게) 쓴다. 예전
+    # accent-soft · surface-raised는 서로 1.07:1 · 바닥 위 약 1.3:1이라 클립이 갈리지 않았다
+    # (디자인 점검 2026-11-19). 어두운 값은 점검이 제안한 #34507a · #3d4a7a 그대로다.
+    "clip-fill": ("#8fa8cc", "#34507a"),
+    "clip-fill-alt": ("#9fa2d6", "#3d4a7a"),
     "caption-chip": ("#d9e5f3", "#273a55"),
     "on-caption-chip": ("#1d3657", "#d8e6f7"),
     # 영상 위에 얹는 띠·글자 — 영상은 두 테마 모두 어둡게 보이므로 값이 같다.
@@ -105,6 +116,30 @@ SCALAR_TOKENS: dict[str, str] = {
     "commandbar-h": "48px",
     "statusline-h": "24px",
     "control-h": "32px",
+    # Final Cut식 창(W-85, D145) — Final Cut Pro 12.4 `Factory 1 - Default.moduleLayout`의 위 덱
+    # 브라우저 539 · 뷰어 539 · 인스펙터 403과 위·아래 덱 0.5/0.5를 비율로 옮겼다(정적 분석,
+    # docs/plans/2026-11-16-fcp-window.md). 최소 폭은 예전 목록·패널 열의 바닥 그대로다.
+    "browser-fr": "539fr",
+    "viewer-fr": "539fr",
+    "inspector-fr": "403fr",
+    "browser-min": "240px",
+    "inspector-min": "280px",
+    # 뷰어 칸의 최소 폭 · 위·아래 덱의 최소 높이 — 트랙 손잡이가 이보다 좁히지 않는다(W-86d).
+    "viewer-min": "320px",
+    "deck-min": "160px",
+    # 타임라인 인덱스 칸의 폭 — Final Cut `timelineIndexContents` 318.
+    "index-w": "318px",
+    # 「자막」 작업공간의 파형 레인 높이(W-87c) — 기본 96px의 두 배. 외부 근거 없는 조정 대상.
+    "caption-lane-h": "192px",
+    "browser-card-min": "240px",
+    # 아래 덱이 차 있으면 무대는 내용 높이다 — 위 덱 뷰어의 영상 높이(W-85, 좁은 화면 규칙과 같은
+    # 값). 위·아래 0.5/0.5는 덱이 둘째 영상을 내려놓는 W-86에서 맞춘다(지금 덱의 재생기는 제 영상을
+    # 싣고 있어 크다).
+    "deck-viewer-h": "clamp(300px, 46vh, 540px)",
+    # 「화면 맞춤」(W-86c)을 켜면 위 덱(재생기 줄)과 아래 덱이 남는 높이를 이 비율로 나눈다 —
+    # Final Cut 기본 작업공간의 0.5/0.5.
+    "upper-deck-fr": "1fr",
+    "lower-deck-fr": "1fr",
     "font-sans": ", ".join(FONT_SANS_STACK),
     "font-mono": ", ".join(FONT_MONO_STACK),
 }

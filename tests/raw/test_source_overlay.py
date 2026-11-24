@@ -97,11 +97,7 @@ checkpoints.push({case:'source-overlay-verified',native:true,fallback:true});
         )
     )
     payload = tmp_path / "payload.json"
-    payload.write_text(
-        json.dumps(
-            {"visual": ui_facade.VISUAL_BOOTSTRAP_JS, "caption": ui_facade.CAPTION_BOOTSTRAP_JS}
-        )
-    )
+    payload.write_text(json.dumps({"visual": ui_facade.VISUAL_BOOTSTRAP_JS}))
     result = subprocess.run(
         ["node", str(harness), str(payload)], capture_output=True, text=True, timeout=20
     )

@@ -404,8 +404,9 @@ def _build(gathered: Sequence[GatheredSource], settings: RenderSettings) -> rend
         for row in plan.dropped:
             reasons[row.reason] = reasons.get(row.reason, 0) + 1
         listed = ", ".join(f"{reason} {count}곳" for reason, count in sorted(reasons.items()))
+        kept = "보통·추천" if settings.keep_normal else "추천"
         raise RenderExportError(
-            "남길 추천 구간이 없어 초안을 만들지 않았다 — 추천(초록)이 없거나 모두"
+            f"남길 {kept} 구간이 없어 초안을 만들지 않았다 — {kept}이 없거나 모두"
             f" {float(settings.min_part_seconds):g}초보다 짧다 (뺀 구간: {listed or '없음'})"
         )
     if plan.unreviewed_red_dropped:
@@ -434,6 +435,7 @@ def _encoding(settings: RenderSettings, codec: str) -> preprocess.RenderEncoding
         priority=settings.priority,
         # CPU 인코드는 로컬 미디어 자리 몫의 스레드만(W-45, D100 §6) — 조각 일꾼이 그 자리를 다툰다.
         threads=FOLDER_WORKSPACE.local_media.encode_threads(os.cpu_count()),
+        hardware_decode=settings.hardware_decode,
     )
 
 

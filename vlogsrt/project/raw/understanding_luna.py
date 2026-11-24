@@ -562,6 +562,103 @@ def luna_request_sha256(model: str, payload: Mapping[str, object]) -> str:
 
 
 # ─────────────────────────────────────────────────────────────
+#  창 요청 신원을 한 번 재기(P-1, D155)
+# ─────────────────────────────────────────────────────────────
+# 한 원본의 분석 꼬리에서 같은 창의 본문(클립·프레임 base64)을 응답자 공장 · 문맥(상한 ·
+# 신원) · 판정 단계 · 판정 캐시 찾기가 따로 지어 해시했다(창마다 다섯 번). 그 꼬리 동안만
+# (`request_identity_scope`) 잰 값 — 신원 sha와 공식 단가 상한 — 을 기억한다.
+# 본문은 기억하지 않는다(창마다 수 MB다).
+# 열쇠는 모델 · 창 증거 값 · 설정 · 읽는 파일마다 (크기, mtime, inode)다. **전송 순간의 문
+# (`respond`)은 기억을 쓰지 않는다** — 보낼 본문을 다시 해시해 얼어붙은 신원과 대조한다.
+
+
+@dataclass(frozen=True, slots=True)
+class _Measured:
+    """창 하나를 잰 값 — 신원과 (공식 단가 모델이면) 그 날의 상한 또는 잴 수 없는 까닭."""
+
+    sha256: str
+    on: date | None = None
+    bound: Any = None
+    bound_error: str | None = None
+
+
+_IDENTITY_SCOPE: contextvars.ContextVar[dict[tuple[object, ...], _Measured] | None] = (
+    contextvars.ContextVar("vlogsrt_semantic_identity", default=None)
+)
+_IDENTITY_LOCK = threading.Lock()
+
+
+@contextmanager
+def request_identity_scope() -> Iterator[None]:
+    """이 안에서만 창마다 잰 신원·상한을 기억한다 — 밖에서는 예전처럼 매번 잰다."""
+    token = _IDENTITY_SCOPE.set({})
+    try:
+        yield
+    finally:
+        _IDENTITY_SCOPE.reset(token)
+
+
+def _files_stamp(evidence: WindowEvidence) -> tuple[tuple[str, int, int, int], ...] | None:
+    paths = [frame.image_path for frame in evidence.frames]
+    if evidence.clip is not None:
+        paths.append(evidence.clip.path)
+    try:
+        stats = [path.stat() for path in paths]
+    except OSError:
+        return None  # 못 읽는 파일 — 기억하지 않고 재는 쪽이 예전 그대로 실패한다
+    return tuple(
+        (str(path), stat.st_size, stat.st_mtime_ns, stat.st_ino)
+        for path, stat in zip(paths, stats, strict=True)
+    )
+
+
+def _measure(
+    evidence: WindowEvidence, settings: RawUnderstandingSettings, model: str, on: date | None
+) -> _Measured:
+    payload = build_semantic_payload(evidence, settings, model)
+    sha = luna_request_sha256(model, payload)
+    if on is None:
+        return _Measured(sha)
+    try:
+        return _Measured(sha, on, _payload_bound(model, payload, on))
+    except ValueError as error:
+        return _Measured(sha, on, None, str(error))
+
+
+def _measured(
+    evidence: WindowEvidence,
+    settings: RawUnderstandingSettings,
+    model: str,
+    on: date | None = None,
+) -> _Measured:
+    """창의 신원(과 `on`을 주면 그 날의 상한) — 스코프 안이면 한 번 잰 값을 다시 쓴다.
+
+    공식 단가 모델은 처음 잴 때 오늘의 상한도 함께 잰다 — 공장 다음의 상한 검사가 본문을 다시 짓지
+    않게."""
+    memo = _IDENTITY_SCOPE.get()
+    stamp = _files_stamp(evidence) if memo is not None else None
+    if memo is None or stamp is None:
+        return _measure(evidence, settings, model, on)
+    key = (model, evidence, settings, stamp)
+    with _IDENTITY_LOCK:
+        known = memo.get(key)
+    if known is not None and (on is None or known.on == on):
+        return known
+    wanted = on if on is not None else (date.today() if official_price_model(model) else None)
+    fresh = _measure(evidence, settings, model, wanted)
+    with _IDENTITY_LOCK:
+        memo[key] = fresh
+    return fresh
+
+
+def semantic_request_sha256(
+    evidence: WindowEvidence, settings: RawUnderstandingSettings, model: str
+) -> str:
+    """창의 요청 신원 — `luna_request_sha256(model, build_semantic_payload(...))`와 같은 값이다."""
+    return _measured(evidence, settings, model).sha256
+
+
+# ─────────────────────────────────────────────────────────────
 #  판정 — 파싱과 검증이 같은 문을 지난다
 # ─────────────────────────────────────────────────────────────
 
@@ -1203,9 +1300,11 @@ def _settle_or_ask(
     origin: str,
     cached: Mapping[str, SemanticAnnotation] | None,
 ) -> SemanticAnnotation | Callable[[], SemanticAnnotation]:
-    """이 스레드에서 정할 수 있는 판정(재사용·프레임 없음)이거나, 일꾼이 물을 일."""
-    payload = build_semantic_payload(evidence, settings, model)
-    request_sha256 = luna_request_sha256(model, payload)
+    """이 스레드에서 정할 수 있는 판정(재사용·프레임 없음)이거나, 일꾼이 물을 일.
+
+    신원은 잰 값으로 고르고(D155), 보낼 본문은 물을 일꾼이 그때 짓는다 — 재사용하는 창은 본문을
+    짓지 않고, 줄 선 창마다 수 MB 본문을 붙잡고 있지 않는다. 전송 문이 그 본문을 다시 해시한다."""
+    request_sha256 = semantic_request_sha256(evidence, settings, model)
     prior = (cached or {}).get(evidence.window.window_id)
     if prior is not None and _reusable(
         prior, request_sha256, settings=settings, model=model, origin=origin
@@ -1216,7 +1315,13 @@ def _settle_or_ask(
             evidence, request_sha256, settings=settings, model=model, origin=origin
         )
     return lambda: _ask_luna(
-        evidence, payload, request_sha256, responder, settings=settings, model=model, origin=origin
+        evidence,
+        build_semantic_payload(evidence, settings, model),
+        request_sha256,
+        responder,
+        settings=settings,
+        model=model,
+        origin=origin,
     )
 
 
@@ -1793,9 +1898,7 @@ def _semantic_request_hashes(
 ) -> dict[str, str]:
     """창마다 요청 신원 — 모델의 공급자에 맞는 본문을 지어 해시한다(Luna는 W-14 이전 그대로)."""
     return {
-        evidence.window.window_id: luna_request_sha256(
-            model, build_semantic_payload(evidence, understanding, model)
-        )
+        evidence.window.window_id: semantic_request_sha256(evidence, understanding, model)
         for evidence in evidence_windows
     }
 
@@ -1823,11 +1926,12 @@ def _require_official_ceiling(
             f"{label} 실행에는 공식 단가 상한이 묶인 승인이 필요하다 — 다시 승인하라"
         )
     for evidence in evidence_windows:
-        payload = build_semantic_payload(evidence, understanding, model)
-        try:
-            bound = _payload_bound(model, payload, on or date.today())
-        except ValueError as error:
-            raise AnalysisApprovalError(f"{label} 페이로드의 상한을 잴 수 없다: {error}") from error
+        measured = _measured(evidence, understanding, model, on or date.today())
+        if measured.bound_error is not None:
+            raise AnalysisApprovalError(
+                f"{label} 페이로드의 상한을 잴 수 없다: {measured.bound_error}"
+            )
+        bound = measured.bound
         if bound.usd > ceiling:
             raise AnalysisApprovalError(
                 f"{evidence.window.window_id}의 보수적 상한 ${bound.usd}이 승인 상한 ${ceiling}을"

@@ -32,6 +32,7 @@ from dataclasses import dataclass, replace
 from fractions import Fraction
 
 from vlogsrt.project.raw import render_plan
+from vlogsrt.project.raw.config import OutputFormatSettings
 from vlogsrt.project.raw.final_edit import text_chars, valid_cue_id
 from vlogsrt.project.raw.final_edit_config import FINAL_EDIT_SETTINGS, FinalEditSettings
 from vlogsrt.project.raw.models import RawWorkspaceError
@@ -102,6 +103,9 @@ class TimelineDocument:
     next_cue: int
     seeded: tuple[tuple[str, str], ...]
     """원본마다 심은 원본 자막 리비전 — 원본 차례."""
+    english: tuple[tuple[str, str, str], ...] = ()
+    """사람이 고친 영어 — (자막 아이디, 고칠 때의 한국어, 영어), 자막 차례(D166). 한국어가 지금 글과
+    다르면 낡은 것이다. 자막이 사라지면 함께 사라진다. 시각·자막 SRT에는 들지 않는다."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,14 +201,25 @@ def _ms_half_down(ticks: int, unit: int) -> int:
 
 
 def facts_from_plan(
-    plan: render_plan.RenderPlan, sources: Sequence[render_plan.RenderSource]
+    plan: render_plan.RenderPlan,
+    sources: Sequence[render_plan.RenderSource],
+    output: OutputFormatSettings | None = None,
 ) -> TimelineFacts:
-    """계획이 고른 시퀀스와 계획이 받는 원본(격자를 증명한 것) — 남긴 조각이 없는 원본도 싣는다."""
+    """계획이 고른 시퀀스와 계획이 받는 원본(격자를 증명한 것) — 남긴 조각이 없는 원본도 싣는다.
+
+    `output`이 있으면 시퀀스는 계획의 방향(D66)에 그 고정 크기·레이트다(D172).
+    없으면 계획 그대로다."""
     if plan.sequence is None:
         raise TimelineEditError("남길 조각이 하나도 없어 시퀀스 포맷을 정할 수 없다")
     kept = [s for s in sources if render_plan.excluded_reason(s) is None]
+    sequence = plan.sequence
+    if output is not None:
+        width, height = output.size(sequence.orientation)
+        sequence = render_plan.SequenceFormat(
+            sequence.orientation, width, height, output.frame_duration
+        )
     return TimelineFacts(
-        sequence=plan.sequence,
+        sequence=sequence,
         sources=tuple(
             TimelineSource(s.source_id, s.clock.frame_duration, s.clock.frame_count) for s in kept
         ),
@@ -270,7 +285,10 @@ def to_payload(document: TimelineDocument) -> dict[str, object]:
         ],
         "nextCue": document.next_cue,
         "seeded": dict(document.seeded),
-    }
+        # 고친 영어가 없는 문서는 예전 모양 그대로다(저장 바이트·공용 사례가 바뀌지 않는다).
+        **({"english": {cid: [ko, en] for cid, ko, en in document.english}}
+           if document.english else {}),
+    }  # fmt: skip
 
 
 def from_payload(
@@ -292,8 +310,31 @@ def from_payload(
         next_cue=_int(payload.get("nextCue"), "nextCue"),
         seeded=tuple(sorted(seeded.items(), key=lambda item: order.get(item[0], -1))),
     )
+    document = replace(document, english=_payload_english(payload.get("english"), document))
     validate(document, settings)
     return document
+
+
+def _payload_english(value: object, document: TimelineDocument) -> tuple[tuple[str, str, str], ...]:
+    """`{자막 아이디: [한국어, 영어]}` → 자막 차례의 줄. 없으면 빈 것(예전 문서)."""
+    if value is None:
+        return ()
+    if not isinstance(value, dict):
+        raise TimelineEditError("타임라인 문서의 `english`가 자막 → [한국어, 영어] 사전이 아니다")
+    rows: dict[str, tuple[str, str, str]] = {}
+    for cue_id, pair in value.items():
+        if not (
+            isinstance(cue_id, str)
+            and isinstance(pair, list)
+            and len(pair) == 2
+            and all(isinstance(part, str) for part in pair)
+        ):
+            raise TimelineEditError(f"고친 영어 한 줄의 모양이 틀렸다: {cue_id!r}: {pair!r}")
+        rows[cue_id] = (cue_id, pair[0], pair[1])
+    unknown = sorted(set(rows) - {cue.cue_id for cue in document.cues})
+    if unknown:
+        raise TimelineEditError(f"고친 영어의 자막이 문서에 없다: {', '.join(unknown)}")
+    return tuple(rows[cue.cue_id] for cue in document.cues if cue.cue_id in rows)
 
 
 def _payload_list(payload: Mapping[str, object], key: str) -> list[object]:
@@ -344,6 +385,7 @@ def validate(document: TimelineDocument, settings: FinalEditSettings = FINAL_EDI
     if total >= EXACT_TICK_LIMIT:
         raise TimelineEditError("타임라인이 너무 길어 브라우저가 틱을 정확히 셀 수 없다")
     _validate_cues(document, settings)
+    _validate_english(document, settings)
     if document.next_cue < 1:
         raise TimelineEditError(f"다음 자막 번호가 1보다 작다: {document.next_cue}")
     unknown = [sid for sid, _ in document.seeded if sid not in _source_order(document.facts)]
@@ -409,6 +451,27 @@ def _validate_text(cue: EditCue, settings: FinalEditSettings) -> None:
         raise TimelineEditError(f"자막 {cue.cue_id}의 글이 {settings.max_text_chars}자를 넘는다")
     if "\r" in text or "\n\n" in text or text.startswith("\n") or text.endswith("\n"):
         raise TimelineEditError(f"자막 {cue.cue_id}의 글에 빈 줄이나 \\r이 있다 — SRT가 깨진다")
+
+
+def _validate_english(document: TimelineDocument, settings: FinalEditSettings) -> None:
+    """고친 영어 — 있는 자막 · 자막 차례 · 한 번씩 · 비지 않은 영어 · 자막 글과 같은 글 규칙."""
+    order = [cue.cue_id for cue in document.cues]
+    ids = [cue_id for cue_id, _ko, _en in document.english]
+    if any(cue_id not in order for cue_id in ids) or ids != [c for c in order if c in ids]:
+        raise TimelineEditError("고친 영어가 없는 자막을 가리키거나 자막 차례가 아니다")
+    for cue_id, korean, english in document.english:
+        if not english.strip():
+            raise TimelineEditError(f"자막 {cue_id}의 고친 영어가 비었다 — 지우려면 줄을 뺀다")
+        for text in (korean, english):
+            _validate_text(EditCue(cue_id, "", 0, 0, text, None), settings)
+
+
+def edited_english(document: TimelineDocument, cue: EditCue) -> tuple[str, bool] | None:
+    """그 자막의 고친 영어와 낡았는가(고칠 때의 한국어가 지금 글과 다르다) — 없으면 None."""
+    for cue_id, korean, english in document.english:
+        if cue_id == cue.cue_id:
+            return english, korean != cue.text
+    return None
 
 
 def _sorted(facts: TimelineFacts, cues: Sequence[EditCue]) -> tuple[EditCue, ...]:
@@ -790,27 +853,51 @@ def add_source(
     source_id: str,
     transcript: tuple[str, Sequence[render_plan.SourceCue]],
     settings: FinalEditSettings = FINAL_EDIT_SETTINGS,
+    *,
+    at: int | None = None,
 ) -> Seeded:
-    """클립이 없는 원본을 원본 전체 클립 하나로 촬영 차례 자리에 넣는다(W-71g).
+    """클립이 없는 원본을 원본 전체 클립 하나로 넣는다(W-71g).
 
-    같은 원본은 붙어 있어야 하므로 자리는 사실의 원본 차례로 정한다 — 차례가 뒤인 원본의 첫
-    클립 앞, 없으면 끝. 한 번도 심지 않은 원본만 `transcript`(리비전, 원본 자막)를 `seed`와 같은
-    규칙으로 심는다 — 이미 심은 원본(클립을 다 지운 것)은 자막과 리비전이 문서에 그대로 있다.
+    `at`(클립 차례 0…클립 수)이 있으면 그 자리다 — 영상 목록에서 끌어 놓은 자리(W-111 · D185, 끝이면
+    클립 수). 다른 원본끼리의 차례는 검사가 묻지 않지만 같은 원본의 클립 사이는 가를 수 없다(D125).
+    없으면 사실의 원본 차례로 정한다 — 차례가 뒤인 원본의 첫 클립 앞, 없으면 끝. 한 번도 심지
+    않은 원본만 `transcript`(리비전, 원본 자막)를 `seed`와 같은 규칙으로 심는다 — 이미 심은
+    원본(클립을 다 지운 것)은 자막과 리비전이 문서에 그대로 있다.
     """
     source = _source(document.facts, source_id)
     if any(clip.source_id == source_id for clip in document.clips):
         raise TimelineEditError(f"원본 {source_id}에는 이미 클립이 있다 — 원본 띠로 늘리세요")
-    order = _source_order(document.facts)
-    at = next(
-        (i for i, c in enumerate(document.clips) if order[c.source_id] > order[source_id]),
-        len(document.clips),
+    slot = _add_slot(document, source_id) if at is None else _drop_slot(document, at)
+    clips = (
+        *document.clips[:slot],
+        Clip(source_id, 0, source.frame_count),
+        *document.clips[slot:],
     )
-    clips = (*document.clips[:at], Clip(source_id, 0, source.frame_count), *document.clips[at:])
     placed = _with_clips(document, clips)
     if source_id in dict(document.seeded):
         validate(placed, settings)
         return Seeded(placed, 0, 0)
     return _seed_added(placed, source, transcript, settings)
+
+
+def _add_slot(document: TimelineDocument, source_id: str) -> int:
+    """촬영 차례 자리 — 차례가 뒤인 원본의 첫 클립 앞, 없으면 끝."""
+    order = _source_order(document.facts)
+    clips = document.clips
+    later = (i for i, c in enumerate(clips) if order[c.source_id] > order[source_id])
+    return next(later, len(clips))
+
+
+def _drop_slot(document: TimelineDocument, at: int) -> int:
+    """놓은 자리 — 타임라인 안이고 같은 원본의 클립 사이가 아니어야 한다."""
+    clips = document.clips
+    if not 0 <= at <= len(clips):
+        raise TimelineEditError(f"넣을 자리 {at}이 클립 0…{len(clips)} 밖이다")
+    if 0 < at < len(clips) and clips[at - 1].source_id == clips[at].source_id:
+        raise TimelineEditError(
+            f"원본 {clips[at].source_id}의 클립 사이에는 넣지 않는다 — 같은 원본은 붙어 있어야 한다"
+        )
+    return at
 
 
 def _seed_added(
@@ -853,10 +940,14 @@ def _cue_index(document: TimelineDocument, cue_id: str) -> int:
 def _with_cues(
     document: TimelineDocument, cues: Sequence[EditCue], next_cue: int | None = None
 ) -> TimelineDocument:
+    """자막을 바꾼 문서 — 사라진 자막의 고친 영어도 함께 뺀다(남은 것은 자막 차례로)."""
+    ordered = _sorted(document.facts, cues)
+    english = {row[0]: row for row in document.english}
     return replace(
         document,
-        cues=_sorted(document.facts, cues),
+        cues=ordered,
         next_cue=document.next_cue if next_cue is None else next_cue,
+        english=tuple(english[cue.cue_id] for cue in ordered if cue.cue_id in english),
     )
 
 
@@ -962,3 +1053,23 @@ def cue_insert(
     _check_times(document, source_id, start_ms, end_ms)
     cue = EditCue(f"{NEW_PREFIX}{document.next_cue}", source_id, start_ms, end_ms, text, None)
     return _with_cues(document, [*document.cues, cue], document.next_cue + 1)
+
+
+def cue_set_english(
+    document: TimelineDocument,
+    cue_id: str,
+    english: str,
+    settings: FinalEditSettings = FINAL_EDIT_SETTINGS,
+) -> TimelineDocument:
+    """그 자막의 영어를 사람이 고친다(D166) — 지금 한국어와 함께 둔다. 빈 영어면 고친 것을 뺀다
+    (저장된 번역으로 돌아간다). 시각·한국어·다른 자막은 그대로다."""
+    cue = document.cues[_cue_index(document, cue_id)]
+    rows = {row[0]: row for row in document.english}
+    if english.strip():
+        row = (cue_id, cue.text, english)
+        _validate_text(EditCue(cue_id, "", 0, 0, english, None), settings)
+        rows[cue_id] = row
+    else:
+        rows.pop(cue_id, None)
+    ordered = tuple(rows[c.cue_id] for c in document.cues if c.cue_id in rows)
+    return replace(document, english=ordered)

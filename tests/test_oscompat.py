@@ -155,14 +155,19 @@ def test_directory_fsync_runs_on_posix_and_is_skipped_on_windows(
     real_fsync = os.fsync
     monkeypatch.setattr(os, "fsync", lambda fd: (synced.append(fd), real_fsync(fd)))
     fsync_directory(tmp_path)
-    assert len(synced) == 1
+    posix = 1 if os.name == "posix" else 0  # Windows CI에서는 처음부터 건너뛴다
+    assert len(synced) == posix
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(os, "open", lambda *_a: pytest.fail("Windows는 디렉터리를 열지 않는다"))
     fsync_directory(tmp_path)
-    assert len(synced) == 1
+    assert len(synced) == posix
 
 
 # ── 덮지 않는 게시 ─────────────────────────────────────────────────────────
+
+
+STAGED_MODE = 0o640 if os.name == "posix" else 0o666
+"""Windows의 권한 칸은 읽기 전용 한 비트뿐이다 — `chmod(0o640)`은 쓰기 가능(0o666)으로 남는다."""
 
 
 def _staged(tmp_path: Path, body: bytes = b"finished bytes") -> Path:
@@ -197,7 +202,7 @@ def test_publish_copies_when_links_are_unsupported(
     assert target.read_bytes() == b"finished bytes"
     assert not os.path.samefile(staged, target)
     assert staged.exists()  # 원본 쪽은 호출자가 치운다 — 링크와 같다
-    assert target.stat().st_mode & 0o777 == 0o640
+    assert target.stat().st_mode & 0o777 == STAGED_MODE
 
 
 def test_windows_fat_link_error_also_falls_back(
@@ -311,7 +316,7 @@ def test_without_a_noreplace_rename_the_exclusive_copy_still_publishes(
     target = tmp_path / "final.mp4"
     publish_exclusive(_staged(tmp_path), target)
     assert target.read_bytes() == b"finished bytes"
-    assert target.stat().st_mode & 0o777 == 0o640
+    assert target.stat().st_mode & 0o777 == STAGED_MODE
     assert sorted(path.name for path in tmp_path.iterdir()) == [".staged.tmp", "final.mp4"]
     with pytest.raises(FileExistsError):
         publish_exclusive(_staged(tmp_path), target)
@@ -395,6 +400,7 @@ def test_windows_replace_gives_up_with_the_last_error(
 def test_posix_replace_and_unlink_do_not_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")  # Windows CI에서도 POSIX 길을 본다
     held, calls = _held(1, os.replace)
     monkeypatch.setattr(os, "replace", held)
     with pytest.raises(PermissionError):

@@ -110,7 +110,7 @@ def test_mixed_frame_duration_is_rejected_by_file_name() -> None:
     clips = (_probe("a", frames=10), _probe("b", frames=20, frame_duration=Fraction(1, 30)))
     with pytest.raises(UnsupportedProject) as caught:
         synthesize_fcpxml(clips, project_name="p")
-    assert caught.value.location == "/media/b.mov"
+    assert caught.value.location == str(Path("/media/b.mov"))  # 이 운영체제의 구분자
     assert "프레임 길이" in caught.value.reason
 
 

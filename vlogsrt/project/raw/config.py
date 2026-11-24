@@ -17,7 +17,7 @@ import json
 import math
 import unicodedata
 from collections.abc import Mapping
-from dataclasses import dataclass, fields, is_dataclass, replace
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from fractions import Fraction
@@ -94,15 +94,15 @@ class RawModelRoles:
     프레임·전사 증거의 의미 해석만 맡는다. 한 모델이 두 역할을 겹치는 순간
     "시각 없는 문구에 가짜 시각"이 생긴다 — 검증이 그 조합을 막는다.
 
-    의미 분석(`luna_model` — 칸 이름은 저장 형식이라 그대로다)의 기본은 Gemini 3.8 Flash다(D87 —
-    사용자 지시 2026-10-25 「주로 Flash를 이용해서 처리」, 그 전에는 Claude Sonnet 5.5, D58). 새
-    작업공간은 이 값으로 만들어지고, 기존 작업공간은 열 때 한 번 이 값으로 옮긴다
-    (`RawWorkspaceService.adopt_default_analysis_model`) — 그 뒤 사람이 고른 모델은 그대로다.
+    의미 분석(`luna_model` — 칸 이름은 저장 형식이라 그대로다)의 기본은 Gemini 4 Hydrogen이다(D168 —
+    사용자 지시 2026-11-19 「Gemini 4 Hydrogen로 대체해줘」; 그 전 D87은 Gemini 3.8 Flash, D58은
+    Claude Sonnet 5.5). 새 작업공간은 이 값으로 만들어지고, 기존 작업공간은 열 때 한 번 이 값으로
+    옮긴다(`RawWorkspaceService.adopt_default_analysis_model`) — 그 뒤 사람이 고른 모델은 그대로다.
     """
 
     text_model: str = "gpt-transcribe"
     timing_model: str = "whisper-1"
-    luna_model: str = "gemini-3.8-flash"
+    luna_model: str = "gemini-4-hydrogen"
 
 
 @dataclass(frozen=True)
@@ -706,7 +706,8 @@ GEMINI_MODEL_PREFIX = "gemini-"
 
 GEMINI_THINKING_LEVELS = ("LOW", "MEDIUM", "HIGH")
 """등록된 Gemini 모델이 모두 받는 `thinkingConfig.thinkingLevel` 값(thinking 문서, 2026-10-25) —
-3.8 Flash·4 Argon 둘 다 low·medium·high이고 기본은 medium이다. `MINIMAL`은 이 둘이 받지 않는다."""
+3.8 Flash·4 Argon은 low·medium·high(기본 medium), 4 Hydrogen은 여기에 XHIGH를 더 받고 기본이 HIGH다
+(2026-11-19 확인). 셋 모두 받는 값만 둔다. `MINIMAL`은 셋 다 받지 않는다."""
 
 GEMINI_MAX_OUTPUT_TOKENS_LIMIT = 65_536
 """동기(background=False) generateContent의 `maxOutputTokens` 상한(thinking 문서) — 넘기면 400이다.
@@ -784,8 +785,37 @@ GEMINI_ARGON_ANALYSIS_PROFILE = RawGeminiAnalysisProfile(
 $4 · $20). 무료 등급이 없다. 출력·생각 한도는 Flash와 같은 값으로 둔다(조정 대상). 창당 보수적
 상한은 클립을 넣어 약 $0.180이다(Sonnet 5.5와 비슷하다)."""
 
+GEMINI_HYDROGEN_ANALYSIS_PROFILE = RawGeminiAnalysisProfile(
+    model="gemini-4-hydrogen",
+    label="Gemini 4 Hydrogen",
+    pricing_checked_at=date(2026, 11, 19),
+    pricing_revision="google-gemini-4-hydrogen-2026-11-19",
+    price_valid_through=date(2027, 2, 19),
+    input_per_mtok=Decimal("1.50"),
+    output_per_mtok=Decimal("7.50"),
+    source_urls=(
+        "https://aistudio.google.com/docs/pricing",
+        "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/4-hydrogen",
+        "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-hydrogen",
+        "https://ai.google.dev/gemini-api/docs/media-resolution",
+        "https://ai.google.dev/api/generate-content",
+    ),
+)
+"""Gemini 4 Hydrogen — 영상 분석의 기본(D168). 공식 가격표(2026-11-19 확인) Standard 입력 $1.50 ·
+출력(생각 포함) $7.50 / 100만 토큰 — 모달리티·길이로 나누지 않고 인상 예고가 없다. 그래서
+`price_valid_through`는 인상일이 아니라 **재확인 기한**(확인일 + 3개월, 외부 근거 없음 — 전사
+프로파일과 같은 뜻)이다.
+
+모델 문서(2026-11-19 확인): 입력은 글 · 이미지 · 소리 · 영상(출력은 글), 맥락
+1,048,576토큰(입력·출력 공유), 한 번에 출력 65,536토큰 · 생각 LOW·MEDIUM·HIGH(기본)·XHIGH —
+`MINIMAL`·`thinking_budget`은 400. Hydrogen의 기본 생각은 HIGH라 Flash와 같은 깊이(MEDIUM)를 적어
+보낸다. 표본 값(temperature 등)은 백엔드가 고정한다 — 이 앱은 보내지 않는다. 영상 장당 기본 70토큰 ·
+이미지 1,120토큰이라 창 상한의 장당 280 · 1,120은 그대로 보수적이다(소리 초당 토큰은 문서에 없어
+32를 그대로 쓴다). 창당 보수적 상한은 클립을 넣어 약 $0.136이다(Flash의 두 배)."""
+
 GEMINI_ANALYSIS_PROFILES: Mapping[str, RawGeminiAnalysisProfile] = MappingProxyType(
     {
+        GEMINI_HYDROGEN_ANALYSIS_PROFILE.model: GEMINI_HYDROGEN_ANALYSIS_PROFILE,
         GEMINI_FLASH_ANALYSIS_PROFILE.model: GEMINI_FLASH_ANALYSIS_PROFILE,
         GEMINI_ARGON_ANALYSIS_PROFILE.model: GEMINI_ARGON_ANALYSIS_PROFILE,
     }
@@ -825,7 +855,10 @@ class RawGeminiTranscribeProfile:
     timeout_seconds: float = 300.0
     mode: str = "verbatim"
     granularities: tuple[str, ...] = ("word",)
-    language_codes: Mapping[str, str] = MappingProxyType({"ko": "ko-KR"})
+    # 3.11 dataclass는 해시할 수 없는 기본값(mappingproxy)을 거부한다 — 인스턴스마다 만든다.
+    language_codes: Mapping[str, str] = field(
+        default_factory=lambda: MappingProxyType({"ko": "ko-KR"})
+    )
     max_audio_seconds_with_word_times: float = 900.0
     inline_request_max_bytes: int = 20_000_000
     audio_input_per_minute: Decimal = Decimal("0.003")
@@ -1036,6 +1069,53 @@ WORD_TEXT_VERSION = "word-text/v1"
 가운데가 가까운 줄(같으면 앞). 임계값이 없다. 규칙을 바꾸면 판을 올린다(글자 캐시 열쇠에 실린다,
 W-35b)."""
 
+HYDROGEN_TEXT_PLAN_VERSION = "hydrogen-text-plan/v1"
+"""Hydrogen 글자 귀(W-114a, D187)의 줄 글자 계획 규칙 판 — 보낸 줄 아이디와 같은 아이디가
+꼭 한 번씩 · 어긋나면 청크 전체가 초안 그대로 · `speech=false`는 표시만 · `extra`는 기록만.
+임계값이 없다. 요청 글의 판(`hydrogen-text/v1`, W-114b)과 따로다. 규칙을 바꾸면 판을
+올린다(W-114c가 글자 캐시 열쇠에 싣는다)."""
+
+
+WAV_MIME_TYPE = "audio/wav"
+"""1단계 청크 WAV를 인라인 오디오 부분으로 실을 때의 MIME — 요청과 상한 재기가 같은 값을 쓴다."""
+
+
+@dataclass(frozen=True, slots=True)
+class HydrogenTextSettings:
+    """Hydrogen 글자 귀의 요청(W-114b, D187) — 같은 청크 WAV + 줄 목록 + Transcribe 초안.
+
+    모델은 등록된 Hydrogen 분석 프로파일이고 문은 `transcribe.request_gemini_generate`(규칙 7)다.
+    판(`prompt_revision`·`plan_version`)·모델·생각은 W-114c가 글자 캐시 열쇠에 싣는다. 생각 수준·
+    응답 한도·줄 시각 자릿수는 **외부 근거 없는 조정 대상**이다(받아쓰기는 판정이 아니라 생각을
+    적게 — 번역과 같다). 시간 엔진이 아니다 — 줄 시각은 Transcribe가 준 값을 닻으로 싣기만 한다."""
+
+    model: str = GEMINI_HYDROGEN_ANALYSIS_PROFILE.model
+    prompt_revision: str = "hydrogen-text/v1"
+    plan_version: str = HYDROGEN_TEXT_PLAN_VERSION
+    thinking_level: str = "LOW"
+    max_output_tokens: int = 16000
+    """응답 한도(생각 포함) — 180초 청크의 줄 JSON(수천 토큰)에 생각 몫을 넉넉히."""
+    time_decimals: int = 3
+    """요청 줄 시각(청크 국소 초)의 소수 자릿수 — 밀리초."""
+    audio_mime_type: str = WAV_MIME_TYPE
+
+    def __post_init__(self) -> None:
+        tokens = self.max_output_tokens
+        if isinstance(tokens, bool) or not 1 <= tokens <= GEMINI_MAX_OUTPUT_TOKENS_LIMIT:
+            raise ValueError(f"max_output_tokens가 1~{GEMINI_MAX_OUTPUT_TOKENS_LIMIT}가 아니다")
+        if isinstance(self.time_decimals, bool) or self.time_decimals < 0:
+            raise ValueError(f"time_decimals는 0 이상의 정수여야 한다: {self.time_decimals!r}")
+        if self.thinking_level not in GEMINI_THINKING_LEVELS:
+            raise ValueError(f"thinking_level이 허용 값이 아니다: {self.thinking_level!r}")
+        if self.model not in GEMINI_ANALYSIS_PROFILES:
+            raise ValueError(f"Hydrogen 글자 모델 {self.model!r}은(는) 등록된 분석 모델이 아니다")
+        if self.plan_version != HYDROGEN_TEXT_PLAN_VERSION or not self.prompt_revision.strip():
+            raise ValueError("Hydrogen 글자 판이 비었거나 계획 판과 다르다")
+
+
+HYDROGEN_TEXT = HydrogenTextSettings()
+"""지금 쓰는 Hydrogen 글자 귀 요청 설정(D187)."""
+
 
 @dataclass(frozen=True)
 class GeminiTextSettings:
@@ -1118,9 +1198,12 @@ def word_cue_problems(settings: WordCueSettings) -> list[str]:
 
 
 DEFAULT_ANALYSIS_MODEL: str = RawModelRoles().luna_model
-PREVIOUS_DEFAULT_ANALYSIS_MODELS = frozenset({CLAUDE_SONNET_ANALYSIS_PROFILE.model})
-"""열 때 기본으로 옮겨 줄 예전 기본(D58의 Sonnet 5.5) — 사람이 따로 고른 모델(Opus·Luna·Gemini)은
-옮기지 않는다(D87)."""
+PREVIOUS_DEFAULT_ANALYSIS_MODELS = frozenset(
+    {CLAUDE_SONNET_ANALYSIS_PROFILE.model, GEMINI_FLASH_ANALYSIS_PROFILE.model}
+)
+"""열 때 기본으로 옮겨 줄 예전 기본(D58의 Sonnet 5.5 · D87의 3.8 Flash) — 사람이 따로 고른
+모델(Opus·Luna·Argon)은 옮기지 않는다(D87·D168). Flash를 사람이 고른 작업공간도 기본과 구별할 수
+없어 함께 옮긴다 — 사용자 지시가 「대체」다(옮긴 뒤 다시 Flash를 고르면 그대로다)."""
 """새 작업공간의 의미 분석 모델 — Claude Sonnet 5.5(D58). 기존 작업공간은 저장된 값을 쓴다."""
 
 ANALYSIS_MODEL_CHOICES: tuple[str, ...] = (
@@ -1131,8 +1214,8 @@ ANALYSIS_MODEL_CHOICES: tuple[str, ...] = (
         if model != DEFAULT_ANALYSIS_MODEL
     ),
 )
-"""고를 수 있는 의미 분석 모델 — 기본(Gemini 3.8 Flash, D87)이 맨 앞, 그다음 Gemini 4 Argon, Claude
-Sonnet 5.5, Claude Opus 5.5, gpt-6-luna.
+"""고를 수 있는 의미 분석 모델 — 기본(Gemini 4 Hydrogen, D168)이 맨 앞, 그다음 Gemini 3.8 Flash ·
+Gemini 4 Argon · Claude Sonnet 5.5 · Claude Opus 5.5 · gpt-6-luna.
 
 모델을 바꿔도 이미 산 분석은 그대로 남는다 — 다시 분석하려면 새 견적을 보고 승인한다(유료)."""
 
@@ -1714,6 +1797,9 @@ class RenderSettings:
       자리가 노는 것을 막는다. 계획(조각·출력 위치·SRT·보고서의 `parts`)은 그대로이고, 원본과
       시퀀스 레이트가 같고 프레임이 1:1인 조각만 나눈다(레이트 변환 조각은 통째로). 0이면 나누지
       않는다(예전 그대로).
+    - `keep_normal`(D186): 보통(노랑 — 판정 보류는 빼고)과 사람이 「보통」으로 정한 조각도 남긴다.
+      끄면 추천(초록 · 사람 추천)만이다(예전 규칙, 클래스 기본값). **사용자 결정**(2026-11-21
+      「타임라인으로 보낼때 보통, 추천 구간만」) — `RENDER_SETTINGS`가 켠다.
     """
 
     min_part_seconds: Fraction = Fraction(1)
@@ -1735,8 +1821,12 @@ class RenderSettings:
     track_timescale_min: int = 10_000
     timeout_floor_seconds: float = 1800.0
     timeout_media_ratio: float = 6.0
+    hardware_decode: bool = True
+    """macOS면 원본 조각을 VideoToolbox로 디코드한다(P-3, D157) — 실패하면 그 조각을 소프트웨어로
+    한 번 더 하고 그 꼴은 그 실행 동안 소프트웨어로. 검증(프레임 수 · 격자)은 그대로다."""
     priority: int = 10
     piece_max_seconds: Fraction = Fraction(30)
+    keep_normal: bool = False
 
     def __post_init__(self) -> None:
         problems = (
@@ -1804,8 +1894,48 @@ def _render_codec_problems(settings: RenderSettings) -> list[str]:
     return problems
 
 
-RENDER_SETTINGS = RenderSettings()
-"""지금 쓰는 초안 렌더 설정 — 계획(`render_plan.build_plan`)과 렌더러의 기본값이다."""
+RENDER_SETTINGS = RenderSettings(keep_normal=True)
+"""지금 쓰는 초안 렌더 설정 — 계획(`render_plan.build_plan`)과 렌더러의 기본값이다. 「타임라인으로
+보내기」와 레일의 「내보낼 부분」은 보통·추천 구간을 남긴다(D186)."""
+
+
+@dataclass(frozen=True, slots=True)
+class OutputFormatSettings:
+    """새 원본 범위 타임라인의 출력 포맷(W-97, D172) — 사용자 결정 2026-11-19 「최종 mp4는 4K ·
+    29.97fps, 세로 영상은 세로로 가로 영상은 가로로」.
+
+    방향은 계획의 규칙 그대로다(D66 — 남긴 길이가 많은 쪽). 크기는 그 방향의 4K UHD(긴 변 ×
+    짧은 변), 레이트는 `frame_duration` 하나 — 화면비가 다른 클립은 렌더의 `pad`, 레이트가 다른
+    클립은 `fps_convert`가 맞춘다. 4K보다 작은 원본은 키워서 낸다(화질은 원본보다 나아지지 않는다).
+    「타임라인으로 보내기」가 문서를 만들 때 한 번 정하고 문서에 남는다 — 이미 만든 타임라인은
+    그대로다. 크기·레이트는 사용자 결정이고 어느 지문·캐시 열쇠·승인·견적에도 없다.
+    """
+
+    long_edge: int = 3840
+    short_edge: int = 2160
+    frame_duration: Fraction = Fraction(1001, 30000)
+
+    def __post_init__(self) -> None:
+        from vlogsrt.project.fcp_tables import FRAME_RATE_TAGS
+
+        if not 0 < self.short_edge <= self.long_edge:
+            raise ValueError("출력 포맷의 짧은 변은 0보다 크고 긴 변 이하여야 한다")
+        if self.long_edge % 2 or self.short_edge % 2:
+            raise ValueError("출력 포맷의 변은 짝수여야 한다(yuv420p)")
+        if self.frame_duration not in FRAME_RATE_TAGS:
+            raise ValueError(f"Final Cut 레이트가 아니다: {self.frame_duration}")
+
+    def size(self, orientation: str) -> tuple[int, int]:
+        """(너비, 높이) — 가로는 긴 변이 너비, 세로는 긴 변이 높이다."""
+        if orientation == ORIENTATION_LANDSCAPE:
+            return self.long_edge, self.short_edge
+        if orientation == ORIENTATION_PORTRAIT:
+            return self.short_edge, self.long_edge
+        raise ValueError(f"모르는 방향이다: {orientation!r}")
+
+
+OUTPUT_FORMAT = OutputFormatSettings()
+"""지금 쓰는 새 타임라인 출력 포맷 — 4K UHD · 29.97fps."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1817,7 +1947,10 @@ class TranslationSettings:
     실리고(바꾸면 다시 번역한다), 어느 분석 지문·결제 열쇠·등급·한국어 자막에도 없다. 줄 나눔은
     내보낼 때만 한다."""
 
-    model: str = GEMINI_FLASH_ANALYSIS_PROFILE.model
+    model: str = GEMINI_HYDROGEN_ANALYSIS_PROFILE.model
+    """번역 모델 — Gemini 4 Hydrogen(D187, 사용자 지시 2026-11-21 「번역도 Hydrogen이」). 모델이
+    번역 캐시 열쇠에 실려 예전 3.8 Flash 번역은 맞지 않는다 — 「영어 만들기」로 다시 산다(사용자
+    결정). 고친 영어(D166)는 문서에 있어 그대로다."""
     prompt_revision: str = "translation/v1"
     batch_lines: int = 150
     """한 요청에 옮길 줄 수 — 긴 영상은 이만큼씩 나눠 묻는다(응답 한도 안에 들게)."""
@@ -1944,3 +2077,27 @@ class FolderWorkspaceSettings:
 
 FOLDER_WORKSPACE = FolderWorkspaceSettings()
 """지금 쓰는 폴더 작업공간 설정 — 스캔·작업공간 자리·4K 프록시·미리보기·동시 한도가 읽는다."""
+
+
+@dataclass(frozen=True)
+class FileMemoSettings:
+    """그리기 사이의 파일 바이트 기억(D167) — 외부 근거 없는 조정 대상.
+
+    64 MiB는 원본 169개 라이브러리의 그리기가 여는 JSON(원본마다 수 KB–수백 KB, 여섯 종류)을 넉넉히
+    담는다. 한 파일 상한 4 MiB를 넘는 파일은 기억하지 않는다(그 자리를 다른 작은 파일들에 둔다).
+    기억하는 것은 바이트뿐이고 열쇠는 파일 신원이라, 값은 어느 지문·캐시 열쇠·승인·등급에도 없다.
+    """
+
+    max_bytes: int = 64 * 1024 * 1024
+    max_file_bytes: int = 4 * 1024 * 1024
+
+    def __post_init__(self) -> None:
+        for name in ("max_bytes", "max_file_bytes"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name}는 1 이상의 정수여야 한다: {value!r}")
+        if self.max_file_bytes > self.max_bytes:
+            raise ValueError("max_file_bytes가 max_bytes보다 크다")
+
+
+FILE_MEMO = FileMemoSettings()

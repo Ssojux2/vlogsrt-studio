@@ -9,6 +9,7 @@ from __future__ import annotations
 import gc
 import os
 import sqlite3
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -18,11 +19,8 @@ import pytest
 
 from vlogsrt.project.raw import jobs as jobs_module
 from vlogsrt.project.raw import service as raw
-from vlogsrt.project.raw.analysis_store import AnalysisStore
-from vlogsrt.project.raw.caption_workspace_store import CaptionWorkspaceStore
 from vlogsrt.project.raw.jobs import JobCancelledError, JobContext, JobStore
 from vlogsrt.project.raw.models import JobRecord, RawWorkspaceError
-from vlogsrt.project.raw.review_workspace_store import ReviewWorkspaceStore
 from vlogsrt.project.raw.workspace import DB_NAME, RawWorkspace
 
 TypePredicate = Callable[[], bool]
@@ -374,6 +372,18 @@ def test_resume_requires_a_nonempty_fingerprint(workspace: Path) -> None:
 
 
 def _open_descriptors() -> int:
+    """열린 서술자 수 — Windows에는 `/dev/fd`가 없어 이 프로세스의 핸들 수를 센다(W-84a)."""
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        # 핸들은 64비트다 — 형을 적지 않으면 ctypes가 int로 잘라 호출이 실패(0)한다.
+        kernel.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel.GetProcessHandleCount.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        count = wintypes.DWORD()
+        assert kernel.GetProcessHandleCount(kernel.GetCurrentProcess(), ctypes.byref(count))
+        return int(count.value)
     return len(os.listdir("/dev/fd"))
 
 
@@ -409,21 +419,6 @@ def test_job_store_closes_every_connection(workspace: Path) -> None:
 
     # 새는 회귀는 라운드마다 호출 수만큼 fd를 늘린다(200라운드면 수백 개). 남은
     # 데몬 스레드가 연결을 몇 개 쥐고 있을 수 있어 상한은 그만큼 여유를 둔다.
-    rounds = 200
-    assert _without_cyclic_gc(calls, rounds=rounds) < rounds // 4
-
-
-def test_other_workspace_stores_close_every_connection(workspace: Path) -> None:
-    opened = RawWorkspace.open(workspace)
-    analysis = AnalysisStore(opened)
-    review = ReviewWorkspaceStore(opened)
-    caption = CaptionWorkspaceStore(opened.root)
-
-    def calls() -> None:
-        analysis.list_revisions()
-        review.list_base_plan_ids("no-project")
-        caption.registrations()
-
     rounds = 200
     assert _without_cyclic_gc(calls, rounds=rounds) < rounds // 4
 

@@ -32,8 +32,6 @@ from typing import Any, Protocol
 from vlogsrt import log, oscompat
 from vlogsrt.models import Chunk
 from vlogsrt.project.raw import request_log, source_text, word_text
-from vlogsrt.project.raw.analysis_approval import AsrPhaseApproval, require_live_asr_approval
-from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
 from vlogsrt.project.raw.caption_provider import AudioChunkBinding
 from vlogsrt.project.raw.config import (
     TIMING_ENGINE_GEMINI,
@@ -60,7 +58,7 @@ from vlogsrt.project.raw.understanding import (
     SelectedAudio,
     UtteranceEvidence,
 )
-from vlogsrt.project.raw.understanding_luna import ORIGIN_LIVE, AnalysisApprovalError
+from vlogsrt.project.raw.understanding_luna import ORIGIN_LIVE
 from vlogsrt.task_runtime import check_cancel, provider_error
 
 TEXT_CACHE_DIRNAME = "source-asr-gemini-text"
@@ -92,10 +90,6 @@ class GeminiWordsProvider(Protocol):
         stem: str = "",
         source: str = "",
     ) -> Mapping[str, Any]: ...
-
-
-class WordReservationGate(Protocol):
-    def reserve(self, *, count: int, key: str) -> None: ...
 
 
 class ReplayWordsMissing(RuntimeError):
@@ -552,108 +546,12 @@ def _report(record: Mapping[str, Any]) -> None:
 # ─────────────────────────────────────────────────────────────
 
 
-@dataclass(frozen=True, slots=True)
-class ApprovedPhaseWordProvider:
-    """Gemini 글자 경로의 전송 경계 — 승인이 묶은 글자 모델·신원·청크와 1단계 승인을 청크마다 본다.
-
-    `source_text.ApprovedPhaseTextProvider`와 같은 모양이다. 예약 문(승인이 묶은 글자 요청 상한)은
-    whisper와 따로 센다."""
-
-    inner: GeminiWordsProvider
-    workflow: RawWorkflowConfig
-    understanding: RawUnderstandingSettings
-    audio: SelectedAudio
-    approval: AsrPhaseApproval
-    settings: GeminiTextSettings
-    approved_identity: str
-    gate: WordReservationGate
-    approved_keys: frozenset[str] | None = None
-
-    def transcription(
-        self,
-        *,
-        binding: AudioChunkBinding,
-        chunk: Chunk,
-        settings: RawWorkflowConfig,
-        on: date,
-        stem: str = "",
-        source: str = "",
-    ) -> Mapping[str, Any]:
-        self._require_open(binding, settings, on)
-        self.gate.reserve(count=1, key=str(binding.request_id))
-        return self.inner.transcription(
-            binding=binding, chunk=chunk, settings=settings, on=on, stem=stem, source=source
-        )
-
-    def _require_open(
-        self, binding: AudioChunkBinding, settings: RawWorkflowConfig, on: date
-    ) -> None:
-        require_live_asr_approval(
-            self.approval,
-            workflow=self.workflow,
-            understanding=self.understanding,
-            source_sha256=self.audio.source_sha256,
-            on=on,
-        )
-        if settings.network_mode != "online":
-            raise AnalysisApprovalError(
-                "네트워크 모드가 online이 아니다 — 글자 경로 전송 문이 닫혀 있다"
-            )
-        if self.approval.text_model != self.settings.model:
-            raise AnalysisApprovalError("승인이 본 글자 모델과 Gemini 글자 경로 모델이 다르다")
-        if settings.models.timing_model != self.settings.model:
-            raise AnalysisApprovalError("요청 설정의 전사 모델이 Gemini 글자 경로 모델이 아니다")
-        if text_identity(self.settings) != self.approved_identity:
-            raise AnalysisApprovalError("승인이 본 Gemini 글자 요청과 지금의 요청이 다르다")
-        if (
-            self.approved_keys is not None
-            and call_key(binding, self.settings) not in self.approved_keys
-        ):
-            raise AnalysisApprovalError("승인한 범위에 없던 청크다 — 승인 밖이라 보내지 않는다")
-        if self.audio.audio_stream_index != self.approval.audio_stream_index:
-            raise AnalysisApprovalError("승인이 본 오디오 스트림과 지금의 선택이 다르다")
-        if binding.sample_start < 0 or binding.sample_end > self.audio.sample_count:
-            raise AnalysisApprovalError(
-                f"청크 범위가 선택 오디오 밖이다: [{binding.sample_start}, {binding.sample_end})"
-                f" / {self.audio.sample_count} 샘플"
-            )
-
-
-@dataclass(frozen=True, slots=True)
-class ReplayWordProvider:
-    """재생 Gemini 글자 제공자 — 선언된 응답만 돌려준다. 없으면 실패다(지어내지 않는다).
-
-    `exact`는 WAV sha로 찾는 정밀 선언이고 앞선다. `declared`는 이 원본의 청크 번호 → 응답이다."""
-
-    exact: Mapping[str, Mapping[str, Any]]
-    declared: Mapping[int, Mapping[str, Any]] | None = None
-
-    def transcription(
-        self,
-        *,
-        binding: AudioChunkBinding,
-        chunk: Chunk,
-        settings: RawWorkflowConfig,
-        on: date,
-        stem: str = "",
-        source: str = "",
-    ) -> Mapping[str, Any]:
-        payload = self.exact.get(binding.audio_sha256)
-        if payload is None and self.declared is not None:
-            payload = self.declared.get(binding.chunk_index)
-        if payload is None:
-            raise ReplayWordsMissing(f"재생할 Gemini 응답 선언이 없다 — 청크 {binding.request_id}")
-        return payload
-
-
 __all__ = [
     "REASON_NO_WORDS",
     "REASON_PLACED",
     "TEXT_CACHE_DIRNAME",
     "TEXT_REQUEST_STAGE",
-    "ApprovedPhaseWordProvider",
     "GeminiWordsProvider",
-    "ReplayWordProvider",
     "ReplayWordsMissing",
     "WordChunkOutcome",
     "WordPassRequest",

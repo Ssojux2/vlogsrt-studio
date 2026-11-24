@@ -43,9 +43,6 @@ from vlogsrt.project.raw.config import (
 from vlogsrt.project.raw.service import RawWorkspaceError
 from vlogsrt.project.raw.understanding_luna import luna_output_schema_bytes
 
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
-
 needs_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
 
 CLAUDE = "claude-opus-5-5"
@@ -196,10 +193,11 @@ def make_server(
             luna_approvals=lambda *a: {},
             claude_clients=claude_clients(opener),
             gemini_clients=gemini_clients or {},
+            timing_client=sender.client(),  # 시간 엔진은 Gemini 문 하나다(D163)
         ),
     )
     server.create_workspace_view("Claude 분석 흐름", str(tmp_path / "workspace"))
-    keep_whisper_only(server)  # 19d 이전 흐름 — 교차 확인을 끈 채 Claude 호출·상한을 잰다
+    keep_whisper_only(server)  # 실제(가짜) 호출 흐름 — 처음 듣는 영상을 Gemini 시간 엔진으로(D163)
     if model is not None:
         root = server.workspace_root()
         workflow = server.raw.settings(root)

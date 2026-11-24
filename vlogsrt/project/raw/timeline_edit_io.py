@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Any
 
 from vlogsrt import oscompat
 from vlogsrt.project.raw import render_export, render_plan, timeline_edit
-from vlogsrt.project.raw.config import RENDER_SETTINGS, RenderSettings
+from vlogsrt.project.raw.config import RENDER_SETTINGS, OutputFormatSettings, RenderSettings
 from vlogsrt.project.raw.final_edit_config import (
     FINAL_EDIT_SETTINGS,
     FinalEditSettings,
@@ -99,12 +99,16 @@ def create_timeline(
     *,
     settings: RenderSettings = RENDER_SETTINGS,
     edit_settings: FinalEditSettings = FINAL_EDIT_SETTINGS,
+    output: OutputFormatSettings | None = None,
     now: Callable[[], datetime] = _utc_now,
 ) -> CreatedTimeline:
-    """추천 조각 → 원본 범위 타임라인 → 새 `timeline/<시각>/timeline.json`. 렌더하지 않는다."""
+    """추천 조각 → 원본 범위 타임라인 → 새 `timeline/<시각>/timeline.json`. 렌더하지 않는다.
+
+    `output`이 있으면 시퀀스는 그 고정 크기·레이트(D172 — 화면의 「타임라인으로 보내기」는
+    `OUTPUT_FORMAT`을 넘긴다), 없으면 렌더 계획이 고른 시퀀스 그대로다."""
     gathered = render_export.gather_sources(service, root, context)
     plan = render_export._build(gathered, settings)
-    facts = timeline_edit.facts_from_plan(plan, [item.source for item in gathered])
+    facts = timeline_edit.facts_from_plan(plan, [item.source for item in gathered], output)
     clips = tuple(
         timeline_edit.Clip(part.source_id, part.start_frame, part.end_frame) for part in plan.parts
     )
@@ -367,6 +371,44 @@ def open_timeline(
     }
 
 
+KOREAN_SRT_PREFIX = "korean-r"
+"""타임라인 폴더 안의 리비전 한국어 SRT(`korean-r<리비전>.srt`, W-99 · D174) — 영어로 옮길 재료."""
+
+
+def _is_korean_srt(name: str) -> bool:
+    number = name.removeprefix(KOREAN_SRT_PREFIX).removesuffix(".srt")
+    return name == f"{KOREAN_SRT_PREFIX}{number}.srt" and number.isdigit()
+
+
+def korean_srt(root: Path, timeline_id: str, revision: int) -> Path:
+    """저장한 리비전의 자막을 그 타임라인 폴더의 SRT로(W-99, D174) — 「영어 만들기」가 옮긴다.
+
+    화면이 본 리비전이 지금 파일과 다르면 거부한다. 바이트는 `timeline_edit.srt_text` 그대로라
+    그 리비전을 렌더한 `draft.srt`와 같고, 번역 열쇠(큐 글)도 같다 — 공유가 무료로 쓴다. 같은
+    리비전이면 같은 바이트라 이미 있으면 그대로 둔다."""
+    name, current, document = read_document(root, timeline_id)
+    if current != revision:
+        raise TimelineEditError(
+            f"화면의 리비전 {revision}이 지금 저장본({current})과 다릅니다 — 다시 열어 주세요."
+        )
+    folder = _folder_by_id(root, name)
+    path = folder / f"{KOREAN_SRT_PREFIX}{revision}.srt"
+    if not path.is_file():
+        _write_atomic(folder, path.name, timeline_edit.srt_text(document).encode("utf-8"))
+    return path
+
+
+def korean_srts(root: Path, timeline_id: str) -> list[Path]:
+    """그 타임라인 폴더의 리비전 한국어 SRT — 새 리비전부터(영어 열이 찾는다)."""
+    folder = _folder_by_id(root, timeline_id)
+    found = []
+    for path in folder.glob(f"{KOREAN_SRT_PREFIX}*.srt"):
+        number = path.stem.removeprefix(KOREAN_SRT_PREFIX)
+        if number.isdigit():
+            found.append((int(number), path))
+    return [path for _number, path in sorted(found, reverse=True)]
+
+
 def read_document(
     root: Path, timeline_id: str | None = None, settings: FinalEditSettings = FINAL_EDIT_SETTINGS
 ) -> tuple[str, int, TimelineDocument]:
@@ -428,10 +470,12 @@ def add_source_to_timeline(
     payload: Mapping[str, Any],
     source_id: str,
     *,
+    at: int | None = None,
     settings: FinalEditSettings = FINAL_EDIT_SETTINGS,
     now: Callable[[], datetime] = _utc_now,
 ) -> dict[str, Any]:
     """클립이 없는 원본을 원본 전체 클립으로 넣고 새 리비전으로 쓴다(W-71g) — 저장과 같은 검사.
+    `at`(클립 차례)이 있으면 촬영 차례 자리 대신 그 자리다(끌어 놓기, W-111 · D185).
 
     한 번도 심지 않은 원본이면 지금 원본 자막을 심는다(그래서 화면 편집이 아니라 서버 쓰기다 —
     `seeded`는 저장으로 바꿀 수 없다). 화면이 본 리비전이 지금과 다르면 쓰지 않고 `conflict`다.
@@ -444,7 +488,7 @@ def add_source_to_timeline(
         if current != base_revision:
             return {"conflict": True, "revision": current}
         transcript = _added_transcript(service, root, document, source_id)
-        added = timeline_edit.add_source(document, source_id, transcript, settings)
+        added = timeline_edit.add_source(document, source_id, transcript, settings, at=at)
         saved = _write_revision(folder, record, added.document, now)
     return {
         "revision": current + 1,
@@ -526,7 +570,8 @@ def _write_record(folder: Path, record: Mapping[str, Any]) -> None:
 
 def _write_atomic(folder: Path, name: str, payload: bytes) -> None:
     """`timeline/<시각>/` 안의 정해진 이름만 — 임시 파일에 다 쓰고 이름을 바꾼다."""
-    if name not in TIMELINE_FILES or folder.parent.name != TIMELINE_FOLDER:
+    allowed = name in TIMELINE_FILES or _is_korean_srt(name)
+    if not allowed or folder.parent.name != TIMELINE_FOLDER:
         raise TimelineEditError(f"타임라인이 쓸 수 없는 자리다: {folder.parent.name}/{name}")
     temporary = folder / f"{name}.tmp"
     descriptor = os.open(temporary, _WRITE_FLAGS, _FILE_MODE)

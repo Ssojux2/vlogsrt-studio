@@ -41,13 +41,11 @@ from vlogsrt.project.raw.analysis_approval import LiveAnalysisTransport  # noqa:
 from vlogsrt.project.raw.models import UNSUPPORTED_GRID_REASON  # noqa: E402
 from vlogsrt.project.raw.service import RawWorkspaceError  # noqa: E402
 
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
 pytestmark = [
     pytest.mark.skipif(
         shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
         reason="ffmpeg/ffprobe가 없는 환경",
     ),
-    pytest.mark.usefixtures("whisper_for_new_hearings"),
 ]
 needs_node = pytest.mark.skipif(shutil.which("node") is None, reason="node가 없는 환경")
 
@@ -63,15 +61,17 @@ class _Context:
 def _server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> workspace_service.RawWorkspaceUi:
     """`make_server`와 같은 가짜 전송 서버 — 원본은 아직 없다."""
     monkeypatch.setattr("vlogsrt.env.is_offline", lambda: False)
+    sender = _CountingSender([{"start": 0.5, "end": 1.5, "text": "합성 영상입니다."}])
     server = workspace_service.RawWorkspaceUi(
         port=7993,
         state_path=tmp_path / "ui-state.json",
         live=LiveAnalysisTransport(
-            sender=_CountingSender([{"start": 0.5, "end": 1.5, "text": "합성 영상입니다."}]),
+            sender=sender,
             cfg=Config(),
             client=SuitabilityClient(),
             asr_approvals=lambda *a: {},
             luna_approvals=lambda *a: {},
+            timing_client=sender.client(),  # 시간 엔진은 Gemini 문 하나다(D163)
         ),
     )
     server.create_workspace_view("VFR 섞임", str(tmp_path / "workspace"))
@@ -159,6 +159,9 @@ def test_selection_analysis_publishes_a_review_with_a_vfr_source_present(
     wait_until(lambda: server._quick.get("stage") in (DONE, FAILED))
 
     assert server._quick["stage"] == DONE, server._quick
+    # 화면 단계는 작업의 끝 알림에서 DONE이 되고, 작업 기록은 그 뒤에 「succeeded」로 적힌다 —
+    # 느린 기계(CI)에서는 그 사이를 읽을 수 있다(W-84a). 기록이 끝날 때까지 기다린다.
+    wait_until(lambda: server.raw.get_job(root, server._quick["job_id"]).status != "running")
     job = server.raw.get_job(root, server._quick["job_id"])
     assert job.kind == "selection_analysis" and job.status == "succeeded"
     head = server.raw.review_workspace_facade(root).load_head().revision
@@ -261,9 +264,7 @@ def test_vfr_card_sits_in_order_and_explains_itself_without_a_server_call(
     )
     payload = tmp_path / "payload.json"
     payload.write_text(
-        json.dumps(
-            {"visual": ui_facade.VISUAL_BOOTSTRAP_JS, "caption": ui_facade.CAPTION_BOOTSTRAP_JS}
-        ),
+        json.dumps({"visual": ui_facade.VISUAL_BOOTSTRAP_JS}),
         encoding="utf-8",
     )
     completed = subprocess.run(

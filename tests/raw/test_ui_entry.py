@@ -88,10 +88,12 @@ class _StubUi:
 def _patch_launch(monkeypatch: pytest.MonkeyPatch, chosen_port: int) -> dict[str, Any]:
     """진입점 밖의 세계를 가린다 — 죽임 여부만 실물 서명으로 지켜본다."""
     killed: list[int] = []
+    # 옛 자동 정리(`stop_stale_ui`)는 지웠다(D163) — 누가 되살려 부르면 여기 남는다.
     monkeypatch.setattr(
         legacy_service,
         "stop_stale_ui",
         lambda port, wait_seconds=3.0: killed.append(port) or [],
+        raising=False,
     )
     monkeypatch.setattr(legacy_service, "pick_port", lambda preferred, attempts=20: chosen_port)
     launched: dict[str, Any] = {}

@@ -32,14 +32,11 @@ from vlogsrt.project.raw import (
     render_plan,
     timeline_edit,
     timeline_edit_io,
-    timing_engine,
 )
 from vlogsrt.project.raw import service as raw_service
-from vlogsrt.project.raw.config import RENDER_SETTINGS, TIMING_ENGINE_WHISPER
+from vlogsrt.project.raw.config import RENDER_SETTINGS
 from vlogsrt.project.raw.final_edit_config import FINAL_EDIT_SETTINGS
 from vlogsrt.project.raw.timeline_edit import TimelineEditError
-
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
 
 F = Fraction
 MOMENT = datetime(2026, 11, 13, 1, 2, 3, tzinfo=UTC)
@@ -56,10 +53,7 @@ def trip(tmp_path_factory: pytest.TempPathFactory) -> Folder:
     _encode(folder / "B_hd.mp4", "1920x1080", 30, 9, created="2026-09-01T10:00:00Z")
     _encode(folder / "C_tall.mp4", "1080x1920", 24, 2, created="2026-09-01T09:55:00Z")
     originals = {name: _identity(folder / name) for name in UTTERANCES}
-    with pytest.MonkeyPatch.context() as patch:  # D104 — 모듈 범위라 파일 머리 표시보다 먼저 돈다
-        patch.setattr(timing_engine, "DEFAULT_NEW_HEARING_ENGINE", TIMING_ENGINE_WHISPER)
-        patch.setattr(raw_service, "DEFAULT_NEW_HEARING_ENGINE", TIMING_ENGINE_WHISPER)
-        return _trip(folder, originals)
+    return _trip(folder, originals)
 
 
 def _tree(folder: Path) -> dict[str, tuple[int, int]]:
@@ -267,7 +261,8 @@ def test_too_many_cues_are_refused_with_the_count_and_the_largest_sources(
     base = trip.root / timeline_edit_io.TIMELINE_FOLDER
     before = sorted(p.name for p in base.iterdir()) if base.is_dir() else []
     tight = dataclasses.replace(FINAL_EDIT_SETTINGS, max_cues=2)
-    with pytest.raises(TimelineEditError, match=r"5줄로 상한 2줄") as caught:
+    with pytest.raises(TimelineEditError, match=r"6줄로 상한 2줄") as caught:
+        # Gemini 단어 묶기는 문장 끝 부호에서 줄을 나눠 A의 두 문장이 두 줄이다(D163).
         _create(trip, datetime(2026, 11, 13, 0, 9, 0, tzinfo=UTC), edit_settings=tight)
     assert "B_hd.mp4 3줄" in str(caught.value)
     after = sorted(p.name for p in base.iterdir()) if base.is_dir() else []
@@ -424,6 +419,26 @@ def test_adding_a_never_clipped_source_seeds_its_transcript_and_writes_a_revisio
     assert saved["revision"] == 3
 
 
+def test_a_source_dropped_from_the_list_lands_where_it_was_dropped(trip: Folder) -> None:
+    """W-111(D185) — 끌어 놓은 원본은 촬영 차례 자리가 아니라 놓은 자리(여기서는 끝)에
+    원본 전체로 선다."""
+    created = _strict(trip, 1)
+    clipped = {clip.source_id for clip in created.document.clips}
+    source = next(s for s in created.document.facts.sources if s.source_id not in clipped)
+    payload = timeline_edit.to_payload(created.document)
+    trip.service.timeline_add_source(
+        trip.root, created.folder.name, 1, payload, source.source_id, at=len(created.document.clips)
+    )
+    _, revision, document = timeline_edit_io.read_document(trip.root, created.folder.name)
+    last = document.clips[-1]
+    assert revision == 2 and len(document.clips) == len(created.document.clips) + 1
+    assert (last.source_id, last.start_frame, last.end_frame) == (
+        source.source_id,
+        0,
+        source.frame_count,
+    )
+
+
 def test_adding_a_source_refuses_a_stale_revision_or_a_clipped_source_and_writes_nothing(
     trip: Folder,
 ) -> None:
@@ -463,3 +478,16 @@ def test_edited_cues_are_saved_reopened_and_carried_into_the_srt(trip: Folder) -
     srt = timeline_edit.srt_text(back)
     assert "앞 반" in srt and "뒤 반" in srt and "고친 글" not in srt
     assert "새 자막" in srt
+
+
+def test_the_revision_srt_for_english_is_that_revisions_text(trip: Folder) -> None:
+    """W-99(D174) — 「영어 만들기」의 재료는 저장한 리비전의 SRT다(렌더한 `draft.srt`와 같다)."""
+    created = _create(trip, datetime(2026, 11, 19, 0, 0, 0, tzinfo=UTC))
+    name = created.folder.name
+    path = timeline_edit_io.korean_srt(trip.root, name, 1)
+    assert path == created.folder / "korean-r1.srt"
+    assert path.read_bytes() == timeline_edit.srt_text(created.document).encode("utf-8")
+    assert timeline_edit_io.korean_srt(trip.root, name, 1) == path  # 같은 리비전은 그대로
+    assert timeline_edit_io.korean_srts(trip.root, name) == [path]
+    with pytest.raises(TimelineEditError):
+        timeline_edit_io.korean_srt(trip.root, name, 2)  # 화면이 본 리비전이 아니다

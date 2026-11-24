@@ -30,9 +30,25 @@ class FinalEditSettings:
     - `waveform_rate`·`waveform_bin_ms`: 파형 진폭 디코딩 주파수와 빈 하나의 길이.
     - `zoom_*`: 타임라인 1초의 화소 폭 범위와 한 번 줌의 배율. `wheel_zoom_notch_px`: ⌘·Ctrl+휠이
       한 걸음 줌하는 휠 델타(마우스 한 칸 = 100 px) — 트랙패드 핀치의 작은 델타는 작게 줌한다.
-      `snap_px`: 스냅이 붙는 거리.
+      `snap_px`: 스냅이 붙는 거리(파형 자막 레인의 가장자리 잡는 거리도 같다, W-87b).
+    - `lane_px_per_s`: 파형 자막 레인(W-87b)이 처음 보이는 1초의 화소 폭 — 줌 범위 안.
+    - `lane_clip_px`: 파형 레인 위쪽 클립 띠(W-100, D169)의 이름 줄 높이 — 끝을 끌어 클립 길이를
+      고친다.
+    - `lane_film_px`: 그 이름 줄 아래 필름 띠(W-103, D176 — Final Cut 스토리라인의 그림 칸) 높이.
+      미리보기에서 브라우저가 뽑은 장면을 칸마다 보인다. 클립 띠 전체 = 이름 줄 + 필름 띠.
+    - `lane_wave_px`: 그 필름 띠 아래 클립에 붙은 소리 파형 줄 높이(D177 — Final Cut처럼 파형은 클립
+      안에, 자막은 스토리라인 위 칸에서 고친다).
+    - `film_cache_tiles`: 브라우저가 기억하는 필름 장면 수의 상한(넘으면 오래된 것부터 버린다).
+    - `fit_lane_min_px`: 한 화면 맞춤(W-102, D175)의 두 열 격자에서 파형 레인이 받아야 하는 최소
+      높이 — 못 받으면(위 덱이 원본 타임라인을 펼친 때) 예전처럼 쌓고 덱이 스크롤한다.
     - `big_step_frames`: Shift+화살표·Shift+밀기의 프레임 수.
     - `shuttle_rates`: L을 거듭 누를 때의 배속.
+    - `caption_step_ms`·`caption_small_step_ms`: 자막 창의 ←/→ · ⌥←/→ 한 걸음(Subtitle Edit 기본
+      1초 · 500 ms 그대로 — 재생기 화면이 데이터로 받는다).
+    - `style_drag_px`: 화면 자막을 끌어 옮기기(W-107, D181)가 시작되는 거리 — 그 아래는
+      누름(고르기)이다.
+      가운데 선에 붙는 거리는 `snap_px` 그대로다.
+    - `style_font_step`: 화면 자막 도구 막대 「A−」·「A+」 한 번의 글자 크기 걸음(1080 기준 px).
     """
 
     min_duration_ms: int = 850
@@ -54,15 +70,28 @@ class FinalEditSettings:
     zoom_step_percent: int = 125
     wheel_zoom_notch_px: int = 100
     snap_px: int = 8
+    lane_px_per_s: int = 100
+    lane_clip_px: int = 26
+    lane_film_px: int = 40
+    lane_wave_px: int = 24
+    film_cache_tiles: int = 400
+    fit_lane_min_px: int = 96
     big_step_frames: int = 10
     shuttle_rates: tuple[int, ...] = (1, 2, 4, 8)
+    caption_step_ms: int = 1000
+    caption_small_step_ms: int = 500
+    style_drag_px: int = 3
+    style_font_step: int = 2
 
     def __post_init__(self) -> None:
         positive = (
             self.min_duration_ms, self.max_duration_ms, self.max_cps, self.undo_limit,
             self.min_clip_frames, self.max_text_chars, self.max_cues, self.autosave_ms,
             self.new_cue_ms, self.reverse_tick_ms, self.waveform_rate, self.waveform_bin_ms,
-            self.zoom_min_px_per_s, self.big_step_frames,
+            self.zoom_min_px_per_s, self.big_step_frames, self.caption_step_ms, self.lane_clip_px,
+            self.fit_lane_min_px, self.lane_film_px, self.film_cache_tiles,
+            self.lane_wave_px,
+            self.caption_small_step_ms, self.style_drag_px, self.style_font_step,
         )  # fmt: skip
         if min(positive) <= 0 or self.min_gap_ms < 0 or self.coalesce_ms < 0 or self.snap_px < 0:
             raise ValueError("최종 편집 설정의 크기·한도는 양수여야 한다")
@@ -70,6 +99,8 @@ class FinalEditSettings:
             raise ValueError("휠 줌 한 걸음의 델타는 양수여야 한다")
         if self.zoom_max_px_per_s < self.zoom_min_px_per_s or self.zoom_step_percent <= 100:
             raise ValueError("줌 범위가 뒤집혔거나 줌 배율이 1 이하다")
+        if not self.zoom_min_px_per_s <= self.lane_px_per_s <= self.zoom_max_px_per_s:
+            raise ValueError("자막 레인의 처음 줌이 줌 범위 밖이다")
         if not self.shuttle_rates or min(self.shuttle_rates) <= 0:
             raise ValueError("셔틀 배속은 양수 하나 이상이어야 한다")
 
@@ -97,6 +128,16 @@ def client_settings(settings: FinalEditSettings = FINAL_EDIT_SETTINGS) -> dict[s
         "zoomStepPercent": settings.zoom_step_percent,
         "wheelZoomNotchPx": settings.wheel_zoom_notch_px,
         "snapPx": settings.snap_px,
+        "lanePxPerS": settings.lane_px_per_s,
+        "laneClipPx": settings.lane_clip_px,
+        "laneFilmPx": settings.lane_film_px,
+        "laneWavePx": settings.lane_wave_px,
+        "filmCacheTiles": settings.film_cache_tiles,
+        "fitLaneMinPx": settings.fit_lane_min_px,
         "bigStepFrames": settings.big_step_frames,
         "shuttleRates": list(settings.shuttle_rates),
+        "captionStepMs": settings.caption_step_ms,
+        "captionSmallStepMs": settings.caption_small_step_ms,
+        "styleDragPx": settings.style_drag_px,
+        "styleFontStep": settings.style_font_step,
     }

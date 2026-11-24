@@ -32,6 +32,7 @@ from vlogsrt import log, oscompat, preprocess
 from vlogsrt.env import ANALYSIS_CLAUDE_KEY_ENV, ANALYSIS_GEMINI_KEY_ENV
 from vlogsrt.project.raw import (
     analysis_workflow,
+    file_memo,
     read_scope,
     render_plan,
     segmentation,
@@ -77,7 +78,6 @@ from vlogsrt.project.raw.browser_runtime import (
     GeminiCredentials,
     asr_estimate_digest,
     browser_network_mode,
-    caption_transport_providers,
     capture_browser_credentials,
     capture_claude_credentials,
     capture_environment_credentials,
@@ -88,19 +88,16 @@ from vlogsrt.project.raw.browser_runtime import (
     production_live_transport,
     semantic_estimate_digest,
 )
-from vlogsrt.project.raw.caption_manual import ms as caption_ms
-from vlogsrt.project.raw.caption_workspace_types import (
-    CaptionWorkspaceError,
-    ManualHeadConflict,
-)
 from vlogsrt.project.raw.config import (
     ANALYSIS_MODEL_CHOICES,
     ANALYSIS_PROVIDER_ANTHROPIC,
     ANALYSIS_PROVIDER_GOOGLE,
     DEFAULT_ANALYSIS_MODEL,
     FOLDER_WORKSPACE,
+    GEMINI_ANALYSIS_PROFILES,
     GEMINI_MODEL_PREFIX,
     GEMINI_TRANSCRIBE_PROFILES,
+    HYDROGEN_TEXT,
     MODE_AUTO,
     MODE_CHOICES,
     MODE_LANDSCAPE,
@@ -136,7 +133,6 @@ from vlogsrt.project.raw.fcp import (
 from vlogsrt.project.raw.fcp import (
     scan_fcp_library as fcp_scan_fcp_library,
 )
-from vlogsrt.project.raw.final_video import FinalVideoError
 from vlogsrt.project.raw.ingest import (
     IngestConfirmation,
     IngestProposal,
@@ -418,12 +414,6 @@ __all__ = [
     "gemini_text_per_minute",
     "asr_estimate_digest",
     "validate_analysis_concurrency",
-    "caption_ms",
-    "caption_run_identity",
-    "CaptionPreviewMedia",
-    "CaptionWorkspaceError",
-    "FinalVideoError",
-    "ManualHeadConflict",
     "REVIEW_NOTE_PREFIX",
     "ReviewError",
     "StaleRevisionError",
@@ -436,7 +426,6 @@ __all__ = [
     "gemini_profile",
     "official_price_model",
     "browser_network_mode",
-    "caption_transport_providers",
     "content_type_for",
     "ffprobe_media_inspector",
     "host_header_allowed",
@@ -540,8 +529,8 @@ TIER_SETTINGS_KEY = "tier_settings"
 """작업공간별 추천 기준(W-42, D100 §3) 표지 — 기본값과 다른 칸만의 JSON 덮기. 없거나 비었으면
 기본 기준(`TIER_SETTINGS`)이다. 지문·승인·견적 밖이고, 기준 digest가 등급의 낡음 열쇠에 실린다."""
 
-TIMING_ENGINE_CHOICES: tuple[str, ...] = (TIMING_ENGINE_GEMINI, TIMING_ENGINE_WHISPER)
-"""「새로 듣는 전사 엔진」 칸의 차례(W-31e) — 새 엔진이 앞, 종료될 whisper가 뒤다."""
+TIMING_ENGINE_CHOICES: tuple[str, ...] = timing_engine.NEW_HEARING_ENGINES
+"""새로 들을 수 있는 엔진 — Gemini 하나다(whisper는 은퇴했다, D163)."""
 timing_engine_facts = timing_engine.facts
 DEFAULT_NEW_HEARING_ENGINE = timing_engine.DEFAULT_NEW_HEARING_ENGINE
 """「새로 듣는 엔진」의 기본(D104 — Gemini). 화면이 표지를 읽지 못할 때도 이 값을 보인다."""
@@ -577,9 +566,33 @@ RELISTEN_MEDIA_MISSING_REFUSAL = (
     "원본 파일을 읽지 못했습니다 — 원본 연결을 확인하세요. 아무것도 바꾸지 않았습니다."
 )
 CONTEXT_NOTHING = "맥락을 평가할 분석이 없습니다 — 영상 분석을 먼저 마치세요"
+HYDROGEN_RETEXT_JOB_KIND = "hydrogen_retext"
+"""「글자 다시 받기(Hydrogen)」 작업(W-114d, D187) — 지금 원본 자막 줄의 글자만 Hydrogen에 다시
+묻는다(유료). 작업 지문은 `<원본>:<범위 digest>`다."""
+HYDROGEN_RETEXT_WHISPER = (
+    "whisper로 들은 영상입니다 — 「다시 듣기」로 Gemini에 다시 들으면 Hydrogen 글자를 함께"
+    " 받습니다."
+)
+HYDROGEN_RETEXT_PENDING = (
+    "다시 듣기를 기다리는 영상입니다 — 다시 들으면 Hydrogen 글자를 함께 받으니 따로 받지 않습니다."
+)
+HYDROGEN_RETEXT_BUSY = (
+    "이 영상의 분석·빈칸 재전사·글자 다시 받기가 진행 중입니다 — 끝난 뒤 다시 눌러 주세요."
+    " 아무것도 시작하지 않았습니다."
+)
+HYDROGEN_RETEXT_CHANGED = (
+    "원본 자막이나 받을 범위가 바뀌었습니다 — 바뀐 화면을 확인하고 다시 누르세요. 유료 호출은"
+    " 시작하지 않았습니다."
+)
+HYDROGEN_RETEXT_NO_CLIENT = (
+    "Gemini 결제 연결 키가 없어 글자를 받지 않았습니다 — .env에 GEMINI_API_KEY를 넣고 앱을 다시"
+    " 켜세요. 유료 호출은 시작하지 않았습니다."
+)
 REFILL_JOB_KIND = "speech_refill"
 """말소리 빈칸 재전사 작업(D59 19f) — 승인한 범위의 조각만 whisper(·두 번째 귀)에 다시
 묻는다(유료)."""
+SOURCE_ACTION_JOB_KINDS = (REFILL_JOB_KIND, HYDROGEN_RETEXT_JOB_KIND)
+"""원본 하나의 유료 동작 작업 — 「도는 중」을 늘 이 묶음 하나로 묻는다(읽기 기억 하나, W-24)."""
 REFILL_UNTRANSCRIBED = "이 영상은 아직 전사하지 않았습니다 — 분석을 승인하면 처음부터 듣습니다."
 REFILL_WAITING = "자막 시각 확인이 끝나면 빈칸을 셉니다(무료) — 잠시 뒤에 다시 보세요."
 REFILL_UNMEASURED = (
@@ -588,6 +601,10 @@ REFILL_UNMEASURED = (
 REFILL_RELISTEN_PENDING = (
     "다시 듣기를 기다리는 영상입니다 — 다시 듣기를 먼저 끝낸 뒤에 빈칸을 채우세요. 빈칸을 먼저"
     " 채우면 다시 들은 전사가 이 자막을 덮지 못해 다시 듣기에 낸 돈이 헛됩니다."
+)
+REFILL_WHISPER_RETIRED = (
+    "whisper로 들은 영상입니다 — whisper는 은퇴해(D163) 빈칸을 새로 묻지 않습니다. 「다시 듣기」로"
+    " Gemini에 다시 들은 뒤에 빈칸을 채우세요."
 )
 REFILL_CHANGED = (
     "빈칸이 바뀌었습니다 — 바뀐 빈칸을 확인하고 다시 승인하세요. 유료 호출은 시작하지 않았습니다."
@@ -1230,9 +1247,26 @@ class RawWorkspaceService:
         # 순서 확정·되채움 쓰기·검토 순서 맞춤이 동시에 불려도 같은 일을 두 번 하지 않는다.
         self._order_lock = threading.Lock()
         self._align_lock = threading.Lock()
+        # 풀어 쓴 작업공간 뿌리(절대 경로만) — 그리기마다 같은 뿌리를 다시 풀지 않는다(D167).
+        self._root_keys: dict[Path, Path] = {}
+
+    def _root_key(self, root: Path) -> Path:
+        """작업공간 열쇠(풀어 쓴 절대 경로) — 절대 경로는 한 번 풀어 기억한다(D167).
+
+        그리기 한 번이 같은 뿌리를 약 200번 풀었다(칸마다 `lstat`). 상대 경로와 `~`는 작업 폴더·홈에
+        따라 달라지므로 매번 푼다. 이미 연 작업공간은 예전부터 처음 푼 열쇠에 묶여 있었다."""
+        if not root.is_absolute():
+            return root.expanduser().resolve()
+        with self._lock:
+            known = self._root_keys.get(root)
+        if known is None:
+            known = root.resolve()
+            with self._lock:
+                self._root_keys[root] = known
+        return known
 
     def _workspace(self, root: Path) -> RawWorkspace:
-        key = root.expanduser().resolve()
+        key = self._root_key(root)
         with self._lock:
             workspace = self._workspaces.get(key)
             if workspace is None:
@@ -1241,7 +1275,7 @@ class RawWorkspaceService:
             return workspace
 
     def _jobs(self, root: Path) -> JobManager:
-        key = root.expanduser().resolve()
+        key = self._root_key(root)
         with self._lock:
             manager = self._job_managers.get(key)
             if manager is None:
@@ -1302,13 +1336,15 @@ class RawWorkspaceService:
         return self._workspace(root).load_workflow()
 
     def adopt_default_analysis_model(self, root: Path) -> str | None:
-        """기존 작업공간의 영상 분석 모델을 지금 기본(Gemini 3.8 Flash)으로 **한 번** 옮긴다(D87).
+        """기존 작업공간의 영상 분석 모델을 지금 기본(Gemini 4 Hydrogen, D168)으로 **한 번**
+        옮긴다(D87).
 
-        사용자 지시(2026-10-25): 「주로 Flash를 이용해서 처리」 — 새 작업공간과 지금 작업공간
-        모두다.
-        옮기는 것은 **예전 기본(Sonnet 5.5)에 머문 작업공간**뿐이다 — 사람이 따로 고른 Opus·Luna·
-        Gemini는 그대로 두고 표지만 남긴다. 표지(`meta`의 `analysis_model_default`)에 옮긴 기본의
-        이름을 남겨, 그 뒤 사람이 고른 모델은 다시 열어도 그대로다(기본이 또 바뀌면 그때 다시 본다).
+        사용자 지시(2026-10-25 「주로 Flash를 이용해서 처리」 · 2026-11-19 「Gemini 4 Hydrogen로
+        대체해줘」) — 새 작업공간과 지금 작업공간 모두다.
+        옮기는 것은 **예전 기본(Sonnet 5.5 · 3.8 Flash)에 머문 작업공간**뿐이다 — 사람이 따로 고른
+        Opus·Luna·Argon은 그대로 두고 표지만 남긴다. 표지(`meta`의 `analysis_model_default`)에 옮긴
+        기본의 이름을 남겨, 그 뒤 사람이 고른 모델은 다시 열어도 그대로다(기본이 또 바뀌면 그때 다시
+        본다).
         분석 작업이 도는 동안에는 옮기지 않고 다음 열기에 다시 본다 — 견적이 본 모델과 실행이
         갈리지 않게. 옮기기는 설정 하나뿐이다 — 이미 산 분석·검토 머리·자막은 그대로이고, 다시
         분석하려면 새 견적을 보고 승인한다(유료). 옮겼으면 예전 모델 이름을 돌려준다.
@@ -1633,25 +1669,6 @@ class RawWorkspaceService:
             lambda: request_usage.format_usage_line(self.analysis_usage_summary(root, revision_id)),
         )
 
-    def with_request_receipts(self, root: Path, body: Any, timing: object, text: object) -> Any:
-        """Open the receipt scope around a final-caption run when its providers are live."""
-        from vlogsrt.project.raw import request_log
-        from vlogsrt.project.raw.caption_provider import (
-            TransportTextProvider,
-            TransportTimingProvider,
-        )
-
-        live = isinstance(timing, TransportTimingProvider) or isinstance(
-            text, TransportTextProvider
-        )
-        workspace = self._workspace(root)
-
-        def scoped(context: JobContext) -> None:
-            with request_log.scope(workspace, context.job_id, live=live):
-                body(context)
-
-        return scoped
-
     def selection_quote(
         self, root: Path, asset_ids: tuple[str, ...], mode: str = SELECTION_MODE_FULL
     ) -> Any:
@@ -1692,12 +1709,6 @@ class RawWorkspaceService:
         from vlogsrt.project.raw import cross_check
 
         return cross_check.enabled(self._workspace(root))
-
-    def set_cross_check(self, root: Path, on: bool) -> bool:
-        """교차 확인 켬·끔을 저장한다(무료) — 견적·승인이 그 값으로 다시 묶인다(호출 0회)."""
-        from vlogsrt.project.raw import cross_check
-
-        return cross_check.set_enabled(self._workspace(root), on)
 
     def workspace_mode(self, root: Path) -> Any:
         """작업공간 모드(D97) — 사람이 고른 값(표지)이 없으면 불러온 영상 개수 다수다(읽기만)."""
@@ -1790,6 +1801,15 @@ class RawWorkspaceService:
         if root is None:
             return burn_in.default_style()
         return burn_export.saved_style(self, root)
+
+    def save_subtitle_burn_style(self, root: Path, values: Any) -> Any:
+        """손잡이를 바꾸면 바로 저장한다(W-98, D173) — 공유의 번인이 화면에 보인 모양을 쓰게.
+        검사해서 저장하고 저장한 모양을 돌려준다(범위 밖이면 `RawWorkspaceError` — 저장 안 함)."""
+        from vlogsrt.project.raw import burn_export
+
+        style = self.subtitle_burn_style(values=values)
+        burn_export.save_style(self, root, style)
+        return style
 
     def prepare_subtitle_burn(
         self, root: Path, video: Path | None, korean: Path | None, english: Path | None
@@ -1960,10 +1980,7 @@ class RawWorkspaceService:
 
     def refill_running(self, root: Path, asset_id: str) -> bool:
         """그 원본의 빈칸 재전사 작업이 도는 중인가 — 작업 지문은 `<원본>:<digest>`다."""
-        return any(
-            job.input_fingerprint.startswith(f"{asset_id}:")
-            for job in self.active_jobs(root, (REFILL_JOB_KIND,))
-        )
+        return REFILL_JOB_KIND in self.running_source_jobs(root, asset_id)
 
     def refill_last(self, root: Path, asset_id: str) -> dict | None:
         """가장 최근 빈칸 재전사 기록 — 화면의 「지난 빈칸 재전사」 한 줄. 읽기만 한다."""
@@ -2018,7 +2035,8 @@ class RawWorkspaceService:
         current = speech_refill.scope_for(plan)
         if current.digest != approved.digest:
             raise RawWorkspaceError(REFILL_CHANGED)
-        if current.text_identity not in (None, identity):
+        hydrogen = current.text_model == HYDROGEN_TEXT.model  # 용어집 밖의 신원이다(D187)
+        if not hydrogen and current.text_identity not in (None, identity):
             raise RawWorkspaceError(REFILL_GLOSSARY_CHANGED)
         audio = self._refill_audio(workspace, asset_id, plan)
         browser_runtime.prepare_approved_browser_network()
@@ -2074,6 +2092,8 @@ class RawWorkspaceService:
             return REFILL_UNTRANSCRIBED
         if asr_epoch.state(workspace, asset_id).pending:
             return REFILL_RELISTEN_PENDING
+        if timing_engine.resolve(workspace, asset_id) not in timing_engine.NEW_HEARING_ENGINES:
+            return REFILL_WHISPER_RETIRED
         measured = sync_report.measured_speech(workspace, asset_id)
         if measured is None:
             report = sync_report.current_report(workspace, asset_id)
@@ -2115,9 +2135,13 @@ class RawWorkspaceService:
             audio_start=measured.audio_start,
             spans=spans,
             workflow=replace(self.source_settings(root, asset.asset_id), network_mode="online"),
-            # Gemini 시간 엔진 원본에는 다른 귀가 없다(D104) — 빈칸 재전사도 gpt를 묻지 않는다.
+            # Gemini 시간 엔진 원본에는 gpt 다른 귀가 없다(D104) — 빈칸 재전사도 gpt를 묻지 않는다.
             cross_check=cross_check.enabled(workspace)
-            and text_ear.resolve(workspace, asset.asset_id) != text_ear.EAR_NONE,
+            and text_ear.resolve(workspace, asset.asset_id)
+            not in (text_ear.EAR_NONE, text_ear.EAR_HYDROGEN),
+            # 빈칸 재전사로 받은 줄의 글자는 Hydrogen이 다시 듣는다(W-114e, D187) — Gemini 원본
+            # 전부(이미 들은 영상도). whisper 원본은 빈칸 재전사가 거절한다(D163).
+            hydrogen=timing_engine.resolve(workspace, asset.asset_id) != TIMING_ENGINE_WHISPER,
             glossary=glossary.current(workspace).terms,
             chunk_bound=_refill_bound(int(measured.report["pcm"]["channels"])),
             refill_ids=refill_ids,
@@ -2148,6 +2172,146 @@ class RawWorkspaceService:
     # ── 시각 맞춤 적용·되돌리기(D59 19h) — 제안은 무료로 다시 재고, 적용은 사람이 누를 때만 ──────
     # 제안 계산(`sync_snap`)과 원본 자막 쓰기(`apply_changes`·`restore`)는 이 아래의 `apply_snap*`·
     # `revert_snap*`만 부른다(불변식). 화면은 이 메서드들로만 닿는다.
+
+    # ── 「글자 다시 받기(Hydrogen)」(W-114d, D187) — 이미 들은 영상의 글자만 다시 듣는다 ──────
+
+    def running_source_jobs(
+        self, root: Path, asset_id: str, kinds: Collection[str] = ()
+    ) -> frozenset[str]:
+        """그 원본의 활성 작업 종류 — DB 연결 하나로 여러 종류를 함께 본다(그리기의 읽기 수)."""
+        del kinds  # 늘 같은 종류 묶음으로 묻는다 — 그리기 한 번의 기억 하나를 함께 쓴다
+        return frozenset(
+            job.kind
+            for job in self.active_jobs(root, SOURCE_ACTION_JOB_KINDS)
+            if job.input_fingerprint.startswith(f"{asset_id}:")
+        )
+
+    def hydrogen_retext_running(self, root: Path, asset_id: str) -> bool:
+        """그 원본의 글자 다시 받기 작업이 도는 중인가 — 작업 지문은 `<원본>:<digest>`다."""
+        return HYDROGEN_RETEXT_JOB_KIND in self.running_source_jobs(root, asset_id)
+
+    def hydrogen_retext_scope(self, root: Path, asset_id: str) -> Any:
+        """지금 받을 범위(무료, 보내지 않는다) — 받을 수 없으면 그 이유(존댓말 한 줄)."""
+        from vlogsrt.project.raw import asr_epoch, hydrogen_retext, source_transcript
+
+        workspace = self._workspace(root)
+        document = source_transcript.load(workspace, asset_id)
+        if document is None:
+            return hydrogen_retext.NO_TRANSCRIPT
+        if timing_engine.resolve(workspace, asset_id) == TIMING_ENGINE_WHISPER:
+            return HYDROGEN_RETEXT_WHISPER
+        if asr_epoch.state(workspace, asset_id).pending:
+            return HYDROGEN_RETEXT_PENDING
+        return hydrogen_retext.scope_for(workspace.root, asset_id, document, HYDROGEN_TEXT)
+
+    def hydrogen_retext_last(self, root: Path, asset_id: str) -> dict | None:
+        """가장 최근 글자 다시 받기 기록 — 화면의 「지난 결과」 한 줄. 읽기만 한다."""
+        path = self._hydrogen_retext_record_path(root, asset_id)
+        if not path.is_file():
+            return None
+        body = json.loads(path.read_text(encoding="utf-8"))
+        return body if isinstance(body, dict) else None
+
+    def _hydrogen_retext_record_path(self, root: Path, asset_id: str) -> Path:
+        return self._workspace(root).root / "analysis" / "hydrogen_retext" / f"{asset_id}.json"
+
+    def hydrogen_retext_start(
+        self,
+        root: Path,
+        asset_id: str,
+        digest: str,
+        transport: Any,
+        after: Callable[[], None] | None = None,
+    ) -> JobHandle:
+        """누른 범위로 작업을 건다(누름이 승인, D110) — 본문이 유료 호출 전에 범위를 다시 잰다."""
+
+        def body(context: JobContext) -> None:
+            self.hydrogen_retext_source(root, asset_id, digest, transport, context)
+            if after is not None:
+                after()
+
+        return self.submit_job(root, HYDROGEN_RETEXT_JOB_KIND, f"{asset_id}:{digest}", body)
+
+    def hydrogen_retext_source(
+        self, root: Path, asset_id: str, digest: str, transport: Any, context: JobContext
+    ) -> dict[str, Any]:
+        """글자 다시 받기(작업 본문, 유료) — 범위가 누른 것과 같을 때만 묻고, 받은 글자로 새
+        리비전 하나를 쓴다(`source_transcript.replace_texts` — 시각·줄은 그대로)."""
+        from vlogsrt.project.raw import hydrogen_retext, request_log
+        from vlogsrt.project.raw.understanding_luna import online_env_blocked
+
+        workspace = self._workspace(root)
+        scope = self.hydrogen_retext_scope(root, asset_id)
+        if isinstance(scope, str):
+            raise RawWorkspaceError(scope)
+        if scope.digest != digest:
+            raise RawWorkspaceError(HYDROGEN_RETEXT_CHANGED)
+        client = getattr(transport, "timing_client", None)
+        if client is None:
+            raise RawWorkspaceError(HYDROGEN_RETEXT_NO_CLIENT)
+        blocked = online_env_blocked()
+        if blocked is not None:
+            raise RawWorkspaceError(blocked)
+        context.check_cancel()
+        on = getattr(transport, "on", None) or datetime.now(UTC).date()
+        with request_log.scope(workspace, context.job_id, live=True):
+            result = hydrogen_retext.run(workspace.root, scope, client, HYDROGEN_TEXT, on=on)
+        return self._hydrogen_retext_settle(root, scope, result)
+
+    def _hydrogen_retext_settle(self, root: Path, scope: Any, result: Any) -> dict[str, Any]:
+        """받은 글자를 새 리비전 하나로 쓰고 기록한다(쓰기는 여기 하나). 받은 답은 캐시에 남는다."""
+        from vlogsrt.project.raw import asr_epoch, hydrogen_text_pass, source_transcript
+        from vlogsrt.project.raw.understanding_luna import ORIGIN_LIVE
+
+        workspace = self._workspace(root)
+
+        def guard(db: Any) -> None:
+            if asr_epoch.pending_on(db, scope.asset_id):
+                raise RawWorkspaceError(HYDROGEN_RETEXT_PENDING)
+
+        record: dict[str, Any] = {
+            "schema": "raw-hydrogen-retext-record/v1",
+            "asset_id": scope.asset_id,
+            "from_revision": scope.revision,
+            "digest": scope.digest,
+            "model": HYDROGEN_TEXT.model,
+            "asked": result.asked,
+            "chunks": list(result.chunks),
+            "left_out": scope.left_out,
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        try:
+            payload = source_transcript.replace_texts(
+                workspace,
+                scope.asset_id,
+                scope.revision,
+                result.texts,
+                model=HYDROGEN_TEXT.model,
+                identity=hydrogen_text_pass.text_identity(HYDROGEN_TEXT),
+                digest=scope.digest,
+                origin=ORIGIN_LIVE,
+                guard=guard,
+            )
+        except RawWorkspaceError as error:
+            record.update(changed=0, refusal=str(error))
+            self._write_hydrogen_retext_record(root, scope.asset_id, record)
+            log.warn(f"글자 다시 받기: {error}")
+            raise
+        changed = int(payload[source_transcript.HYDROGEN_FIELD]["changed"])
+        record.update(changed=changed, revision=payload["revision"])
+        self._write_hydrogen_retext_record(root, scope.asset_id, record)
+        log.out(f"글자 다시 받기: Hydrogen 글자 {changed}줄 — 새 원본 자막 리비전")
+        self._queue_sync_checks(root, (scope.asset_id,))  # 리비전이 바뀌었다 — 시각 확인을 다시
+        return record
+
+    def _write_hydrogen_retext_record(
+        self, root: Path, asset_id: str, record: Mapping[str, Any]
+    ) -> None:
+        path = self._hydrogen_retext_record_path(root, asset_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_suffix(".tmp")
+        temp.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+        oscompat.replace(temp, path)
 
     def apply_snap_preview(self, root: Path, asset_id: str) -> Any:
         """「시각 맞춤 제안」 칸의 값(무료) — 지금 제안의 sha·센 어긋남·판정 수·예측·먼저 들을 줄.
@@ -2523,7 +2687,7 @@ class RawWorkspaceService:
             return None
         directory, document = _tier_paths(workspace.root, row)
         if document.is_file():
-            body = document.read_bytes()
+            body = file_memo.read_bytes(document)  # 바이트만 기억한다 — 등급은 매번 계산(D51·D167)
             return tiering.classify(
                 json.loads(body),
                 audio_start=_record_audio_start(workspace.root, row),
@@ -3673,9 +3837,36 @@ class RawWorkspaceService:
             self._workspace(root).root, source_id, str(transcript.get("source_sha256") or "")
         )
         timing = self.subtitle_cue_timing(transcript, stage1)
+        silent, extra = self.hydrogen_flags(root, source_id, stage1)
+        if silent or extra:
+            timing = replace(timing, hydrogen_silent=silent, hydrogen_extra=extra)
         return self.with_gemini_heard(
             timing, transcript, self._gemini_heard_windows(root, source_id)
         )
+
+    def hydrogen_flags(
+        self, root: Path, source_id: str, stage1: Any = None
+    ) -> tuple[frozenset[str], dict[str, tuple[str, ...]]]:
+        """Hydrogen 글자 귀가 남긴 표시 재료(W-114e) — 1단계 `asr_text`와 글자 다시 받기 기록을 합친
+        (말 없음 줄, 줄 밖 말). 읽기만 한다 — 줄·시각·글자를 바꾸지 않는다(규칙 5)."""
+        from vlogsrt.project.raw import hydrogen_text_pass
+
+        records: list[Any] = [self.hydrogen_retext_last(root, source_id)]
+        folder = getattr(stage1, "folder", None)
+        outcome = None if folder is None else Path(folder) / "asr_outcome.json"
+        if outcome is not None and outcome.is_file():
+            body = json.loads(outcome.read_text(encoding="utf-8"))
+            text = body.get("asr_text") if isinstance(body, dict) else None
+            if isinstance(text, dict) and text.get("schema") == hydrogen_text_pass.RECORD_SCHEMA:
+                records.append(text)
+        silent: set[str] = set()
+        extra: dict[str, tuple[str, ...]] = {}
+        for record in records:
+            found, heard = hydrogen_text_pass.record_flags(record)
+            silent |= found
+            for key, texts in heard.items():
+                extra[key] = extra.get(key, ()) + texts
+        return frozenset(silent), extra
 
     @staticmethod
     def with_gemini_heard(
@@ -3747,7 +3938,7 @@ class RawWorkspaceService:
         if not path.is_file():
             return None
         try:
-            body = json.loads(path.read_text(encoding="utf-8"))
+            body = json.loads(file_memo.read_text(path))
         except (OSError, ValueError):
             return None
         return body if isinstance(body, dict) else None
@@ -4024,6 +4215,39 @@ class RawWorkspaceService:
         fingerprint = f"render_export/timeline/{timeline_id}@{revision}"
         return self.submit_job(root, RENDER_EXPORT_JOB_KIND, fingerprint, body)
 
+    def start_timeline_share(
+        self,
+        root: Path,
+        timeline_id: str,
+        revision: int,
+        burn: str,
+        client: object | None = None,
+    ) -> JobHandle:
+        """「최종출력」(W-88 · D147) — 렌더(D130)하고 `burn`이 「없음」이 아니면 자막을
+        입힌다(D116).
+
+        작업 종류·지문 머리는 렌더와 같다(결과 카드·「다시 열기」가 그대로 본다). 번인을 고르면
+        libass ffmpeg를 작업 전에 확인한다. 렌더·번인은 무료 로컬이다. 「한국어 + 영어」에서 화면이
+        Gemini 클라이언트를 넘기면(그 글의 번역이 없을 때, W-108 · D182) 작업 안에서 옮긴다 —
+        유료이고 누름이 승인이다(D110). 온라인 문은 작업 전에 본다. 없으면 사지 않는다(D114)."""
+        from vlogsrt.project.raw import burn_export, srt_english, timeline_share
+
+        mode = timeline_share.require_mode(burn)
+        style = burn_export.saved_style(self, root)
+        if mode != timeline_share.BURN_NONE:
+            burn_export.executable()
+        translator = client if mode == timeline_share.BURN_KOREAN_ENGLISH else None
+        if translator is not None:
+            srt_english.require_online(self, root)
+
+        def body(context: JobContext) -> None:
+            timeline_share.share(
+                self, root, timeline_id, revision, mode, style, context, translator=translator
+            )
+
+        fingerprint = f"render_export/timeline/{timeline_id}@{revision}/{mode}"
+        return self.submit_job(root, RENDER_EXPORT_JOB_KIND, fingerprint, body)
+
     def export_srt_again(self, root: Path) -> Any:
         """「SRT만 다시 내보내기」(D115) — 마지막 초안 폴더에 지금 원본 자막으로 새 SRT를 쓴다.
 
@@ -4080,9 +4304,11 @@ class RawWorkspaceService:
         """「타임라인으로 보내기」(W-71b, D126) — 추천 조각을 렌더하지 않고 원본 범위 타임라인으로
         만들어 새 `timeline/<시각>/`에 쓰는 작업. 원본 조사(ffprobe)만 하고 무료 로컬이다."""
         from vlogsrt.project.raw import timeline_edit_io
+        from vlogsrt.project.raw.config import OUTPUT_FORMAT
 
         def body(context: JobContext) -> None:
-            timeline_edit_io.create_timeline(self, root, context)
+            # 새 타임라인은 4K · 29.97fps, 방향은 남긴 길이가 많은 쪽(D172).
+            timeline_edit_io.create_timeline(self, root, context, output=OUTPUT_FORMAT)
 
         return self.submit_job(root, TIMELINE_EXPORT_JOB_KIND, "timeline_export/create", body)
 
@@ -4125,6 +4351,36 @@ class RawWorkspaceService:
             }
         return {"timelineId": timeline, "sources": sources}
 
+    def timeline_waveform(self, root: Path, source_id: str) -> dict[str, Any]:
+        """원본 하나의 파형(W-87b) — 자막 레인이 그린다. 처음 한 번 재고 캐시한다(무료 로컬)."""
+        from vlogsrt.project.raw import source_waveform
+
+        return source_waveform.waveform(self._workspace(root), source_id)
+
+    def timeline_korean_srt(self, root: Path, timeline_id: str, revision: int) -> Path:
+        """저장한 리비전의 자막 SRT(W-99, D174) — 「영어 만들기」가 `start_srt_translation`에
+        넘긴다. 무료(파일 하나). 화면의 리비전이 지금 저장본과 다르면 거부한다."""
+        from vlogsrt.project.raw import timeline_edit_io
+
+        return timeline_edit_io.korean_srt(root, timeline_id, revision)
+
+    def timeline_translate_line(
+        self, root: Path, korean: str, context: Sequence[str], client: object
+    ) -> str:
+        """번역 모드의 「이 줄 영어 번역」(W-112, D186) — 한 줄을 Gemini로 옮겨 영어를 돌려준다
+        (유료 · 누름이 승인). 저장하지 않는다 — 화면이 고친 영어로 문서에 넣는다."""
+        from vlogsrt.project.raw import srt_english
+
+        return srt_english.translate_line(self, root.expanduser(), korean, context, client)
+
+    def timeline_english(self, root: Path, timeline_id: str) -> dict[str, str]:
+        """타임라인 자막의 영어 열(W-87d) — 렌더한 초안들의 저장된 번역을 한국어 글로.
+
+        읽기만 한다(무료 — 사지 않는다)."""
+        from vlogsrt.project.raw import timeline_english
+
+        return timeline_english.english_by_text(self, root, timeline_id)
+
     def timeline_tiers(self, root: Path, source_ids: Sequence[str]) -> dict[str, list[list[str]]]:
         """원본마다 등급 구간 [시작 초, 끝 초, 등급](원본 시계, 원점 0) — 범위 조정의 띠(W-71d).
 
@@ -4162,12 +4418,15 @@ class RawWorkspaceService:
         base_revision: int,
         payload: Mapping[str, Any],
         source_id: str,
+        *,
+        at: int | None = None,
     ) -> dict[str, Any]:
-        """클립이 없는 원본을 원본 전체 클립으로 넣는다(W-71g) — 처음 넣으면 지금 자막을 심는다."""
+        """클립이 없는 원본을 원본 전체 클립으로 넣는다(W-71g) — 처음 넣으면 지금 자막을 심는다.
+        `at`(클립 차례)이 있으면 그 자리다(영상 목록에서 끌어 놓기, W-111 · D185)."""
         from vlogsrt.project.raw import timeline_edit_io
 
         return timeline_edit_io.add_source_to_timeline(
-            self, root.expanduser(), timeline_id, base_revision, payload, source_id
+            self, root.expanduser(), timeline_id, base_revision, payload, source_id, at=at
         )
 
     def final_edit_waveform(self, root: Path, export_id: str) -> dict[str, Any]:
@@ -4727,8 +4986,12 @@ class RawWorkspaceService:
         client: object | None = None,
         on: date | None = None,
         timing_client: object | None = None,
+        preencode_clips: bool = False,
     ) -> JobHandle:
         """의미 분석 작업을 제출한다 — 기본은 **오프라인 재생**, 실제 호출은 두 단계 승인만.
+
+        `preencode_clips`는 전체 승인(전사 + 영상 분석)이 1단계 동안 Gemini 창 클립을 미리 자르게
+        한다(P-4, D158) — 「전사만」 승인은 넘기지 않는다.
 
         재생(`mode="replay"`)은 단일 패스로 전부 재생한다. 실제 호출
         (`mode="live"`)은 **1단계(내부 ASR)**만 시작한다: 사람이 만든 원본별
@@ -4763,6 +5026,8 @@ class RawWorkspaceService:
             assets,
             timing_client=timing_client,
         )
+        if preencode_clips:
+            providers = replace(providers, preencode_clips=True)
         fingerprint = self._analysis_fingerprint(
             order.revision_id, assets, understanding, workflow, mode, root=root
         )
@@ -5323,158 +5588,12 @@ class RawWorkspaceService:
         registration = self.register_media(root, target, "preview")
         return ReviewVttRegistration(registration, result.provenance)
 
-    def caption_preview(self, root: Path, registration: Any) -> CaptionPreviewMedia:
-        """선택 오디오 미리보기 — 같은 (렌더, 서수, 도구)면 ffmpeg 없이 등록만 돌려준다.
-
-        브라우저는 컨테이너의 오디오 트랙을 못 고르므로(Chromium `audioTracks=null`),
-        자막이 묶인 **그 트랙만** 담은 MP4를 `previews/captions/`에 만들어 등록한다.
-        원본(검증 사본)은 읽기만 한다. 캐시 키는 렌더 해시·오디오 서수·도구 판·조리법
-        판이고, 잰 원점은 짝지은 기록 파일에 남아 재사용 때 ffmpeg이 다시 돌지
-        않는다 — 미디어·트랙이 바뀐 경우에만 만든다(표시 갱신은 만들지 않는다).
-        """
-        workspace = self._workspace(root)
-        if not registration.ready:
-            raise RawWorkspaceError(
-                f"등록이 {registration.status!r}다 — 오디오 선택이 확정된 등록만 미리보기를 만든다"
-            )
-        if registration.verified_copy_rel is None or registration.audio_stream_index is None:
-            raise RawWorkspaceError(
-                "준비된 등록에 검증 사본·오디오 스트림 번호가 없다 — 손상된 행이다"
-            )
-        if registration.audio_ordinal is None:
-            raise RawWorkspaceError("준비된 등록에 오디오 서수가 없다 — 손상된 행이다")
-        ordinal = int(registration.audio_ordinal)
-        tool = self._preview_tool_line()
-        recipe_key = "|".join(
-            (
-                registration.final_video_revision,
-                f"o{ordinal}",
-                tool,
-                CAPTION_PREVIEW_RECIPE,
-            )
-        )
-        media_key = hashlib.sha256(recipe_key.encode("utf-8")).hexdigest()[:24]
-        relative = f"{CAPTION_PREVIEW_REL}/{media_key}.mp4"
-        record_relative = f"{CAPTION_PREVIEW_REL}/{media_key}.json"
-        target = workspace.root / relative
-        record = workspace.root / record_relative
-        reused = self._reused_caption_preview(target, record, media_key)
-        built = False
-        if reused is None:
-            # 깨진 짝(영상만 있거나 기록이 못 믿을 때)은 이 이름공간의 캐시다 —
-            # 버리고 다시 만든다. 원본·확정본은 이 디렉터리에 없다.
-            target.unlink(missing_ok=True)
-            record.unlink(missing_ok=True)
-            extraction = preprocess.extract_caption_preview(
-                workspace.root / registration.verified_copy_rel,
-                target,
-                audio_stream_index=registration.audio_stream_index,
-            )
-            payload = {
-                "schema": CAPTION_PREVIEW_RECIPE,
-                "key": media_key,
-                "source_revision": registration.final_video_revision,
-                "audio_ordinal": ordinal,
-                "audio_origin": str(extraction.audio_origin),
-                "duration": str(extraction.duration),
-                "remuxed": extraction.remuxed,
-                "video_codec": extraction.video_codec,
-                "audio_codec": extraction.audio_codec,
-                "ffmpeg_version": extraction.ffmpeg_version,
-                "warnings": list(extraction.warnings),
-            }
-            record.parent.mkdir(parents=True, exist_ok=True)
-            temp = record.with_name(record.name + ".partial")
-            temp.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
-            oscompat.replace(temp, record)
-            reused = (
-                Fraction(str(payload["audio_origin"])),
-                Fraction(str(payload["duration"])),
-                bool(payload["remuxed"]),
-                str(payload["video_codec"]),
-                str(payload["audio_codec"]),
-                str(payload["ffmpeg_version"]),
-                tuple(str(item) for item in payload["warnings"]),
-            )
-            built = True
-        origin, duration, remuxed, video_codec, audio_codec, ffmpeg_version, warnings = reused
-        media_registration = self._caption_preview_registration(
-            workspace, root, target, relative, built
-        )
-        return CaptionPreviewMedia(
-            registration=media_registration,
-            media_key=media_key,
-            source_revision=registration.final_video_revision,
-            audio_ordinal=ordinal,
-            audio_origin=origin,
-            duration=duration,
-            remuxed=remuxed,
-            video_codec=video_codec,
-            audio_codec=audio_codec,
-            built=built,
-            ffmpeg_version=ffmpeg_version,
-            warnings=warnings,
-        )
-
     @staticmethod
     def _preview_tool_line() -> str:
         """미리보기 키에 쓰는 도구 판 — 한 번 재고 가둔다."""
         if "ffmpeg" not in _FFMPEG_VERSION_LINE:
             _FFMPEG_VERSION_LINE["ffmpeg"] = preprocess.ffmpeg_provenance().splitlines()[0]
         return _FFMPEG_VERSION_LINE["ffmpeg"]
-
-    @staticmethod
-    def _reused_caption_preview(
-        target: Path, record: Path, media_key: str
-    ) -> tuple[Fraction, Fraction, bool, str, str, str, tuple[str, ...]] | None:
-        """재사용 가능한 미리보기 — 영상·기록이 온전히 짝지어 있을 때만 그 값을 믿는다."""
-        if not target.is_file() or not record.is_file():
-            return None
-        try:
-            payload = json.loads(record.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None
-        if not isinstance(payload, dict) or payload.get("key") != media_key:
-            return None
-        try:
-            origin = Fraction(str(payload["audio_origin"]))
-            duration = Fraction(str(payload["duration"]))
-            remuxed = bool(payload["remuxed"])
-            video_codec = str(payload["video_codec"])
-            audio_codec = str(payload["audio_codec"])
-            ffmpeg_version = str(payload["ffmpeg_version"])
-            warnings = tuple(str(item) for item in payload["warnings"])
-        except (KeyError, TypeError, ZeroDivisionError, ValueError):
-            return None
-        return origin, duration, remuxed, video_codec, audio_codec, ffmpeg_version, warnings
-
-    def _caption_preview_registration(
-        self, workspace: RawWorkspace, root: Path, target: Path, relative: str, rebuilt: bool
-    ) -> MediaRegistration:
-        """미리보기의 등록 행 — 재사용은 그대로, 다시 만들었으면 지문을 다시 박는다.
-
-        정리(purge)는 파일만 지우고 행은 남긴다. 다시 만든 파일은 지문이 어긋나므로
-        같은 경로의 행에 `refresh_media_fingerprint`로 새 지문을 박는다 — 낡은
-        file_id는 그대로 다시 쓰고(제공 안전망은 그대로), 어긋난 지문의 문은 닫힌다.
-        """
-        for registered in self.list_media(root, kind="preview"):
-            if registered.relative_path == relative:
-                if rebuilt:
-                    workspace.refresh_media_fingerprint(registered.file_id)
-                    probed = target.lstat()
-                    return MediaRegistration(
-                        file_id=registered.file_id,
-                        kind=registered.kind,
-                        relative_path=registered.relative_path,
-                        status=registered.status,
-                        size_bytes=probed.st_size,
-                        registered_at=registered.registered_at,
-                    )
-                return registered
-        return self.register_media(root, target, "preview")
 
     # ── V1 — 영상 우선 검토(질의·미리보기 준비·리비전 묶음 편집) ──
 
@@ -5912,22 +6031,6 @@ class RawWorkspaceService:
             ("review_workspace_facade", str(resolved)), lambda: ReviewWorkspaceFacade(resolved)
         )
 
-    def caption_workspace(self, root: Path) -> Any:
-        """자막 작업공간(W2) — 등록→추정→승인→실행→검토→확정의 정본 handle.
-
-        검토 파사드와 같은 규칙: 화면은 이 handle만 쓰고, 모듈이 없으면 정직하게
-        닫는다. 유료 호출 재료는 사람이 주입하는 제공자뿐이다(이 handle은
-        제공자를 스스로 만들지 않는다).
-        """
-        try:
-            from vlogsrt.project.raw.caption_workspace import open_caption_workspace
-        except ImportError as error:
-            raise WorkspaceModuleUnavailableError(
-                "자막 작업공간 백엔드(caption_workspace)가 이 빌드에 없다 — 병합 뒤"
-                " 활성화된다. 그 전까지 자막 화면은 안내만 보인다."
-            ) from error
-        return open_caption_workspace(self._workspace(root))
-
     # ── A4 내부 — 선택·지문·공급자·구간 조립 ────────────────────
 
     def _analysis_selection(
@@ -6118,6 +6221,13 @@ class RawWorkspaceService:
             raise AnalysisError(
                 f"{name}은(는) {engine.label}로 듣는다 — .env에 {ANALYSIS_GEMINI_KEY_ENV}(결제 연결"
                 " 키)를 넣고 앱을 다시 켜세요. 유료 호출은 시작하지 않았습니다"
+            )
+        text_ear = GEMINI_ANALYSIS_PROFILES.get(approval.text_model or "")
+        if text_ear is not None and timing_client is None:
+            raise AnalysisError(
+                f"{name}의 자막 글자는 {text_ear.label}로"
+                f" 다시 듣는다 — .env에 {ANALYSIS_GEMINI_KEY_ENV}(결제 연결 키)를 넣고 앱을 다시"
+                " 켜세요. 유료 호출은 시작하지 않았습니다(D187)"
             )
         if approval.text_model in GEMINI_TRANSCRIBE_PROFILES and timing_client is None:
             raise AnalysisError(
@@ -7092,7 +7202,7 @@ def _record_audio_start(workspace_root: Path, row: AnalysisSourceResult) -> Frac
     """PCM 표본 0의 공통 시계 위치 — 기록이 없으면 0(파일 시각과 같다고 본다)."""
     if row.record_path is None:
         return Fraction(0)
-    record = json.loads((workspace_root / row.record_path).read_text(encoding="utf-8"))
+    record = json.loads(file_memo.read_text(workspace_root / row.record_path))
     start = record.get("timeline", {}).get("audio", {}).get("common_start")
     return _json_fraction(start) if start else Fraction(0)
 
@@ -7309,21 +7419,6 @@ def _plan_bound_material(snapshot: SegmentPlanSnapshot) -> str:
     )
 
 
-def caption_run_identity(revision: str, run_id: str, fingerprint: str) -> Any:
-    """자막 실행 신원 값 — 백엔드(W2)의 정의를 그대로 쓴다(여기서 다시 만들지 않는다).
-
-    화면은 이 공개 경로로만 신원을 만든다(계약: UI 임포트 경로 예외). 백엔드
-    모듈이 없는 빌드에서는 정직한 오류로 닫는다.
-    """
-    try:
-        from vlogsrt.project.raw.caption_workspace_types import RunIdentity
-    except ImportError as error:
-        raise WorkspaceModuleUnavailableError(
-            "자막 작업공간 백엔드(caption_workspace)가 이 빌드에 없다 — 병합 뒤 활성화된다."
-        ) from error
-    return RunIdentity(final_video_revision=revision, run_id=run_id, fingerprint=fingerprint)
-
-
 @dataclass(frozen=True)
 class ReviewVttRegistration:
     """검토 VTT 등록 결과 — 등록 미디어와 출처(원본 대 추출)를 함께 돌려준다.
@@ -7344,31 +7439,6 @@ CAPTION_PREVIEW_RECIPE = "caption-preview/v1"
 
 _FFMPEG_VERSION_LINE: dict[str, str] = {}
 """미리보기 키에 쓰는 도구 판 — 프로세스에서 한 번만 재고 가둔다(조회마다 재생 없음)."""
-
-
-@dataclass(frozen=True)
-class CaptionPreviewMedia:
-    """선택 오디오 미리보기의 등록 결과 — 표시 갱신 판정 키와 잰 원점까지.
-
-    `audio_origin`은 미리보기 파일의 선택 오디오를 자막 시계와 같은 16 kHz
-    파이프라인으로 잰 원점이다. 큐 시각은 최종 영상 시계(등록 원점 포함)이므로,
-    미리보기 재생 위치는 `audio_origin − 등록 원점 + 큐 시각`이다. `built`는 이
-    호출에서 ffmpeg을 실제로 돌렸는지를 가린다(미디어·트랙이 바뀐 경우에만 참이어야
-    한다 — 표시 갱신은 거짓).
-    """
-
-    registration: MediaRegistration
-    media_key: str
-    source_revision: str
-    audio_ordinal: int
-    audio_origin: Fraction
-    duration: Fraction
-    remuxed: bool
-    video_codec: str
-    audio_codec: str
-    built: bool
-    ffmpeg_version: str
-    warnings: tuple[str, ...]
 
 
 def _plan_timestamp() -> str:

@@ -1,0 +1,280 @@
+"""파형 자막 레인(Subtitle Edit식, W-87b, D149) — 순수 계산. 노드에서도 돈다(`module.exports`).
+
+Subtitle Edit 5.2.0 파형 조작(정적 분석 — `docs/plans/2026-11-16-fcp-window.md`)을 원본 범위
+타임라인의 시퀀스 틱 위에 옮긴다: 블록 맞히기(가장자리 · 몸통), 가장자리 끌기(이웃 자막 ·
+최소 간격 · 최소 길이 안), 몸통 끌기(이웃 사이), 빈 곳 끌기(새 선택), 컷 경계 스냅(⇧이면 안
+붙는다), 휠 확대. 여기는 **틱을 고를 뿐** 문서를 고치지 않는다 — 고른 틱을 원본 밀리초로 바꿔
+문서 연산(`TL.cueSetTimes`·`cueShift`·`cueInsert`)에 넘기는 것은 재생기다(규칙 3).
+
+보기(view)는 `{start, tpp}` — 레인 왼쪽 끝의 틱과 화소 하나의 틱.
+자막(cues)은 `TL.project(doc).cues`의 줄 — `[아이디, 원본, 시작 틱, 끝 틱, 글, 잘림]`.
+"""
+
+from __future__ import annotations
+
+CAPTION_LANE_JS = r"""
+(function (root) {
+  var L = {};
+  L.x = function (view, ticks) { return (ticks - view.start) / view.tpp; };
+  L.ticksAt = function (view, x) { return view.start + x * view.tpp; };
+  // 맞힌 블록과 자리 — 가장자리(edgePx 안)가 몸통보다 먼저, 가까운 쪽이 이긴다. 없으면 null.
+  L.hit = function (cues, view, x, edgePx) {
+    var best = null;
+    cues.forEach(function (cue, index) {
+      var xs = L.x(view, cue[2]);
+      var xe = L.x(view, cue[3]);
+      var ds = Math.abs(x - xs);
+      var de = Math.abs(x - xe);
+      var part = null;
+      var distance = 0;
+      if (ds <= edgePx && ds <= de) { part = "start"; distance = ds; }
+      else if (de <= edgePx) { part = "end"; distance = de; }
+      else if (xs <= x && x <= xe) { part = "body"; distance = edgePx + 1; }
+      if (part && (!best || distance < best.distance)) {
+        best = { index: index, id: cue[0], part: part, distance: distance };
+      }
+    });
+    return best ? { index: best.index, id: best.id, part: best.part } : null;
+  };
+  // 클립 띠(W-100, D169) — 레인 위쪽에 클립마다 블록. 맞힌 클립과 자리(start · end · body).
+  // 가장자리는 edgePx 안에서 가까운 쪽이 이기고, 같으면 x를 몸통에 담은 클립이 이긴다(맞닿은
+  // 두 클립 사이에서는 누른 쪽 클립의 가장자리). spans는 배치 줄({outStart, outFrames})이다.
+  L.clipHit = function (spans, view, x, edgePx, seqTicks) {
+    var best = null;
+    spans.forEach(function (span, index) {
+      var xs = L.x(view, span.outStart * seqTicks);
+      var xe = L.x(view, (span.outStart + span.outFrames) * seqTicks);
+      var inside = xs <= x && x < xe;
+      [["start", Math.abs(x - xs)], ["end", Math.abs(x - xe)]].forEach(function (pair) {
+        if (pair[1] > edgePx) { return; }
+        var better = !best || pair[1] < best.distance ||
+          (pair[1] === best.distance && inside && !best.inside);
+        if (better) { best = { index: index, part: pair[0], distance: pair[1], inside: inside }; }
+      });
+      if (!best && inside) { best = { index: index, part: "body", distance: edgePx + 1 }; }
+    });
+    return best ? { index: best.index, part: best.part } : null;
+  };
+  // 필름 띠(W-103, D176) — 클립 [xs, xe) 안에 tileW 화소 칸을 클립 처음에 맞춰 늘어놓고 보이는
+  // [0, width)에 걸친 칸만 낸다. mid는 그 칸이 보이는 장면의 자리(칸 가운데, 클립 끝에서 잘린
+  // 마지막 칸은 남은 몫의 가운데)다. 격자가 클립 처음에 붙어 있어 스크롤해도 칸이 미끄러지지
+  // 않는다.
+  L.filmTiles = function (xs, xe, tileW, width) {
+    var tiles = [];
+    if (!(tileW > 0) || xs >= width || xe <= 0) { return tiles; }
+    var first = Math.max(0, Math.floor(-xs / tileW));
+    for (var x = xs + first * tileW; x < xe && x < width; x += tileW) {
+      if (x + tileW > 0) { tiles.push({ x: x, mid: (x + Math.min(x + tileW, xe)) / 2 }); }
+    }
+    return tiles;
+  };
+  // 칸 하나가 덮는 초 이상인 가장 작은 장면 간격(없으면 마지막) — 줌이 바뀌어도 같은 장면을
+  // 다시 쓴다.
+  L.filmBucket = function (secondsPerTile, steps) {
+    for (var i = 0; i < steps.length; i += 1) {
+      if (steps[i] >= secondsPerTile) { return steps[i]; }
+    }
+    return steps[steps.length - 1];
+  };
+  L.filmKey = function (sourceId, seconds, bucket) {
+    return sourceId + ":" + Math.round(seconds / bucket) * bucket;
+  };
+  // 전체 보기 띠 — 레인 보기(폭 laneWidth)가 덮는 자리를 navWidth 화소 띠(총 total 틱) 위에.
+  L.navWindow = function (view, laneWidth, total, navWidth) {
+    var scale = navWidth / Math.max(1, total);
+    var a = Math.max(0, Math.min(navWidth, view.start * scale));
+    var b = Math.max(0, Math.min(navWidth, (view.start + laneWidth * view.tpp) * scale));
+    return [a, b];
+  };
+  // ticks를 폭 width 보기의 가운데에 둔다(배율 그대로).
+  L.centerOn = function (view, ticks, width) {
+    return { start: ticks - (width / 2) * view.tpp, tpp: view.tpp };
+  };
+  // 클립 가장자리 끌기 — 끈 틱만큼 원본 프레임을 옮긴다(가장 가까운 프레임). 갈 수 있는 자리는
+  // 재생기가 문서 규칙으로 다시 막는다.
+  L.trimFrame = function (edgeFrame, deltaTicks, sourceFrameTicks) {
+    return edgeFrame + Math.round(deltaTicks / sourceFrameTicks);
+  };
+  // 자막 간격(W-101, D170) — 이웃 자막에 붙는 스냅 자리는 가장자리 그대로가 아니라 최소 간격만큼
+  // 띄운 자리다: 시작은 앞 자막 끝 + minGap, 끝은 뒤 자막 시작 − minGap.
+  L.gapSnaps = function (cues, index, part, minGap) {
+    var near = part === "start" ? cues[index - 1] : cues[index + 1];
+    if (!near) { return []; }
+    return [part === "start" ? near[3] + minGap : near[2] - minGap];
+  };
+  // 새 선택을 이웃 자막과 최소 간격을 둔 빈칸 안으로 — 선택 시작이 든 빈칸이다. 시작이 자막
+  // 안이거나 남는 길이가 minLength보다 짧으면 null(넣지 않는다). 보이는 자막(투영)만 본다.
+  // [floor, ceiling]은 시작이 든 클립의 처음·끝이다 — 새 자막은 컷을 넘지 않는다.
+  L.fitGap = function (cues, a, b, minGap, minLength, floor, ceiling) {
+    var lo = floor;
+    var hi = ceiling;
+    for (var i = 0; i < cues.length; i += 1) {
+      var cue = cues[i];
+      if (cue[2] < a && a < cue[3]) { return null; }
+      if (cue[3] <= a) { lo = Math.max(lo, cue[3] + minGap); }
+      else if (cue[2] >= a) { hi = Math.min(hi, cue[2] - minGap); }
+    }
+    var start = Math.max(a, lo);
+    var end = Math.min(b, hi);
+    return end - start >= minLength ? [Math.round(start), Math.round(end)] : null;
+  };
+  // 가까운 스냅 자리(컷 경계 등)로 — snapTicks 안에 없으면 그대로.
+  L.snap = function (ticks, snaps, snapTicks) {
+    var chosen = ticks;
+    var gap = snapTicks;
+    snaps.forEach(function (point) {
+      var d = Math.abs(point - ticks);
+      if (d <= gap) { gap = d; chosen = point; }
+    });
+    return chosen;
+  };
+  // 가장자리 끌기 — 앞(뒤) 자막과 최소 간격, 자기 길이는 최소 길이, 타임라인 [0, total] 안.
+  L.edge = function (cues, index, part, ticks, minGap, minLength, total) {
+    var cue = cues[index];
+    var prev = cues[index - 1];
+    var next = cues[index + 1];
+    if (part === "start") {
+      var low = prev ? prev[3] + minGap : 0;
+      var high = cue[3] - minLength;
+      return Math.round(Math.max(Math.min(ticks, high), Math.min(low, high)));
+    }
+    var floor = cue[2] + minLength;
+    var ceiling = next ? next[2] - minGap : total;
+    return Math.round(Math.min(Math.max(ticks, floor), Math.max(ceiling, floor)));
+  };
+  // 몸통 끌기 — 길이 그대로 옮기는 틱 수를 앞뒤 자막(최소 간격)·타임라인 끝 안으로.
+  L.body = function (cues, index, delta, minGap, total) {
+    var cue = cues[index];
+    var prev = cues[index - 1];
+    var next = cues[index + 1];
+    var low = (prev ? prev[3] + minGap : 0) - cue[2];
+    var high = (next ? next[2] - minGap : total) - cue[3];
+    if (high < low) { return 0; }
+    return Math.round(Math.max(low, Math.min(high, delta)));
+  };
+  // ⌥ 가장자리 끌기(W-87c, D152) — 맞닿은 이웃의 마주 보는 가장자리도 둘 사이 간격 그대로
+  // 함께 간다(Subtitle Edit). 두 줄 모두 최소 길이 안. 이웃이 없으면 null — 보통 끌기로.
+  L.edgePair = function (cues, index, part, ticks, minLength) {
+    var cue = cues[index];
+    if (part === "end") {
+      var next = cues[index + 1];
+      if (!next) { return null; }
+      var gap = next[2] - cue[3];
+      var lo = cue[2] + minLength;
+      var hi = next[3] - minLength - gap;
+      var end = Math.round(Math.min(Math.max(ticks, lo), Math.max(hi, lo)));
+      return { value: end, neighbor: index + 1, neighborValue: end + gap };
+    }
+    var prev = cues[index - 1];
+    if (!prev) { return null; }
+    var gapBefore = cue[2] - prev[3];
+    var low = prev[2] + minLength + gapBefore;
+    var high = cue[3] - minLength;
+    var start = Math.round(Math.max(Math.min(ticks, high), Math.min(low, high)));
+    return { value: start, neighbor: index - 1, neighborValue: start - gapBefore };
+  };
+  // 여러 줄 몸통 끌기 — 고른 줄을 같은 틱만큼, 고르지 않은 이웃(최소 간격)·타임라인 끝 안으로.
+  L.bodyMany = function (cues, indices, delta, minGap, total) {
+    var picked = {};
+    indices.forEach(function (i) { picked[i] = true; });
+    var low = -Infinity;
+    var high = Infinity;
+    indices.forEach(function (i) {
+      var cue = cues[i];
+      var prev = cues[i - 1];
+      var next = cues[i + 1];
+      if (!picked[i - 1]) { low = Math.max(low, (prev ? prev[3] + minGap : 0) - cue[2]); }
+      if (!picked[i + 1]) { high = Math.min(high, (next ? next[2] - minGap : total) - cue[3]); }
+    });
+    if (!indices.length || high < low) { return 0; }
+    return Math.round(Math.max(low, Math.min(high, delta)));
+  };
+  // 목록 고르기 — "one"(그 줄만) · "toggle"(Mod 누름, 넣고 빼기) · "range"(⇧ 누름, 기준부터 그
+  // 줄까지). ids는 보이는 차례이고 고른 줄도 그 차례로 돌려준다.
+  L.pick = function (ids, picked, anchor, id, how) {
+    if (how === "toggle") {
+      var had = picked.indexOf(id) >= 0;
+      var kept = had ? picked.filter(function (p) { return p !== id; }) : picked.concat([id]);
+      return { picked: ids.filter(function (p) { return kept.indexOf(p) >= 0; }), anchor: id };
+    }
+    if (how === "range" && anchor !== null && ids.indexOf(anchor) >= 0) {
+      var a = ids.indexOf(anchor);
+      var b = ids.indexOf(id);
+      return { picked: ids.slice(Math.min(a, b), Math.max(a, b) + 1), anchor: anchor };
+    }
+    return { picked: [id], anchor: id };
+  };
+  // 새 선택 — 두 끝을 차례대로, 타임라인 안으로.
+  L.range = function (a, b, total) {
+    var lo = Math.max(0, Math.min(a, b));
+    var hi = Math.min(total, Math.max(a, b));
+    return [Math.round(lo), Math.round(hi)];
+  };
+  // 확대 — anchorX 화소 아래 틱을 제자리에 두고, 화소당 틱을 [minTpp, maxTpp] 안으로.
+  L.zoom = function (view, factor, anchorX, minTpp, maxTpp) {
+    var tpp = Math.max(minTpp, Math.min(maxTpp, view.tpp / factor));
+    var anchor = L.ticksAt(view, anchorX);
+    return { start: anchor - anchorX * tpp, tpp: tpp };
+  };
+  // 창에 맞추기(⇧Z) — 타임라인 전체가 width 화소에 들게, 화소당 틱을 [minTpp, maxTpp] 안으로.
+  L.fit = function (total, width, minTpp, maxTpp) {
+    var tpp = Math.max(minTpp, Math.min(maxTpp, total / Math.max(1, width)));
+    return { start: 0, tpp: tpp };
+  };
+  // 보이게 — ticks가 보기 밖이면 그 자리를 가운데로 옮긴 보기, 안이면 그대로.
+  L.follow = function (view, ticks, width) {
+    var x = L.x(view, ticks);
+    if (x >= 0 && x <= width) { return view; }
+    return { start: ticks - (width / 2) * view.tpp, tpp: view.tpp };
+  };
+  // 휠 한 번의 확대 배율 — 마우스 한 칸(notchPx)이 한 걸음(stepPercent),
+  // 트랙패드의 작은 델타는 작게.
+  L.wheelFactor = function (deltaY, deltaMode, stepPercent, notchPx) {
+    var step = stepPercent / 100;
+    if (!deltaY) { return 1; }
+    if (deltaMode !== 0) { return deltaY < 0 ? step : 1 / step; }
+    return Math.pow(step, Math.max(-1, Math.min(1, -deltaY / notchPx)));
+  };
+  // ─── 화면 자막 모양(W-107, D181) — 뷰어에서 자막을 끌어 옮기고 모서리로 키운다 ───────
+  // 정수로 반올림해 [lo, hi] 안으로.
+  L.clampInt = function (value, range) {
+    return Math.max(range[0], Math.min(range[1], Math.round(value)));
+  };
+  // 가운데 c를 덩어리가 틀 안에 들게 — [반, 틀 − 반] 안, 덩어리가 틀보다 크면 틀 가운데.
+  function keepIn(c, size, total) {
+    var half = size / 2;
+    return half * 2 >= total ? total / 2 : Math.max(half, Math.min(total - half, c));
+  }
+  // 끌어 옮기기 — 덩어리 가운데(start, 틀 px)를 (dx, dy)만큼. lock(⇧)이면 큰 쪽 축 하나만,
+  // snap이면 화면 가운데 선(세로 · 가로)에 snapPx 안에서 붙고 그 안내선을 켠다.
+  L.styleMove = function (start, dx, dy, box, frame, opts) {
+    if (opts.lock) {
+      if (Math.abs(dx) >= Math.abs(dy)) { dy = 0; } else { dx = 0; }
+    }
+    var x = start.x + dx;
+    var y = start.y + dy;
+    var guides = { v: false, h: false };
+    if (opts.snap && Math.abs(x - frame.w / 2) <= opts.snapPx) { x = frame.w / 2; guides.v = true; }
+    if (opts.snap && Math.abs(y - frame.h / 2) <= opts.snapPx) { y = frame.h / 2; guides.h = true; }
+    return { x: keepIn(x, box.w, frame.w), y: keepIn(y, box.h, frame.h), guides: guides };
+  };
+  // 모서리 끌기 — 붙잡은 점(from: 맞은편 모서리, ⇧면 가운데)에서 잰 거리의 비로 글자 크기.
+  L.styleScale = function (font, from, start, now, range) {
+    var before = Math.hypot(start.x - from.x, start.y - from.y);
+    if (!(before > 0)) { return L.clampInt(font, range); }
+    return L.clampInt(font * Math.hypot(now.x - from.x, now.y - from.y) / before, range);
+  };
+  // 크기를 바꾼 덩어리의 가운데 — 맞은편 모서리(anchor)를 제자리에 둔다. sign은 그 모서리에서
+  // 잡은 모서리 쪽(±1, ±1).
+  L.styleAnchor = function (anchor, sign, box) {
+    return { x: anchor.x + sign.x * box.w / 2, y: anchor.y + sign.y * box.h / 2 };
+  };
+  // 가운데(틀 px) → 저장 자리(scale 단위 몫, 번인의 `\pos`).
+  L.stylePoint = function (c, frame, scale) {
+    return { x_permille: L.clampInt(c.x / frame.w * scale, [0, scale]),
+      y_permille: L.clampInt(c.y / frame.h * scale, [0, scale]) };
+  };
+  root.__vlCaptionLane = L;
+  if (typeof module !== "undefined" && module.exports) { module.exports = L; }
+})(typeof window !== "undefined" ? window : globalThis);
+"""

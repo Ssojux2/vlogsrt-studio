@@ -8,12 +8,9 @@
   '스트림 0개·무음'으로 해석되는 길이 없다.
 - 문턱은 스트림 **수**다 — 스테레오·멀티채널 채널은 한 스트림이므로 지나간다.
 - 같은 원본은 한 번만 확인한다(여러 리소스가 같은 파일을 가리킬 때).
-- 유료 추정(`inspect`)과 유료 실행(`analyze --online`)이 같은 관문을 지난다 —
-  저장된 추정이 있어도 실행 때 다시 잰다(Swift 준비 캐시와 무관하다).
+- 추정(`inspect`)이 위상 관문을 지난다(유료 분석 문 `analyze`는 D163으로 지웠다).
 - XML 선언(`hasAudio=0`)이 남은 트랙을 숨일 수 없다 — 선언과 무관하게 실제
   스트림을 센다. 0스트림·1스트림은 계속 지원한다.
-- 유료 역할은 공급자 construction보다 앞서 **전부** 검증된다 — 한 역할의
-  부재가 다른 역할의 유료 호출을 열어두지 않는다(재개 실행도 다시 잰다).
 - 앱이 스테이징한 권한 문서는 낡은 camelCase 철자도 읽히고, 원본이 그 루트
   안인지 엔진이 스스로 잰다 — Swift를 거치지 않은 직접 실행도 같은 문이다.
 """
@@ -25,18 +22,12 @@ import json
 import os
 from pathlib import Path
 from types import ModuleType
-from urllib.parse import quote
 
 import pytest
-from analysis_scope import scope_of
 
 from tests._dotenv_guard import stage_synthetic_dotenv
 from vlogsrt import cli, preprocess
 from vlogsrt.project.media import ResolvedMedia
-from vlogsrt.project.workflow_protocol import (
-    AnalysisAuthorization,
-    encode_message,
-)
 
 
 @pytest.fixture(autouse=True)
@@ -335,7 +326,7 @@ def test_gate_failure_is_actionable_not_silence(
 
 
 # ─────────────────────────────────────────────────────────────
-#  파이프라인 배선 — 추정이 드러내고, 유료 실행이 다시 잰다
+#  파이프라인 배선 — 추정이 위상을 드러낸다
 # ─────────────────────────────────────────────────────────────
 
 
@@ -353,7 +344,7 @@ def _staged_workspace(tmp_path: Path) -> Path:
   <resources>
     <format id="r1" name="FFVideoFormat1080p25" frameDuration="1/25s"/>
     <asset id="r2" name="clip.mov" uid="ASSET-1" start="0s" duration="12s" hasAudio="1" format="r1">
-      <media-rep kind="original-media" src="file://{quote(str(media))}"/>
+      <media-rep kind="original-media" src="{media.as_uri()}"/>
     </asset>
   </resources>
   <library>
@@ -411,99 +402,9 @@ def test_single_and_zero_stream_estimates_remain_supported(
     assert cli.main(["project", "inspect", str(zero)]) == 0
 
 
-def test_paid_analyze_rechecks_topology_even_with_a_stored_estimate(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """승인된 유료 실행도 다시 잰다 — 저장된 추정은 재확인을 면제하지 못한다."""
-
-    workspace = _staged_workspace(tmp_path)
-    _wire_stream_count(monkeypatch, {"clip.mov": 1})
-    assert cli.main(["project", "inspect", str(workspace)]) == 0
-
-    estimate = scope_of(workspace)
-    (workspace / "analysis-authorization.jsonl").write_text(
-        encode_message(
-            AnalysisAuthorization(
-                input_revision=estimate.input_revision,
-                settings_sha256=estimate.settings_sha256,
-                media_grant_revision=estimate.media_grant_revision,
-                authorized_at="2026-09-27T04:00:00Z",
-            )
-        ),
-        encoding="utf-8",
-    )
-
-    # 같은 자리의 원본이 둘 이상의 스트림을 가진 상태로 바뀌었다 — 실행 때 다시 잰다.
-    _wire_stream_count(monkeypatch, {"clip.mov": 3})
-    assert (
-        cli.main(
-            [
-                "project",
-                "analyze",
-                str(workspace),
-                "--online",
-                "--authorization",
-                str(workspace / "analysis-authorization.jsonl"),
-            ]
-        )
-        == 2
-    )
-    # 실패한 유료 요청은 아무 시도·후보·전사를 남기지 않는다.
-    assert not (workspace / "analysis-attempts.jsonl").is_file()
-    assert not (workspace / "candidates.jsonl").is_file()
-    failure = capsys.readouterr().err
-    assert "오디오 스트림" in failure
-    assert "믹스다운" in failure
-
-
-def test_paid_analyze_proceeds_with_supported_topology(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """지원되는 위상(1스트림)은 유료 관문을 지난다 — 뒤의 실패는 위상 때문이 아니다."""
-    from vlogsrt.project import commands as project_commands
-
-    workspace = _staged_workspace(tmp_path)
-    _wire_stream_count(monkeypatch, {"clip.mov": 1})
-    assert cli.main(["project", "inspect", str(workspace)]) == 0
-
-    monkeypatch.setattr(project_commands.env, "require_api_key", lambda **kwargs: "test-key")
-    assert (
-        cli.main(
-            [
-                "project",
-                "analyze",
-                str(workspace),
-                "--online",
-                "--authorization",
-                str(tmp_path / "missing-authorization.jsonl"),
-            ]
-        )
-        == 2
-    )
-    assert "오디오 스트림" not in capsys.readouterr().err
-
-
 # ─────────────────────────────────────────────────────────────
-#  유료 역할 관문 — 공급자 construction보다 앞서 전부 잰다(S2A-2)
+#  V2 역할 적용 — 아래 권한 문서 시험이 쓰는 도우미(S2A-2)
 # ─────────────────────────────────────────────────────────────
-
-
-def _stage_authorization(tmp_path: Path, workspace: Path) -> Path:
-
-    estimate = scope_of(workspace)
-    authorization = workspace / "analysis-authorization.jsonl"
-    authorization.write_text(
-        encode_message(
-            AnalysisAuthorization(
-                input_revision=estimate.input_revision,
-                settings_sha256=estimate.settings_sha256,
-                media_grant_revision=estimate.media_grant_revision,
-                authorized_at="2026-09-27T04:00:00Z",
-            )
-        ),
-        encoding="utf-8",
-    )
-    return authorization
 
 
 def _apply_v2_roles(
@@ -513,158 +414,6 @@ def _apply_v2_roles(
     from vlogsrt import env
 
     env.apply_role_credentials(stt, vision, "https://example.invalid/v1")
-
-
-def test_missing_vision_role_with_a_valid_stt_key_makes_zero_provider_calls(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """V2 앱 운반에서 STT가 유효해도 비전 역할이 비면 아무 공급자도 만들지
-    않는다 — 전사기 construction조차 없다(비전 공장에서 뒤늦게 발견하면 이미 늦다)."""
-    from vlogsrt import transcribe
-
-    workspace = _staged_workspace(tmp_path)
-    _wire_stream_count(monkeypatch, {"clip.mov": 1})
-    (workspace / "media-grant.json").write_text(_grant_document([str(tmp_path)]), encoding="utf-8")
-    # V2 역할은 inspect **앞에** 적용한다 — 추정 지문이 역할 라우팅·엔드포인트를
-    # 묶는 지금(S2B-2b) inspect와 analyze가 같은 라우팅을 봐야 한다. 비전 역할의
-    # 부재(빈 값)는 소비 문에서 걸린다 — 그것이 이 시험의 대상이다.
-    _apply_v2_roles(stt="synthetic-stt-key", vision="")  # 비전 역할만 부재
-    assert cli.main(["project", "inspect", str(workspace)]) == 0
-    authorization = _stage_authorization(tmp_path, workspace)
-
-    monkeypatch.setattr(
-        transcribe,
-        "get_transcriber",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("전사기 공장이 불렸다 — 유료 호출이 열렸다")
-        ),
-    )
-    monkeypatch.setattr(
-        transcribe,
-        "create_vision_client",
-        lambda **kwargs: (_ for _ in ()).throw(AssertionError("비전 공장이 불렸다")),
-    )
-
-    assert (
-        cli.main(
-            [
-                "project",
-                "analyze",
-                str(workspace),
-                "--online",
-                "--authorization",
-                str(authorization),
-            ]
-        )
-        == 2
-    )
-    assert not (workspace / "analysis-attempts.jsonl").is_file()
-    assert not (workspace / "candidates.jsonl").is_file()
-    assert "비전 키" in capsys.readouterr().err
-
-
-def test_missing_stt_role_closes_the_paid_path_the_same_way(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """V2 운반에서 STT 부재도 같은 문에서 닫힌다 — 역할 사이에 우선순위가 없다."""
-    from vlogsrt import transcribe
-
-    workspace = _staged_workspace(tmp_path)
-    _wire_stream_count(monkeypatch, {"clip.mov": 1})
-    (workspace / "media-grant.json").write_text(_grant_document([str(tmp_path)]), encoding="utf-8")
-    # 위와 같은 이유로 역할 적용이 inspect보다 앞선다(S2B-2b) — STT 부재도
-    # 소비 문에서 같은 모양으로 닫혀야 한다.
-    _apply_v2_roles(stt="", vision="synthetic-vision-key")
-    assert cli.main(["project", "inspect", str(workspace)]) == 0
-    authorization = _stage_authorization(tmp_path, workspace)
-
-    monkeypatch.setattr(
-        transcribe,
-        "get_transcriber",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("전사기 공장이 불렸다")),
-    )
-
-    assert (
-        cli.main(
-            [
-                "project",
-                "analyze",
-                str(workspace),
-                "--online",
-                "--authorization",
-                str(authorization),
-            ]
-        )
-        == 2
-    )
-    assert not (workspace / "analysis-attempts.jsonl").is_file()
-    assert "키" in capsys.readouterr().err
-
-
-def test_resumed_authorized_analyze_rechecks_paid_roles(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """재개(authorized 상태)도 같은 문을 다시 지난다 — 지난 성공이 면제가 아니다."""
-    from vlogsrt import transcribe
-    from vlogsrt.project.workflow_protocol import WorkflowJournal
-
-    workspace = _staged_workspace(tmp_path)
-    _wire_stream_count(monkeypatch, {"clip.mov": 1})
-    (workspace / "media-grant.json").write_text(_grant_document([str(tmp_path)]), encoding="utf-8")
-    assert cli.main(["project", "inspect", str(workspace)]) == 0
-    authorization = _stage_authorization(tmp_path, workspace)
-    journal = WorkflowJournal.open(workspace / "workflow.jsonl")
-    journal.transition(journal.revision.revision, "authorized")
-
-    _apply_v2_roles(stt="synthetic-stt-key", vision="")
-    monkeypatch.setattr(
-        transcribe,
-        "get_transcriber",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("전사기 공장이 불렸다")),
-    )
-
-    assert (
-        cli.main(
-            [
-                "project",
-                "analyze",
-                str(workspace),
-                "--online",
-                "--authorization",
-                str(authorization),
-            ]
-        )
-        == 2
-    )
-    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "authorized"
-
-
-def test_staged_credential_selection_separates_v2_from_the_legacy_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """게이트와 공장이 같이 쓰는 선택 문(`_staged_vision_credentials`).
-
-    마커 없는 직접 경로는 기본선(c96e0d5)의 공유 키·base URL 계약 그대로,
-    V2 앱 운반은 별도 역할 값(비전 키·엔드포인트)을 돌려준다 — 실제 소비자
-    주장은 test_workflow_cancellation의 실제 파이프라인 시험이 든다.
-    """
-    from vlogsrt import env
-    from vlogsrt.project import commands as project_commands
-    from vlogsrt.project.config import ProjectConfig
-
-    monkeypatch.setenv("OPENAI_API_KEY", "legacy-shared-key")
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://legacy.example/v1")
-    assert project_commands._staged_vision_credentials(ProjectConfig()) == (
-        "legacy-shared-key",
-        "https://legacy.example/v1",
-    )
-    assert not env.role_credentials_applied()
-
-    _apply_v2_roles()
-    assert project_commands._staged_vision_credentials(ProjectConfig()) == (
-        "synthetic-vision-key",
-        "https://example.invalid/v1",
-    )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -689,7 +438,8 @@ def test_staged_grant_reader_accepts_snake_case_and_legacy_camel_case(
     assert project_commands._staged_app_grant_revision(workspace) == revision
 
     # Swift JSONEncoder가 실제로 내는 모양(sortedKeys·슬래시 무이스케이프).
-    swift_written = '{"grant_revision":"' + revision + '","roots":["' + str(tmp_path) + '"]}\n'
+    root_text = json.dumps(str(tmp_path))[1:-1]  # Windows 역슬래시는 JSON에서 이스케이프된다
+    swift_written = '{"grant_revision":"' + revision + '","roots":["' + root_text + '"]}\n'
     (workspace / "media-grant.json").write_text(swift_written, encoding="utf-8")
     assert project_commands._staged_app_grant_revision(workspace) == revision
 
@@ -816,46 +566,6 @@ def test_staged_grant_rejects_malformed_roots_and_mismatched_fingerprints(
     assert not (workspace / "analysis-estimate.jsonl").is_file()
 
 
-def test_explicit_online_overrides_offline_flag_for_paid_roles(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """명시적 --online은 VLOGSRT_OFFLINE=1을 이긴다(기존 계약) — 역할 게이트도
-    진짜 판독기(force)로 지나는지 증명한다. 합성 키만 쓰고 SDK 호출은 0회다."""
-    from vlogsrt import transcribe
-
-    workspace = _staged_workspace(tmp_path)
-    _wire_stream_count(monkeypatch, {"clip.mov": 1})
-    assert cli.main(["project", "inspect", str(workspace)]) == 0
-    authorization = _stage_authorization(tmp_path, workspace)
-
-    monkeypatch.setenv("VLOGSRT_OFFLINE", "1")
-    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-stt-key")
-    monkeypatch.setenv("GOOGLE_API_KEY", "synthetic-vision-key")
-    monkeypatch.setenv("GEMINI_BASE_URL", "https://example.invalid")
-    # 진짜 require_api_key가 force로 읽는다: 오프라인 깃발이 있어도 게이트를
-    # 지나 전사기 공장에 닿는다 — 공장에서 계약 위반으로 잡는다(호출 0회).
-    monkeypatch.setattr(
-        transcribe,
-        "get_transcriber",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("공장 도달")),
-    )
-
-    exit_code = cli.main(
-        [
-            "project",
-            "analyze",
-            str(workspace),
-            "--online",
-            "--authorization",
-            str(authorization),
-        ]
-    )
-    captured = capsys.readouterr().err
-    assert exit_code == 2
-    assert "공장 도달" in captured  # 게이트를 지나 공장에 닿았다 — 역할은 유효했다
-    assert "비전 키" not in captured and "OPENAI_API_KEY" not in captured
-
-
 def test_roughcut_destination_writability_is_proven_before_rendering(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -864,11 +574,13 @@ def test_roughcut_destination_writability_is_proven_before_rendering(
     workspace = _staged_workspace(tmp_path)
     _wire_stream_count(monkeypatch, {"clip.mov": 1})
     assert cli.main(["project", "inspect", str(workspace)]) == 0
-    empty_candidates = tmp_path / "candidates.jsonl"
-    empty_candidates.write_text("", encoding="utf-8")
-    assert (
-        cli.main(["project", "analyze", str(workspace), "--candidates", str(empty_candidates)]) == 0
-    )
+    # 분석 문(`project analyze`)은 D163으로 지웠다 — 빈 후보로 review_required까지 저널을 민다.
+    from vlogsrt.project.workflow_protocol import WorkflowJournal
+
+    (workspace / "candidates.jsonl").write_text("", encoding="utf-8")
+    journal = WorkflowJournal.open(workspace / "workflow.jsonl")
+    for state in ("authorized", "analyzing", "review_required"):
+        journal.transition(journal.revision.revision, state)
     assert cli.main(["project", "review", str(workspace)]) == 0
 
     readonly = tmp_path / "rough.fcpxml"
@@ -891,7 +603,10 @@ def test_grant_roots_keep_their_exact_characters(
     커버리지를 계산한다(공백 정리가 정당한 경로를 부수는 회귀를 잡는다)."""
     from vlogsrt.project import commands as project_commands
 
-    trailing = tmp_path / "media root trailing "
+    # Windows는 이름 끝의 보통 공백을 지운다 — 줄바꿈 없는 공백(U+00A0)은 지키고 `strip`도 지운다.
+    trailing = tmp_path / (
+        "media root trailing " if os.name == "posix" else "media root trailing\u00a0"
+    )
     trailing.mkdir()
     unicode_root = tmp_path / "미디어 루트 한글"
     unicode_root.mkdir()

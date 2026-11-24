@@ -1,12 +1,13 @@
 """D59 19f — 작업대의 「말소리 빈칸 재전사」 칸: 모델 값 · 승인 대조(보이는 견적) · 패널 그리기.
 
-유료 호출은 없다 — 승인이 접수되면 가짜 전송이 받는다(환경 문은 시험 안에서만 가짜로 연다).
-포트는 7993(시험용)만 쓴다. 시험이 못 박는 것:
+유료 호출은 없다 — 승인이 접수되면 Gemini 시간 엔진 가짜가 받는다(환경 문은 시험 안에서만 가짜로
+연다). 손으로 심은 원본 자막은 Gemini 원본으로 고정한다(whisper로 들은 원본은 빈칸을 묻지 않는다,
+D163). 포트는 7993(시험용)만 쓴다. 시험이 못 박는 것:
 
 - 모델의 `refill`은 상태·빈칸·순서 경고·견적 문구·digest를 싣고, 금액·모델 이름은 견적 문구 안에만
   있다(D57). 화면 말에 「VAD」가 없다.
-- 승인은 수명 토큰 문을 지나고, 보이는 견적 문구와 digest가 지금 견적과 같을 때만 작업을 건다 —
-  다른 탭·바뀐 용어집이면 「새 견적을 확인하세요」와 0송신이다. 키가 없으면 시작하지 않는다.
+- 승인은 수명 토큰 문을 지나고, 보이는 범위 digest가 지금 범위와 같을 때만 작업을 건다 —
+  다른 탭·바뀐 자막이면 「새 견적을 확인하세요」와 0송신이다. 키가 없으면 시작하지 않는다.
 - 접수되면 작업이 빈칸을 넣고 원본 자막은 고친 자막이 된다(다시 듣기 칸이 그것을 말한다).
 - 클라이언트는 그려진 견적 문구를 그대로 보내고, 빈칸 단추는 재생 머리를 옮길 뿐이다.
 """
@@ -30,7 +31,7 @@ pytest.importorskip(
 )
 
 from tests._sync_fakes import energy_factory, numpy_or_fake  # noqa: E402
-from tests.raw.test_speech_refill import RefillSender, transport  # noqa: E402
+from tests.raw.test_speech_refill import RefillSender, pin_gemini, transport  # noqa: E402
 from tests.raw.test_speech_refill_edges import Blocking  # noqa: E402
 from tests.raw.test_visual_workbench_ui import (  # noqa: E402
     _NODE_HARNESS,
@@ -38,8 +39,8 @@ from tests.raw.test_visual_workbench_ui import (  # noqa: E402
     _prepare_review,
 )
 from ui import ui_facade, workspace_service  # noqa: E402
-from vlogsrt.project.raw import glossary, source_transcript, sync_report  # noqa: E402
 from vlogsrt.project.raw import service as raw  # noqa: E402
+from vlogsrt.project.raw import source_transcript, sync_report  # noqa: E402
 
 pytestmark = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
@@ -84,6 +85,7 @@ def bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Path, s
     source_transcript.seed(
         server.raw._workspace(root), asset.asset_id, rows, Fraction(4), asset.content_sha256
     )
+    pin_gemini(server.raw, root, asset.asset_id)  # 빈칸은 Gemini 원본만 묻는다(D163)
     assert server.raw.start_sync_checks(root, (asset.asset_id,)) is not None
     assert wait_kind(server, root, raw.SYNC_CHECK_JOB_KIND).status == "succeeded"
     return server, root, asset.asset_id
@@ -173,12 +175,17 @@ def test_approval_needs_the_token_and_the_current_scope(
     assert _approve(server, root, payload, token=False)["ok"] is False  # 토큰 없음
     stale = _approve(server, root, {**payload, "digest": "0" * 64})
     assert stale["ok"] is True and stale["message"] == workspace_service.REFILL_CHANGED_TEXT
-    glossary.save(server.raw._workspace(root), "왕방")  # 다른 탭이 용어집을 바꿨다
+    doc = server.raw.source_transcript(root, source_id)  # 다른 탭이 자막을 고쳤다
+    server.raw.edit_source_transcript(
+        root, source_id, doc["revision"], action="edit",
+        utterance_id=doc["utterances"][0]["utterance_id"], text="다른 탭이 고침",
+    )  # fmt: skip
+    assert wait_kind(server, root, raw.SYNC_CHECK_JOB_KIND).status == "succeeded"
     moved = _approve(server, root, payload)
     assert moved["message"] == workspace_service.REFILL_CHANGED_TEXT
     assert _model_of(moved["html"])["sources"][source_id]["refill"]["digest"] != view["digest"]
     assert server.raw.latest_job(root, raw.REFILL_JOB_KIND) is None
-    assert sender.whisper == [] and sender.text == []  # 0송신
+    assert sender.calls == []  # 0송신
 
 
 def test_without_a_key_nothing_starts(bench: tuple[Any, Path, str]) -> None:
@@ -207,7 +214,7 @@ def test_an_approved_refill_inserts_rows_and_makes_the_transcript_edited(
     assert reply["ok"] is True and reply["message"] == workspace_service.REFILL_STARTED_TEXT
     record = wait_kind(server, root, raw.REFILL_JOB_KIND)
     assert record.status == "succeeded", record.error
-    assert len(sender.whisper) == 1 and len(sender.text) == 1
+    assert len(sender.calls) == 1  # 시간 엔진(Gemini) 요청 하나 — 다른 귀는 없다
     after = server.raw.source_transcript(root, source_id)
     assert after["edited"] is True and len(after["utterances"]) == len(before["utterances"]) + 1
     assert after["utterances"][:3] == before["utterances"]  # 기존 줄 그대로
@@ -256,10 +263,10 @@ def test_skipped_rows_are_shown_with_their_text_and_the_note_only_when_any(
     """겹쳐 넣지 않은 줄은 칸에 글자·시각째 보인다 — 그 조각은 다시 묻지 않는다(검증 지적 6)."""
     server, root, source_id = bench
     monkeypatch.setattr("vlogsrt.env.is_offline", lambda: False)
-    server.raw.set_cross_check(root, False)
+    # 문장 끝 부호 뒤에서 줄이 끊긴다 — 엔진 단어 시각 그대로라 두 줄이 겹친다(D92).
     sender = RefillSender(
         [
-            {"start": 0.5, "end": 1.0, "text": "앞 말"},
+            {"start": 0.5, "end": 1.0, "text": "앞 말."},
             {"start": 0.8, "end": 1.1, "text": "<겹친> 말"},
         ]
     )
@@ -318,9 +325,7 @@ def _run_refill_harness(tmp_path: Path) -> dict[str, Any]:
     )
     payload = tmp_path / "payload.json"
     payload.write_text(
-        json.dumps(
-            {"visual": ui_facade.VISUAL_BOOTSTRAP_JS, "caption": ui_facade.CAPTION_BOOTSTRAP_JS}
-        ),
+        json.dumps({"visual": ui_facade.VISUAL_BOOTSTRAP_JS}),
         encoding="utf-8",
     )
     completed = subprocess.run(
@@ -375,7 +380,6 @@ def test_new_wording_is_polite_and_names_no_model_or_price() -> None:
         workspace_service.REFILL_DONE_TEXT,
         workspace_service.REFILL_NOTE_FAILED,
         workspace_service.REFILL_NOTE_RED,
-        workspace_service.REFILL_NOTE_UNCHECKED,
         workspace_service.REFILL_NOTE_UNRECORDED,
         workspace_service.REFILL_SKIPPED_NOTE.format(count=2),
         workspace_service.RELISTEN_REFILL_RUNNING_TEXT,

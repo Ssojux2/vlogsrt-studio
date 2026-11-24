@@ -25,7 +25,7 @@ import hashlib
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from urllib.parse import unquote, urlparse
 
 from vlogsrt.project.models import AssetResource, ProjectDocument, UnsupportedProject
@@ -155,7 +155,7 @@ def _map_path(entry: dict, key: str, position: int, where: str, base: Path) -> P
             " — 비지 않은 경로 문자열이어야 한다"
         )
     scheme = urlparse(value).scheme
-    if scheme:
+    if scheme and not _is_windows_drive(value):
         # 스킴이 파싱되면 URI다 — file:·http:·data: 그 무엇이든 경로가 아니다.
         raise ValueError(
             f"{where}: 미디어 맵 항목 {position}의 {key}가 URI다: {value!r}"
@@ -318,11 +318,35 @@ def _file_uri_to_path(src: str, where: str) -> Path:
         ) from error
     if not decoded:
         raise UnsupportedProject(where, f"file URI에 경로가 없다: {src}")
-    path = Path(decoded)
+    path = Path(_drive_path(decoded))
     if not path.is_absolute():
         # XML의 자리는 문서 자신뿐이다 — 상대 경로를 cwd로 풀면 문서 밖 상태가 새어 든다.
         raise UnsupportedProject(where, f"file URI가 상대 경로다: {src} — 절대 경로여야 한다")
     return path
+
+
+def _is_windows_drive(value: str) -> bool:
+    """Windows의 `C:\\…`·`C:/…` — `urlparse`는 드라이브 글자를 한 글자 스킴(`c`)으로 읽는다(W-84a).
+
+    POSIX에서는 언제나 거짓이다 — 거기서 `c:…`는 경로가 아니라 URI 꼴이다.
+    """
+    letter, colon, rest = value[:1], value[1:2], value[2:3]
+    drive = letter.isascii() and letter.isalpha() and colon == ":" and rest in ("\\", "/")
+    return drive and isinstance(Path(), PureWindowsPath)
+
+
+def _drive_path(decoded: str) -> str:
+    """URI 경로 칸 → 이 운영체제의 경로 표기. POSIX는 그대로다.
+
+    Windows에서 `Path("/C:/a")`는 드라이브 없는 루트 상대(`\\C:\\a`)라 절대 경로가 아니다 —
+    `as_uri()`가 지은 `file:///C:/…`가 모두 「상대 경로」로 거부됐다(W-84a). 이 모듈은 표준
+    라이브러리 중 정한 것만 쓰므로 운영체제는 `Path`의 형으로 가린다.
+    """
+    letter, colon, rest = decoded[1:2], decoded[2:3], decoded[3:4]
+    drive = decoded[:1] == "/" and letter.isascii() and letter.isalpha() and colon == ":"
+    if drive and rest in ("", "/") and isinstance(Path(), PureWindowsPath):
+        return decoded[1:]
+    return decoded
 
 
 def _asset_content_id(original_sha256: str) -> str:

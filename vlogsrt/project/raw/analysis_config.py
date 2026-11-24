@@ -339,6 +339,9 @@ class ReviewMediaSettings:
         "h264_videotoolbox", "h264_nvenc", "h264_qsv", "h264_amf", "libx264",
     )  # fmt: skip
     preview_hardware_bits_per_pixel: Fraction = Fraction(1, 10)
+    preview_hardware_decode: bool = True
+    """macOS면 원본을 VideoToolbox로 디코드한다(P-3, D157) — 실패한 꼴은 그 실행 동안
+    소프트웨어로."""
     preview_timeout_floor_seconds: float = 1800.0
     preview_timeout_media_ratio: float = 6.0
     process_niceness: int = 10
@@ -846,6 +849,11 @@ class RawProviderConcurrency:
     anthropic: int = 1
     openai: int = 1
     slot_poll_seconds: float = 0.5
+    asr_chunks: int = 4
+    """1단계 전사 청크를 시간 엔진에 함께 보내는 수(P-5, D159) — 사용자가 고른 4(2026-11-16).
+    창과 같은 꼴이다: 1을 넘으면 **프로세스 전체** 상한이고(영상 셋이 함께 돌아도 이만큼), 1은
+    예전 그대로 직렬이다. 보내는 청크 · 요청 신원 · 예약 수 · 비용은 이 값과 무관하고 결과는
+    청크 차례다."""
 
     def limit(self, provider: str) -> int:
         value = getattr(self, provider, None)
@@ -860,7 +868,7 @@ PROVIDER_CONCURRENCY = RawProviderConcurrency()
 
 def validate_provider_concurrency(settings: RawProviderConcurrency) -> None:
     """값역 검사 — 개수는 1 이상 정수(bool 아님), 살피는 간격은 0보다 크다."""
-    for name in ("google", "anthropic", "openai"):
+    for name in ("google", "anthropic", "openai", "asr_chunks"):
         value = getattr(settings, name)
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ValueError(f"{name} 동시 전송 수는 1 이상 정수여야 한다: {value!r}")

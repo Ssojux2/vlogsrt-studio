@@ -24,18 +24,20 @@ RUNNER = r"""
 const TL = require(process.argv[2]);
 const cases = JSON.parse(require("fs").readFileSync(process.argv[3], "utf8"));
 const settings = JSON.parse(process.argv[4]);
-const SETTINGS_OPS = new Set(["set_clip_start", "set_clip_end", "cue_set_text"]);
+const SETTINGS_OPS = new Set(["set_clip_start", "set_clip_end", "cue_set_text", "cue_set_english"]);
 const NAMES = {
   blade: "blade", ripple_delete: "rippleDelete", delete_clips: "deleteClips",
   set_clip_start: "setClipStart", set_clip_end: "setClipEnd", join_clips: "joinClips",
   cue_set_times: "cueSetTimes", cue_shift: "cueShift", cue_set_text: "cueSetText",
   cue_delete: "cueDelete", cues_delete_inside: "cuesDeleteInside", cue_split: "cueSplit",
-  cue_merge_next: "cueMergeNext", cue_insert: "cueInsert",
+  cue_merge_next: "cueMergeNext", cue_insert: "cueInsert", cue_set_english: "cueSetEnglish",
   source_point: "sourcePoint", source_ms_at: "sourceMsAt", clip_bounds: "clipBounds",
   edited_ticks: "editedTicks",
 };
 function payload(doc) {
-  return { clips: doc.clips, cues: doc.cues, nextCue: doc.nextCue, seeded: doc.seeded };
+  const out = { clips: doc.clips, cues: doc.cues, nextCue: doc.nextCue, seeded: doc.seeded };
+  if (doc.english) { out.english = doc.english; }
+  return out;
 }
 function value(doc, c) {
   if (c.op === "layout") {
@@ -346,6 +348,7 @@ function one(a) {
   try {
     if (a[0] === "at") { return { cue: TL.cueAt(doc, a[1]) }; }
     if (a[0] === "split-text") { return { parts: TL.splitText(a[1]) }; }
+    if (a[0] === "split-at") { return { parts: TL.splitAt(a[1], a[2]) }; }
     const out = TL.cueEdit(doc, a[0], a[1], a[2], settings, a[3]);
     return { cues: out.doc ? out.doc.cues : null, nextCue: out.doc ? out.doc.nextCue : null,
       cue: out.cue };
@@ -409,6 +412,34 @@ def test_split_divides_the_text_at_the_space_nearest_the_middle(tmp_path: Path) 
     assert got[0]["nextCue"] == 6 and got[0]["cue"] == "c1"
     assert got[1] == {"error": True}  # 67 ms는 자막 앞이다
     assert got[2] == {"parts": ["하나", "둘"]}
+
+
+@needs_node
+def test_split_at_the_caret_cuts_the_text_there_and_the_time_at_the_playhead(
+    tmp_path: Path,
+) -> None:
+    """⌘⌥V(Subtitle Edit 「커서 위치에서 줄 나누기」) — 글은 커서(UTF-16 위치)에서, 시각은 언제나
+    플레이헤드에서 나눈다(글 길이로 시각을 나누지 않는다 — 규칙 1). 자른 자리의 공백만 떨군다."""
+    got = _cue_edit(
+        tmp_path,
+        [
+            ["split", "c1", 9, 1],
+            ["split", "c1", 9, 3],
+            ["split", "c1", 9, 99],
+            ["split", "c1", 2, 1],
+            ["split-at", "😀 하나", 2],
+            ["split-at", "하나 둘", -4],
+        ],
+    )
+    assert _times(got[0], "c1") == [100, 300, "하"]
+    assert _times(got[0], "n5") == [300, 600, "나 둘"]
+    assert _times(got[1], "c1") == [100, 300, "하나"]
+    assert _times(got[1], "n5") == [300, 600, "둘"]
+    assert _times(got[2], "c1") == [100, 300, "하나 둘"]
+    assert _times(got[2], "n5") == [300, 600, ""]
+    assert got[3] == {"error": True}  # 플레이헤드(67 ms)가 자막 앞이다 — 커서와 무관하다
+    assert got[4] == {"parts": ["😀", "하나"]}  # 이모지 하나는 UTF-16 두 칸이다
+    assert got[5] == {"parts": ["", "하나 둘"]}
 
 
 @needs_node

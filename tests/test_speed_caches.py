@@ -200,13 +200,16 @@ def test_the_memo_misses_whenever_the_file_changes(tmp_path: Path, runner: _Runn
     clip.write_bytes(b"b" * 64)  # 같은 크기로 다시 쓰고 수정 시각을 되돌린다 — 변경 시각이 잡는다
     _touch(clip, 2_000_000_000)
     preprocess.probe_raw_media_memo(clip)
-    assert runner.probes_of(clip) == 3
+    # Windows의 `st_ctime`은 변경이 아니라 만든 시각이다 — 같은 크기로 고쳐 쓰고 수정 시각까지
+    # 되돌린 파일은 Windows에서 알아채지 못한다(알려진 한계, W-84a). 다른 파일(inode)은 잡는다.
+    rewrite = 1 if os.name == "posix" else 0
+    assert runner.probes_of(clip) == 2 + rewrite
     other = _clip(tmp_path, "next.mov", b"c" * 64)  # 같은 크기·시각의 다른 파일(inode)
     _touch(other, 2_000_000_000)
     os.replace(other, clip)
     preprocess.probe_raw_media_memo(clip)
     preprocess.probe_raw_media_memo(clip)
-    assert runner.probes_of(clip) == 4
+    assert runner.probes_of(clip) == 3 + rewrite
 
 
 def test_the_memo_key_carries_the_tool_version_and_the_prober(

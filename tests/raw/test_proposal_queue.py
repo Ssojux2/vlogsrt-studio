@@ -48,9 +48,6 @@ from vlogsrt.project.raw.segment_review import (  # noqa: E402
     unreviewed_auto_exclusions,
 )
 
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
-
 needs_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
 needs_node = pytest.mark.skipif(shutil.which("node") is None, reason="node가 없는 환경")
 HANGUL = re.compile(r"^[가-힣 ]+$")
@@ -561,7 +558,7 @@ def test_bulk_confirm_moves_into_the_queue_with_the_same_handler(
     ]
     assert len(tails) == 1  # 응답은 그대로 활동 칸으로 간다
     # 명령 줄의 숨은 원천이다 — 서랍·아코디언 안이 아니다(보내기 단추는 W-46a에 서랍으로 갔다).
-    assert source.parent is buttons[workspace_service.RENDER_EXPORT_LABEL].parent
+    assert source.parent is buttons[workspace_service.FOLDER_IMPORT_LABEL].parent
     node = source.parent
     while node is not None:
         assert not isinstance(node, (gr.Accordion, gr.Sidebar))
@@ -1080,9 +1077,7 @@ def _run_queue_harness(tmp_path: Path, extra: str = "", case: str = "queue") -> 
     )
     payload = tmp_path / "payload.json"
     payload.write_text(
-        json.dumps(
-            {"visual": ui_facade.VISUAL_BOOTSTRAP_JS, "caption": ui_facade.CAPTION_BOOTSTRAP_JS}
-        ),
+        json.dumps({"visual": ui_facade.VISUAL_BOOTSTRAP_JS}),
         encoding="utf-8",
     )
     completed = subprocess.run(

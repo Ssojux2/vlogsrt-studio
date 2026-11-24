@@ -29,8 +29,6 @@ from vlogsrt.project.raw import (
 from vlogsrt.project.raw.final_edit_config import FINAL_EDIT_SETTINGS
 from vlogsrt.project.raw.timeline_edit import TimelineEditError
 
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
-
 MOMENT = datetime(2026, 11, 13, 5, 0, 0, tzinfo=UTC)
 
 
@@ -189,3 +187,26 @@ def test_the_service_job_is_a_render_export_with_the_timeline_in_its_fingerprint
     assert asked == [
         (raw_service.RENDER_EXPORT_JOB_KIND, "render_export/timeline/20261113T000000Z@4")
     ]
+
+
+def test_a_fixed_output_format_renders_every_clip_at_that_size_and_rate(
+    trip: Folder,  # noqa: F811
+) -> None:
+    """W-97(D172) — 새 타임라인은 고정 출력 포맷(기본 4K · 29.97fps, 시험은 작은 크기)이고, 원본
+    크기·레이트가 섞여도 렌더는 그 크기·레이트 하나다. 방향은 D66 그대로(남긴 길이가 많은 쪽)."""
+    from fractions import Fraction
+
+    from vlogsrt.project.raw.config import OutputFormatSettings
+
+    output = OutputFormatSettings(long_edge=192, short_edge=108)
+    created = _create(trip, MOMENT.replace(minute=30), output=output)
+    sequence = created.document.facts.sequence
+    assert sequence.orientation == "landscape"
+    assert (sequence.width, sequence.height) == (192, 108)
+    assert sequence.frame_duration == Fraction(1001, 30000)
+    result = _render(trip, created.folder, 1, 31)
+    video = _streams(result.video)["video"]
+    assert (video["width"], video["height"]) == (192, 108)
+    assert video["r_frame_rate"] == "30000/1001"
+    assert video["nb_read_frames"] == str(timeline_edit.edited_frames(created.document))
+    assert result.srt.read_bytes() == timeline_edit.srt_text(created.document).encode("utf-8")

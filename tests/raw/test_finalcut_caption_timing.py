@@ -26,6 +26,7 @@ from tests.raw.test_finalcut_timeline import (
     needs_installed_dtd,
     needs_xmllint,
     parsed,
+    posix_render,
     real_like_sources,
     spine_clips,
 )
@@ -36,9 +37,6 @@ from vlogsrt.project.raw import finalcut_timeline as ft
 from vlogsrt.project.raw import service as raw_service
 from vlogsrt.project.raw import sync_report
 from vlogsrt.project.xml_validation import validate_xml
-
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
 
 TITLE = "vlogsrt · 260810_wangbang · 2026-10-09 18:30"
 
@@ -76,7 +74,8 @@ def keywords(clip: ET.Element) -> list[str]:
 @pytest.mark.parametrize("name", sorted(EDGE_DOCUMENTS))
 def test_without_flags_the_documents_are_byte_identical_to_w16(name: str) -> None:
     assert (
-        hashlib.sha256(ft.render(EDGE_DOCUMENTS[name]())).hexdigest() == (W16_DOCUMENT_SHA256[name])
+        hashlib.sha256(posix_render(EDGE_DOCUMENTS[name]())).hexdigest()
+        == W16_DOCUMENT_SHA256[name]
     )
     empty = ft.plan(
         real_like_sources(), title=TITLE, library_bundle=BUNDLE, caption_timing=frozenset()

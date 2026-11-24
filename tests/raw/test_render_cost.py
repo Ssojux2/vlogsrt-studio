@@ -52,15 +52,11 @@ from tests.raw.test_review_workspace import _wait_terminal  # noqa: E402
 from tests.raw.test_visual_workbench_ui import _model_of  # noqa: E402
 from ui import workspace_service  # noqa: E402
 from ui.workspace_service import RawWorkspaceUi  # noqa: E402
-from vlogsrt.project.raw import read_scope, timing_engine  # noqa: E402
+from vlogsrt.project.raw import read_scope  # noqa: E402
 from vlogsrt.project.raw import service as raw_service  # noqa: E402
 from vlogsrt.project.raw.analysis_store import AnalysisStore  # noqa: E402
-from vlogsrt.project.raw.config import TIMING_ENGINE_WHISPER  # noqa: E402
 from vlogsrt.project.raw.review_workspace import ReviewWorkspaceFacade  # noqa: E402
 from vlogsrt.project.raw.workspace import DB_NAME, RawWorkspace  # noqa: E402
-
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
 
 GOLDEN = Path(__file__).resolve().parents[1] / "fixtures/synthetic/workbench_render_18_sources.html"
 
@@ -126,13 +122,9 @@ DB 열기·파사드·검토 머리는 그 작업의 몫이 섞여 천장에 넣
 def built(tmp_path_factory: pytest.TempPathFactory) -> Path:
     if not shutil.which("ffmpeg"):
         pytest.skip("ffmpeg required")
-    # 모듈 범위라 시험마다 거는 whisper 전제(D104)보다 먼저 돈다 — 여기서도 같은 전제를 건다.
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(timing_engine, "DEFAULT_NEW_HEARING_ENGINE", TIMING_ENGINE_WHISPER)
-        patch.setattr(raw_service, "DEFAULT_NEW_HEARING_ENGINE", TIMING_ENGINE_WHISPER)
-        root = fixture.build_workspace(tmp_path_factory.mktemp("render_cost"))
-        service = raw_service.RawWorkspaceService()
-        fixture.settle(service, root)
+    root = fixture.build_workspace(tmp_path_factory.mktemp("render_cost"))
+    service = raw_service.RawWorkspaceService()
+    fixture.settle(service, root)
     _checkpoint(root)
     return root
 
@@ -427,9 +419,7 @@ def test_the_status_tick_counts_usage_once(
     assert summary is not None
     server._quick = {"root": root, "token": "usage", "revision": summary.revision.revision_id}
     counts = _counted(monkeypatch)
-    calls = _during(
-        counts, lambda: server.status_tick(signature, None, None, None, None, *(None,) * 3)
-    )
+    calls = _during(counts, lambda: server.status_tick(signature, None, *(None,) * 3))
     assert calls["analysis_usage_summary"] == 1, dict(calls)
     assert server.raw.analysis_usage_line(root, summary.revision.revision_id) == ""  # 유료 0
 
@@ -579,7 +569,7 @@ def test_reprepare_fills_the_selected_video_beyond_the_first_page(
 
 # ── UI 모델 나누기(W-71, D122) — 상세 칸은 고른 영상만 ─────────────────────────────
 
-DETAIL_KEYS = ("crossSourceCandidates", "syncCheck", "relisten", "refill", "snap")
+DETAIL_KEYS = ("crossSourceCandidates", "syncCheck", "relisten", "refill", "hydrogen", "snap")
 """고른 영상에만 싣는 원본 자막 칸 — 「고급 도구」 패널이 그 영상 것만 그린다."""
 SYNC_BADGE_KEYS = {"tone", "level", "label", "stale"}
 """카드 배지(`syncBadge`)가 읽는 자막 시각 확인 칸 — 고르지 않은 영상은 이것만 싣는다."""

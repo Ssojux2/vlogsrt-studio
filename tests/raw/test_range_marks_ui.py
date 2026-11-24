@@ -113,6 +113,12 @@ const typed = key('KeyO', { target: textarea });
 out.typed = { range: rangeOf(), prevented: typed.prevented };
 const modified = key('KeyI', { metaKey: true });
 out.modified = modified.prevented;
+// 제 키를 가진 칸(아래 덱의 타임라인 재생기) 안의 키는 위 재생기에 닿지 않는다(W-85, D145).
+const owned = { closest(sel) { return sel.includes('data-vl-own-keys') ? this : null; } };
+const ownedKey = key('KeyO', { target: owned });
+const ownedPlay = key('KeyL', { target: owned });
+out.owned = { prevented: ownedKey.prevented + ownedPlay.prevented, range: rangeOf(),
+  time: envR.vid.state.currentTime };
 const oKey = key('KeyO');
 out.oKey = { range: rangeOf(), prevented: oKey.prevented };
 replies.push({ ok: true, echoEpoch: 'epoch-1', message: '추천으로 표시했습니다',
@@ -174,9 +180,7 @@ def _run_range_harness(tmp_path: Path) -> dict[str, Any]:
     )
     payload = tmp_path / "payload.json"
     payload.write_text(
-        json.dumps(
-            {"visual": ui_facade.VISUAL_BOOTSTRAP_JS, "caption": ui_facade.CAPTION_BOOTSTRAP_JS}
-        ),
+        json.dumps({"visual": ui_facade.VISUAL_BOOTSTRAP_JS}),
         encoding="utf-8",
     )
     completed = subprocess.run(
@@ -232,6 +236,11 @@ def test_range_keys_respect_inputs_and_modifiers_and_send_exact_fractions(
         "prevented": 0,
     }
     assert report["modified"] == 0
+    assert report["owned"] == {
+        "prevented": 0,
+        "range": {"sourceId": "srcA", "inSec": "0", "outSec": "3"},
+        "time": 2.4,
+    }
     assert report["oKey"]["prevented"] == 1
     assert report["oKey"]["range"] == {"sourceId": "srcA", "inSec": "0", "outSec": "12/5"}
     payload = report["markKey"]["payload"]
@@ -325,7 +334,8 @@ def test_the_main_view_shows_four_areas_and_folds_the_rest_behind_advanced() -> 
     # 1050px 이하(1024 노트북)·860px 이하에도 추천 구간 칸이 자리를 갖는다.
     narrow = css[css.index("@media (max-width: 1050px)") :]
     assert '"thumbs ranges"' in narrow
-    assert '"timeline" "ranges"' in css[css.index("@media (max-width: 860px)") :]
+    # 좁은 화면은 원본 레일 다음이 아래 덱(원본 범위 타임라인, W-85 · D145), 그다음 추천 구간이다.
+    assert '"timeline" "deck" "ranges"' in css[css.index("@media (max-width: 860px)") :]
     # 견적·승인 칸(D44)은 숨기는 규칙 밖이다 — 늘 무대 오른쪽 열 맨 위다.
     assert "#vl-quote { grid-area: quote;" in css
     assert "data-vl-advanced" not in _rules_for(css, "#vl-quote")
@@ -354,7 +364,7 @@ def test_blocks_keep_the_approve_and_export_controls_on_the_main_view(
             node = getattr(node, "parent", None)
         return False
 
-    for elem in ("library-approve", workspace_service.FOLDER_OPEN_ID, "vl-render-export"):
+    for elem in ("library-approve", workspace_service.FOLDER_OPEN_ID, "vl-timeline-send"):
         assert inside(by_elem[elem], bar), elem  # 명령 줄 — 서랍 밖
     for elem in ("vl-quote", workspace_service.RENDER_EXPORT_CARD_ID):
         assert inside(by_elem[elem], stage), elem  # 승인 칸·결과 카드는 무대에 그대로

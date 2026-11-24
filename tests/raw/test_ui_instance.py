@@ -1,4 +1,5 @@
 import os
+import sys
 import tempfile
 from pathlib import Path
 
@@ -20,7 +21,7 @@ def private_tmpdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _lock_dir(private_tmpdir: Path) -> Path:
-    return private_tmpdir / f"vlogsrt-ui-{os.getuid()}"
+    return private_tmpdir / f"vlogsrt-ui-{instance._user_tag()}"
 
 
 def _sibling(private_tmpdir: Path, token: str) -> Path:
@@ -86,6 +87,11 @@ def test_a_replaced_file_is_not_removed_on_exit(tmp_path: Path):
     with UiInstance(tmp_path, 7860) as owner:
         replacement = owner.path.with_name("replacement.tmp")
         replacement.write_text('{"pid": 2, "port": 7999}', encoding="utf-8")
+        if sys.platform == "win32":
+            # Windows는 주인이 연 파일을 바꿔치지 못한다 — 지킬 경쟁이 생기지 않는다(W-84a).
+            with pytest.raises(PermissionError):
+                os.replace(replacement, owner.path)
+            return
         os.replace(replacement, owner.path)
     assert owner.path.read_text(encoding="utf-8") == '{"pid": 2, "port": 7999}'
 
@@ -147,14 +153,18 @@ def test_a_launcher_that_locked_an_unlinked_inode_retries_on_a_fresh_file(
     def stale_then_real(self: UiInstance):
         calls.append(1)
         handle = real_open(self)
-        if len(calls) == 1:
+        if len(calls) == 1 and sys.platform == "win32":
+            # Windows는 열린 파일을 지우지 못한다 — 지워진 inode를 쥐는 경쟁이 없다(W-84a).
+            with pytest.raises(PermissionError):
+                self.path.unlink()
+        elif len(calls) == 1:
             self.path.unlink()  # 끝나던 주인(또는 청소)이 그 사이 지웠다
         return handle
 
     monkeypatch.setattr(UiInstance, "_open", stale_then_real)
     with launcher as owner:
         assert owner.owned
-        assert len(calls) == 2
+        assert len(calls) == (1 if sys.platform == "win32" else 2)
         assert owner.path.exists()
         assert instance.same_file(owner.handle.fileno(), owner.path)
         with UiInstance(tmp_path, 7899) as duplicate:
@@ -197,8 +207,10 @@ def test_launcher_settings_are_validated(settings: dict[str, object]):
 
 
 def test_posix_user_tag_is_the_uid(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(instance.sys, "platform", "darwin")
+    monkeypatch.setattr(instance.os, "getuid", lambda: 501, raising=False)  # Windows에는 없다
     monkeypatch.setattr(instance.getpass, "getuser", lambda: pytest.fail("POSIX는 uid다"))
-    assert instance._user_tag() == str(os.getuid())
+    assert instance._user_tag() == "501"
 
 
 @pytest.mark.parametrize("name", ["alice", "a.b-c_9"])

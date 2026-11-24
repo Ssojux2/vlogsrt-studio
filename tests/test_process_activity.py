@@ -211,11 +211,8 @@ def test_the_untagged_ffmpeg_entry_points_now_carry_a_step_name() -> None:
     names = {
         preprocess.extract_visual_review_preview: "미리보기 만들기",
         preprocess.extract_frame_index: "프레임 추출",
-        preprocess.extract_audio: "오디오 추출",
         preprocess.extract_pcm_s16le: "PCM 추출",
         preprocess.extract_raw_clip: "클립 추출",
-        preprocess.extract_caption_preview: "자막 미리보기 만들기",
-        preprocess.split_at: "조각 나누기",
         preprocess.probe_duration: "길이 확인",
     }
     for function, label in names.items():
@@ -339,7 +336,7 @@ def test_progress_is_off_unless_the_server_turns_it_on() -> None:
     """CLI와 시험은 진행 파일을 켜지 않는다 — 켜는 곳은 브라우저 서버 진입점 하나다."""
     root = Path(__file__).resolve().parent.parent
     callers = sorted(
-        str(path.relative_to(root))
+        path.relative_to(root).as_posix()
         for folder in ("vlogsrt", "ui", "scripts")
         for path in (root / folder).rglob("*.py")
         if "enable_process_progress(" in path.read_text(encoding="utf-8")
@@ -392,9 +389,12 @@ def _sine_to_null(progress_seen: list[str]) -> None:
 @needs_ffmpeg
 def test_a_vanished_progress_folder_is_made_again_and_ffmpeg_still_runs(tmp_path: Path) -> None:
     """며칠 켜 둔 서버에서 `$TMPDIR` 청소가 폴더를 지우면 ffmpeg가 254로 죽었다 — 다시 만든다."""
-    folder = tmp_path / "with:colon" / "progress"
+    # `file:` 진행 URI에 `:`이 든 경로 — Windows는 이름에 `:`을 못 쓰지만
+    # 드라이브(`C:`)가 같은 몫이다.
+    parent = tmp_path / ("with:colon" if sys.platform != "win32" else "plain")
+    folder = parent / "progress"
     preprocess.enable_process_progress(folder)
-    shutil.rmtree(tmp_path / "with:colon")
+    shutil.rmtree(parent)
     seen: list[str] = []
     _sine_to_null(seen)
     assert len(seen) == 1 and seen[0].startswith(f"file:{folder}")

@@ -427,6 +427,7 @@ DOC_OPS = {
     "cue_split": te.cue_split,
     "cue_merge_next": te.cue_merge_next,
     "cue_insert": te.cue_insert,
+    "cue_set_english": te.cue_set_english,
 }
 
 
@@ -510,6 +511,36 @@ def test_add_source_goes_first_or_last_by_shooting_order() -> None:
     assert last.document.seeded == (("c", "r"),)
 
 
+def test_add_source_at_a_dropped_slot_ignores_shooting_order() -> None:
+    """W-111(D185) — 영상 목록에서 끌어 놓은 원본은 촬영 차례와 무관하게 놓은 자리(클립 차례)다.
+    다른 원본끼리의 차례는 검사가 묻지 않는다(같은 원본만 붙어 있으면 된다)."""
+    empty: tuple[str, tuple[rp.SourceCue, ...]] = ("r", ())
+    document = _doc([("b", 0, 24), ("c", 0, 30)])
+    ended = te.add_source(document, "a", empty, at=2)
+    assert _clips(ended.document) == [("b", 0, 24), ("c", 0, 30), ("a", 0, 300)]
+    te.validate(ended.document)
+    middle = te.add_source(document, "a", empty, at=1)
+    assert _clips(middle.document) == [("b", 0, 24), ("a", 0, 300), ("c", 0, 30)]
+    te.validate(middle.document)
+    with pytest.raises(TimelineEditError):
+        te.add_source(document, "b", empty, at=2)
+
+
+def test_a_dropped_slot_must_be_inside_and_never_split_one_source() -> None:
+    """W-111(D185) — 자리는 0…클립 수이고, 같은 원본의 두 클립 사이에는 넣지 않는다(D125)."""
+    empty: tuple[str, tuple[rp.SourceCue, ...]] = ("r", ())
+    document = _doc([("b", 0, 10), ("b", 12, 24), ("c", 0, 30)])
+    with pytest.raises(TimelineEditError, match="클립 사이"):
+        te.add_source(document, "a", empty, at=1)
+    for outside in (-1, 4):
+        with pytest.raises(TimelineEditError, match="밖"):
+            te.add_source(document, "a", empty, at=outside)
+    first = te.add_source(document, "a", empty, at=0)
+    assert _clips(first.document)[0] == ("a", 0, 300)
+    between = te.add_source(document, "a", empty, at=2)
+    assert [clip[0] for clip in _clips(between.document)] == ["b", "b", "a", "c"]
+
+
 def test_add_source_refuses_an_unknown_source_or_one_that_has_a_clip() -> None:
     document = _doc([("a", 0, 30)])
     with pytest.raises(TimelineEditError):
@@ -549,3 +580,21 @@ def test_add_source_refuses_past_the_cue_cap() -> None:
     )
     with pytest.raises(TimelineEditError, match="1개를 넘는다"):
         te.add_source(document, "b", ("rb", (_cue("u1", 0, 1, "둘"),)), tight)
+
+
+# ─── 사람이 고친 영어(D166) ─────────────────────────────────────────────────
+
+
+def test_edited_english_round_trips_and_an_unedited_document_keeps_its_old_shape() -> None:
+    cases = json.loads(CASES.read_text(encoding="utf-8"))
+    base = next(c for c in cases if c["name"] == "cue set text")
+    facts = case_facts(base["facts"])
+    plain = te.from_payload(base["doc"], facts)
+    assert "english" not in te.to_payload(plain)  # 저장 바이트가 예전 그대로다
+    edited = te.cue_set_english(plain, "c3", "two")
+    again = te.from_payload(te.to_payload(edited), facts)
+    assert again.english == (("c3", "둘", "two"),)
+    assert te.edited_english(again, again.cues[2]) == ("two", False)
+    stale = te.cue_set_text(again, "c3", "셋")
+    assert te.edited_english(stale, stale.cues[2]) == ("two", True)
+    assert te.srt_text(edited) == te.srt_text(plain)  # 한국어 SRT·시각은 그대로다

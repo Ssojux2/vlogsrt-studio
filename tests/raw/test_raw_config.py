@@ -32,7 +32,7 @@ def test_defaults_match_the_2026_10_02_plan() -> None:
     assert config.models.text_model == "gpt-transcribe"
     assert config.models.timing_model == "whisper-1"
     # W-18(D58): 새 작업공간의 의미 분석 기본은 Claude Sonnet 5.5다 — 나머지는 2026-10-02 그대로
-    assert config.models.luna_model == "gemini-3.8-flash"  # D87(그 전 D58은 Sonnet 5.5)
+    assert config.models.luna_model == "gemini-4-hydrogen"  # D168(그 전 D87 Flash · D58 Sonnet 5.5)
     assert config.registry.revision == "openai-caption-2026-10-02-v1"
     assert config.registry.docs_checked_at == date(2026, 10, 2)
     assert config.registry.account_access_status == "unverified"
@@ -549,8 +549,9 @@ def test_provider_resolution_and_choices() -> None:
         claude_profile,
     )
 
-    # W-30d(D87): 기본(Gemini 3.8 Flash)이 맨 앞, Argon·Sonnet·Opus·gpt-6-luna도 그대로 고른다
+    # D168: 기본(Gemini 4 Hydrogen)이 맨 앞, Flash·Argon·Sonnet·Opus·gpt-6-luna도 그대로 고른다
     assert ANALYSIS_MODEL_CHOICES == (
+        "gemini-4-hydrogen",
         "gemini-3.8-flash",
         "gemini-4-argon",
         "claude-sonnet-5-5",
@@ -596,7 +597,7 @@ def test_the_default_workflow_json_is_byte_identical_with_no_new_keys() -> None:
     payload = raw_workflow_config_to_json(RawWorkflowConfig())
     luna_line = '"luna_model": "gpt-6-luna"'
     assert ACCEPTED_SETTINGS_JSON.count(luna_line) == 1
-    assert payload == ACCEPTED_SETTINGS_JSON.replace(luna_line, '"luna_model": "gemini-3.8-flash"')
+    assert payload == ACCEPTED_SETTINGS_JSON.replace(luna_line, '"luna_model": "gemini-4-hydrogen"')
     assert "anthropic" not in payload.lower()
 
 
@@ -615,3 +616,23 @@ def test_transcription_identity_view_pins_the_analysis_model() -> None:
     assert transcription_identity_view(_claude_config()) == pinned
     online = replace(_claude_config(), network_mode="online")
     assert transcription_identity_view(online) == replace(pinned, network_mode="online")
+
+
+def test_output_format_is_4k_at_2997_in_the_shot_orientation() -> None:
+    """W-97(D172, 사용자 결정 2026-11-19 「4k · 29.97 · 세로는 세로로 가로는 가로로」)."""
+    from fractions import Fraction
+
+    from vlogsrt.project.raw.config import OUTPUT_FORMAT, OutputFormatSettings
+
+    assert OUTPUT_FORMAT.size("landscape") == (3840, 2160)
+    assert OUTPUT_FORMAT.size("portrait") == (2160, 3840)
+    assert OUTPUT_FORMAT.frame_duration == Fraction(1001, 30000)
+    for bad in (
+        {"long_edge": 2160, "short_edge": 3840},
+        {"long_edge": 3841},
+        {"frame_duration": Fraction(1, 7)},
+    ):
+        with pytest.raises(ValueError):
+            OutputFormatSettings(**bad)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        OUTPUT_FORMAT.size("square")

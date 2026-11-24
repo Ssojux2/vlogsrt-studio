@@ -2,13 +2,16 @@
 
 옛 배선은 1초 타이머 일곱(승인 단추 · 견적 문구 · 상태 줄 · 전문 칸 + 실사용 · 승인 범위 칸 ·
 교차 확인 칸 · 용어집)과 2초 둘(작업대 다시 그리기 · 보내기 알림)이었다 — 탭 하나가 초마다 서버를
-여덟 번 불렀다. 이제 1초는 `status_tick` 하나이고 2초 둘은 그대로다. 견적 문구·전문 칸은 견적과
-함께 지웠다(D110) — 틱은 처리기 여섯을 부른다. 시험이 못 박는 것:
+여덟 번 불렀다. 그 뒤 1초는 `status_tick` 하나였고, W-83(D143)부터는 처리기 모두가 2초 화면
+틱 하나에 실린다. 견적 문구·전문 칸은 견적과 함께 지웠다(D110), 교차 확인·용어집 칸은 whisper와
+함께 걷었다(D163) — 틱은 처리기 넷을 부른다.
+시험이 못 박는 것:
 
-- 타이머 수(1초 일곱 + 2초 둘 → 1초 하나 + 2초 둘)와 상태 틱의 입출력·주기·방식(대기열 밖·`once`).
+- 타이머 수(1초 일곱 + 2초 둘 → 1초 하나 + 2초 둘 → 2초 하나, W-83·D143)와 화면 틱 하나에 실린
+  처리기·몫의 입출력·방식(대기열·`once`) — 상태 틱의 몫은 옛 의존의 입출력 그대로다.
 - 바뀐 것 없는 틱은 모든 칸을 건너뛴다. 원천 하나가 바뀌면 그 칸만 간다.
 - 「마지막으로 보낸 값」은 세션마다(`gr.State`)다 — 두 탭이 서로의 갱신을 막지 않는다.
-- 틱마다 처리기 여섯을 모두 한 번씩 부른다(부수 효과·주기 그대로) — 한 읽기 범위 안에서.
+- 틱마다 처리기 넷을 모두 한 번씩 부른다(부수 효과·주기 그대로) — 한 읽기 범위 안에서.
 - 다른 사건이 칸에 쓰면 그 칸의 기억을 잊어 다음 틱이 다시 보낸다.
 
 포트는 7993(시험용)만 쓴다. 유료 호출은 없다.
@@ -30,12 +33,15 @@ pytest.importorskip(
 
 import gradio as gr  # noqa: E402
 
+from tests.raw.review_tick_parts import review_tick_dep, tick_part  # noqa: E402
 from tests.raw.test_selection_analysis import wait_until  # noqa: E402
 from ui import workspace_service  # noqa: E402
 from ui.workspace_service import (  # noqa: E402
     LIBRARY_APPROVE_LABEL,
+    REVIEW_TICK_SECONDS,
     STATUS_SENT_CELLS,
     RawWorkspaceUi,
+    TickPart,
 )
 from vlogsrt.project.raw import read_scope  # noqa: E402
 from vlogsrt.project.raw import service as raw_service  # noqa: E402
@@ -45,10 +51,9 @@ OLD_ONE_SECOND_TICKS = (
     "capcut_status_view",
     "usage_line_markdown",
     "approval_mode_tick",
-    "cross_check_tick",
-    "glossary_tick",
 )
-SHOWN_CELLS = ("radio", "box", "glossary", "glossary_status", "loaded")
+SHOWN_CELLS = ("radio",)
+"""교차 확인·용어집 칸은 whisper와 함께 걷었다(D163) — 그 탭의 칸 값과 견주는 칸은 범위 하나다."""
 
 
 def _server(tmp_path: Path) -> RawWorkspaceUi:
@@ -62,14 +67,8 @@ def _skipped(update: Any) -> bool:
 
 
 def _shown(ui: RawWorkspaceUi) -> tuple[Any, ...]:
-    """화면을 막 연 탭이 틱에 보내는 칸 값 — 범위 · 교차 확인 · 용어집 글 · 불러온 용어집."""
-    loaded = ui.glossary_loaded_value()
-    return (
-        ui.approval_mode_value(),
-        ui.cross_check_value(),
-        loaded[1] if loaded else "",
-        loaded,
-    )
+    """화면을 막 연 탭이 틱에 보내는 칸 값 — 범위."""
+    return (ui.approval_mode_value(),)
 
 
 def _tick(ui: RawWorkspaceUi, sent: tuple[Any, ...]) -> tuple[dict[str, Any], tuple[Any, ...]]:
@@ -89,61 +88,120 @@ def _fresh() -> tuple[Any, ...]:
     return (None,) * len(STATUS_SENT_CELLS)
 
 
-def test_one_second_timers_merge_into_one_status_tick(tmp_path: Path, local_socket: None) -> None:
+def test_every_tick_handler_rides_one_review_tick(tmp_path: Path, local_socket: None) -> None:
+    """W-83, D143 — 타이머 하나 · 의존 하나. 처리기와 그 몫의 입출력은 예전 의존 그대로다."""
     ui = _server(tmp_path)
     app = ui.build_blocks()
     timers = {b._id: b for b in app.blocks.values() if isinstance(b, gr.Timer)}
-    # 옛 배선: [1, 1, 1, 1, 1, 1, 1, 2, 2] — 탭 하나가 초마다 여덟 번 불렀다.
-    assert sorted(t.value for t in timers.values()) == [1, 2, 2]
+    # 옛 배선: [1, 1, 1, 1, 1, 1, 1, 2, 2](D63 앞) → [1, 2, 2](의존 다섯, D134까지) → [2].
+    assert [t.value for t in timers.values()] == [REVIEW_TICK_SECONDS] == [2]
     deps = app.config["dependencies"]
     ticks = [d for d in deps if d["targets"] and d["targets"][0][1] == "tick"]
-    by_name = {app.fns[d["id"]].fn.__name__: d for d in ticks}
-    # 초안 결과 카드(W-46a)는 작업대의 2초 타이머에 붙는다 — 타이머 수는 그대로다.
-    # 영어 자막 견적 한 줄은 견적과 함께 지웠다(D110).
-    assert sorted(by_name) == [
+    (tick,) = (
+        ticks  # 2초에 디스패치 하나 — 그라디오가 디스패치마다 모든 칸의 진행 상태를 다시 매긴다
+    )
+    assert app.fns[tick["id"]].fn == ui.review_tick
+    assert app.fns[tick["id"]].queue is True  # 보내기 알림(`gr.Info`)은 대기열을 지나야 뜬다
+    assert tick["trigger_mode"] == "once" and tick["show_progress"] == "hidden"
+    names = [part.handler.__name__ for part in ui._tick_parts]
+    # 초안 결과 카드(W-46a)도 같은 틱이다(최종 편집 자동 전환은 D161에 탭과 함께 지웠다).
+    # 알림은 던질 수 있어 맨 앞이다 — 던지면 다른 처리기가 아무것도 쓰지 않는다.
+    assert sorted(names[1:]) == [
         "capcut_tick_view",
-        "finalcut_toast_view",
         "render_export_card_tick",
         "status_tick",
-        "switch_tick",  # 최종 편집 탭의 자동 전환(D117) — 같은 2초 타이머다
     ]
-    assert by_name["render_export_card_tick"]["targets"] == by_name["capcut_tick_view"]["targets"]
-    assert {timers[d["targets"][0][0]].value for n, d in by_name.items() if n != "status_tick"} == {
-        2
-    }
-    status = by_name["status_tick"]
-    assert timers[status["targets"][0][0]].value == 1
-    assert app.fns[status["id"]].queue is False  # 옛 1초 틱(단추 하나 빼고)처럼 대기열 밖
-    assert status["trigger_mode"] == "once" and status["show_progress"] == "hidden"
+    assert names[0] == "finalcut_toast_view"
+    assert len(set(tick["outputs"])) == len(tick["outputs"])  # 한 칸에 두 처리기가 쓰지 않는다
+    status = tick_part(app, ui, ui.status_tick)
     sent = [s._id for s in ui._status_sent]
     assert all(isinstance(app.blocks[i], gr.State) for i in sent)  # 세션마다 따로 사는 기억
-    assert status["inputs"] == [
+    assert status.inputs == [
         ui._signature_state._id,
         ui._approval_mode_radio._id,
-        ui._cross_check_box._id,
-        ui._glossary_box._id,
-        ui._glossary_loaded_state._id,
         *sent,
     ]
-    assert status["outputs"] == [
+    assert status.outputs == [
         ui._approval_mode_radio._id,
-        ui._cross_check_box._id,
-        ui._glossary_box._id,
-        ui._glossary_status_md._id,
-        ui._glossary_loaded_state._id,
         ui._library_approve_button._id,
         ui._capcut_progress_md._id,
         ui._usage_md._id,
         *sent,
     ]
+    assert tick_part(app, ui, ui.finalcut_toast_view).inputs == [ui._signature_state._id]
+    assert tick_part(app, ui, ui.finalcut_toast_view).outputs == []
     wired = {getattr(f.fn, "__name__", "") for f in app.fns.values()}
     assert not wired.intersection(OLD_ONE_SECOND_TICKS)  # 옛 처리기는 틱 안에서만 불린다
+    # 처리기마다 따로 단 의존은 없다 — 카드를 그리던 꼬리는 「내보내기」와 함께 지웠다(D161).
+    assert wired.intersection(names) == set()
+
+
+def test_the_review_tick_hands_each_handler_its_inputs_in_order(
+    tmp_path: Path, local_socket: None
+) -> None:
+    """화면 틱은 처리기마다 제 입력 몫을 넘기고 답을 출력 차례대로 잇는다.
+
+    칸 없는 처리기는 출력 몫이 없고, 칸 수가 맞지 않는 답은 거부한다."""
+    ui = _server(tmp_path)
+    calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    def part(name: str, reply: Any) -> Any:
+        def handler(*values: Any) -> Any:
+            calls.append((name, values))
+            return reply
+
+        return handler
+
+    ui._tick_parts = [
+        TickPart(part("pair", ("a", "b")), (None, None), (None, None)),
+        TickPart(part("one", "c"), (None,), (None,)),
+        TickPart(part("none", None), (None,), ()),
+    ]
+    assert ui.review_tick(1, 2, 3, 4) == ("a", "b", "c")
+    assert calls == [("pair", (1, 2)), ("one", (3,)), ("none", (4,))]
+    ui._tick_parts[0] = TickPart(part("pair", ("a",)), (None, None), (None, None))
+    with pytest.raises(ValueError, match="1칸"):
+        ui.review_tick(1, 2, 3, 4)
+
+
+def _recording(handler: Any, ran: list[str]) -> Any:
+    def wrapped(*values: Any) -> Any:
+        ran.append(handler.__name__)
+        return handler(*values)
+
+    return wrapped
+
+
+def test_a_failed_send_toast_raises_before_any_other_handler_runs(
+    tmp_path: Path, local_socket: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """알림이 오류를 던지면 그 틱의 다른 처리기는 돌지 않는다 — 한 번만 내는 답이 버려지지 않는다.
+
+    칸마다의 기억도 그대로라 다음 틱이 모두 다시 한다. 실패 알림은 결과마다 한 번이다."""
+    ui = _server(tmp_path)
+    app = ui.build_blocks()
+    signature = ui.current_signature()
+    parts, ran = ui._tick_parts, []
+    names = [part.handler.__name__ for part in parts[1:]]
+    for index, part in enumerate(parts[1:], start=1):
+        parts[index] = TickPart(_recording(part.handler, ran), part.inputs, part.outputs)
+    values = [v for part in parts for v in (signature, *(None,) * (len(part.inputs) - 1))]
+    assert len(ui.review_tick(*values)) == len(review_tick_dep(app, ui)["outputs"])
+    assert ran == names
+    ran.clear()
+    monkeypatch.setattr(ui, "_finished_send", lambda _signature: {"error": "보내기 실패"})
+    with pytest.raises(gr.Error):
+        ui.review_tick(*values)
+    assert ran == []
+    monkeypatch.setattr(ui, "_finished_send", lambda _signature: None)  # 알렸다 — 다음 틱
+    ui.review_tick(*values)
+    assert ran == names
 
 
 def test_an_unchanged_tick_skips_every_cell(tmp_path: Path, local_socket: None) -> None:
     ui = _server(tmp_path)
     first, sent = _tick(ui, _fresh())
-    # 막 연 탭: 칸 셋은 칸 값과 같아 건너뛰고, 기억이 없는 셋은 모두 보낸다.
+    # 막 연 탭: 범위 칸은 칸 값과 같아 건너뛰고, 기억이 없는 셋은 모두 보낸다.
     assert all(_skipped(first[name]) for name in SHOWN_CELLS)
     assert not any(_skipped(first[name]) for name in STATUS_SENT_CELLS)
     button = first["button"]
@@ -204,7 +262,7 @@ def test_two_sessions_do_not_suppress_each_other(tmp_path: Path, local_socket: N
     assert all(_skipped(value) for value in cells_a.values())
 
 
-def test_every_tick_calls_all_six_handlers_inside_one_read_scope(
+def test_every_tick_calls_all_four_handlers_inside_one_read_scope(
     tmp_path: Path, local_socket: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ui = _server(tmp_path)
@@ -262,12 +320,9 @@ def test_other_writers_make_the_tick_forget_and_resend(tmp_path: Path, local_soc
         target, event = root_of(dep)["targets"][0]
         roots[(target, event)] = dep["outputs"]
     buttons = {b.value: b for b in app.blocks.values() if isinstance(b, gr.Button)}
-    glossary_save = next(b for b in buttons.values() if b.elem_id == "vl-glossary-save")
     progress = [sent["progress"]]
-    assert roots == {
+    assert roots == {  # 교차 확인 칸·용어집 저장은 whisper와 함께 지웠다(D163)
         (ui._approval_mode_radio._id, "input"): progress,
-        (ui._cross_check_box._id, "input"): progress,
-        (glossary_save._id, "click"): progress,
         (buttons[LIBRARY_APPROVE_LABEL]._id, "click"): progress,
     }
     # 잊으면 다음 틱이 그 칸을 다시 보낸다(값이 같아도 — 다른 사건이 칸을 덮었을 수 있다).

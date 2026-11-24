@@ -24,7 +24,7 @@ pytest.importorskip(
 
 import gradio as gr  # noqa: E402
 
-from ui import design_tokens, ui_facade, workspace_service  # noqa: E402
+from ui import design_tokens, keymap, ui_facade, workspace_service  # noqa: E402
 from ui.workspace_service import (  # noqa: E402
     CONFIRM_ALL_SOURCE_LABEL,
     FINALCUT_SEND_LABEL,
@@ -78,7 +78,7 @@ def _media_block(css: str, query: str) -> str:
 def test_flow_steps_report_live_counts_and_never_gate_the_send() -> None:
     """네 단계의 수와 상태 — 「검토」의 제외 제안 수는 정보다(보내기를 막지 않는다, D56)."""
     empty = ui_facade.flow_steps(ui_facade.FlowCounts())
-    assert [s.label for s in empty] == ["폴더 불러오기", "분석 승인", "검토", "내보내기"]
+    assert [s.label for s in empty] == ["폴더 불러오기", "분석 승인", "검토", "편집 · 공유"]
     assert [s.state for s in empty] == ["cur", "todo", "todo", "todo"]
     assert all(s.sub == "" for s in empty)
     analysing = ui_facade.flow_steps(ui_facade.FlowCounts(imported=18, analysed=6))
@@ -112,7 +112,11 @@ def test_top_bar_names_project_steps_mode_shortcuts_and_settings() -> None:
     assert flow in online
     keys = online[online.index('id="vl-keysheet"') :]
     # 재생 다섯 + 시작·끝 표시 셋(I·O · 1·2·3 · Esc — W-46b, D100 §7b).
-    assert keys.count("<dt>") == len(ui_facade.SHORTCUT_SHEET) == 8
+    viewer = keys[keys.index('<dl class="vl-keysheet">') :]
+    viewer = viewer[: viewer.index("</dl>")]
+    assert viewer.count("<dt>") == len(ui_facade.SHORTCUT_SHEET) == 8
+    # 재생기(타임라인 · 자막)의 키도 같은 판 하나에 모은다(W-102, D175 — 사용자 지시).
+    assert keymap.keysheet_sections_html() in keys and "<details" not in keys
     assert "입력 칸에 글을 쓰는 중에는 단축키가 동작하지 않습니다." in keys
     offline = ui_facade.topbar_html(online=False, mode_note=OFFLINE_MODE_NOTE, project="", flow="")
     assert 'class="vl-mode offline"' in offline and OFFLINE_MODE_NOTE in offline
@@ -170,16 +174,12 @@ def test_blocks_place_top_bar_command_bar_and_stage(tmp_path: Path, local_socket
         LIBRARY_APPROVE_LABEL,
         "선택 분석 취소",
         "전체 분석 취소",
-        workspace_service.RENDER_EXPORT_LABEL,
         CONFIRM_ALL_SOURCE_LABEL,  # 숨은 원천 — 화면의 단추는 제외 제안 대기열 안이다(D57 C)
     ):
         assert buttons[label].parent is bar, label
     in_bar = [b for b in app.blocks.values() if isinstance(b, gr.Button) and b.parent is bar]
-    # 주 단추는 단계마다 하나 — 분석 승인(견적에 묶인 돈의 문)과 초안 내보내기(W-46a).
-    assert [b.value for b in in_bar if b.variant == "primary"] == [
-        LIBRARY_APPROVE_LABEL,
-        workspace_service.RENDER_EXPORT_LABEL,
-    ]
+    # 주 단추는 분석 승인 하나 — 초안 내보내기(W-46a)는 은퇴했다(W-91, D161).
+    assert [b.value for b in in_bar if b.variant == "primary"] == [LIBRARY_APPROVE_LABEL]
     assert FINALCUT_SEND_LABEL not in [b.value for b in in_bar]  # 서랍의 「고급 · Final Cut」
     # 취소 단추는 늘 보이고 늘 누를 수 있다 — 도는 작업을 못 멈추는 일이 없다.
     for label in ("선택 분석 취소", "전체 분석 취소"):
@@ -300,24 +300,30 @@ def test_grid_areas_at_three_breakpoints() -> None:
     css = ui_facade.WORKBENCH_CSS
     wide = css[css.index("#visual-stage {") :]
     wide = wide[: wide.index("}")]
-    assert "grid-template-columns: var(--vl-list-col) minmax(0, 1fr) var(--vl-panel-col);" in wide
+    # 열은 Final Cut 위 덱 비율(브라우저 · 뷰어 · 인스펙터 — 토큰, W-85 · D145).
+    assert (
+        "grid-template-columns: var(--vl-list-col) minmax(0, var(--vl-viewer-fr))"
+        " var(--vl-panel-col);" in wide
+    )
     # 오른쪽 열: 견적 · 추천 구간 · 「고급 도구」로 펼치는 패널(W-46b, D100 §7b — 네 영역).
+    # 그 아래 덱(deck)이 원본 범위 타임라인이다(W-85, D145 — Final Cut의 아래 덱).
     assert (
         '"thumbs player quote" "thumbs player ranges" "thumbs player panel" "thumbs timeline'
-        ' timeline"\n    "foot foot foot"' in wide
+        ' timeline"\n    "deck deck deck" "foot foot foot"' in wide
     )
-    assert "--vl-list-col: minmax(240px, 280px);" in wide
-    assert "--vl-panel-col: minmax(280px, 320px);" in wide
+    assert "--vl-list-col: minmax(var(--vl-browser-min), var(--vl-browser-fr));" in wide
+    assert "--vl-panel-col: minmax(var(--vl-inspector-min), var(--vl-inspector-fr));" in wide
+    assert "grid-template-rows: auto minmax(0, 1fr) auto auto auto var(--vl-statusline-h);" in wide
     two = _media_block(css, "max-width: 1050px")
     # 승인 칸은 명령 줄 바로 아래(승인 단추 곁), 타임라인은 재생기 바로 아래(사용자 결정 6).
     assert (
         '"quote quote" "thumbs player" "thumbs timeline" "thumbs ranges"\n      "thumbs panel"'
-        ' "foot foot"' in two
+        ' "deck deck" "foot foot"' in two
     )
     assert "#visual-stage .vl-thumbs { max-height: none; contain: size; }" in two
     one = _media_block(css, "max-width: 860px")
     # 승인 칸 다음 영상·타임라인·추천 구간(W-46b)
-    assert '"quote" "player" "timeline" "ranges" "thumbs" "panel" "foot"' in one
+    assert '"quote" "player" "timeline" "deck" "ranges" "thumbs" "panel" "foot"' in one
     assert "#vl-quote { grid-area: quote;" in css and "#library-analysis-scope" not in css
     assert "#visual-stage .vl-cards {" in one and "display: flex; overflow: auto hidden;" in one
     assert css.index("@media (max-width: 1050px)") < css.index("@media (max-width: 860px)")
@@ -654,9 +660,7 @@ def _run_panel_harness(tmp_path: Path) -> dict[str, Any]:
     )
     payload = tmp_path / "payload.json"
     payload.write_text(
-        json.dumps(
-            {"visual": ui_facade.VISUAL_BOOTSTRAP_JS, "caption": ui_facade.CAPTION_BOOTSTRAP_JS}
-        ),
+        json.dumps({"visual": ui_facade.VISUAL_BOOTSTRAP_JS}),
         encoding="utf-8",
     )
     completed = subprocess.run(
@@ -741,9 +745,7 @@ def test_space_inside_an_open_drawer_does_not_play_the_video(tmp_path: Path) -> 
     )
     payload = tmp_path / "payload.json"
     payload.write_text(
-        json.dumps(
-            {"visual": ui_facade.VISUAL_BOOTSTRAP_JS, "caption": ui_facade.CAPTION_BOOTSTRAP_JS}
-        ),
+        json.dumps({"visual": ui_facade.VISUAL_BOOTSTRAP_JS}),
         encoding="utf-8",
     )
     completed = subprocess.run(

@@ -208,41 +208,60 @@ class AnalysisStore:
         """
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT source_order, source_name FROM analysis_source_results"
-                " WHERE revision_id = ? AND asset_id = ?",
-                (result.revision_id, result.asset_id),
-            ).fetchone()
-            if row is not None and (
-                int(row["source_order"]) != result.source_order
-                or str(row["source_name"]) != result.source_name
-            ):
-                connection.rollback()
-                raise AnalysisError(
-                    f"분석 결과 {result.asset_id}의 신원이 기록과 다르다 — 같은 리비전에서"
-                    " 원본의 자리가 바뀌었으면 새 리비전을 만들어야 한다"
-                )
-            connection.execute(
-                "INSERT INTO analysis_source_results (revision_id, asset_id, source_order,"
-                " source_name, fingerprint, status, speech_status, execution_mode,"
-                " document_path, record_path, window_count, segment_count, cached_from,"
-                " error, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-                " ON CONFLICT(revision_id, asset_id) DO UPDATE SET"
-                " fingerprint = excluded.fingerprint, status = excluded.status,"
-                " speech_status = excluded.speech_status,"
-                " execution_mode = excluded.execution_mode,"
-                " document_path = excluded.document_path, record_path = excluded.record_path,"
-                " window_count = excluded.window_count,"
-                " segment_count = excluded.segment_count,"
-                " cached_from = excluded.cached_from, error = excluded.error,"
-                " updated_at = excluded.updated_at",
-                self._source_values(result),
-            )
+            self._write_source_result(connection, result)
             connection.commit()
         restored = self.source_result(result.revision_id, result.asset_id)
         assert restored is not None
         return restored
+
+    def upsert_source_results(self, results: Sequence[AnalysisSourceResult]) -> None:
+        """여러 원본의 결과 행을 트랜잭션 하나로 — 행마다 `upsert_source_result`와 같은 검사 ·
+        같은 쓰기.
+
+        선택 밖 원본의 「분석 안 함」 행처럼 한 실행이 한꺼번에 쓰는 행(D156). 한 행이라도 신원이
+        기록과 다르면 묶음 전체가 들어가지 않는다."""
+        if not results:
+            return
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for result in results:
+                self._write_source_result(connection, result)
+            connection.commit()
+
+    def _write_source_result(
+        self, connection: sqlite3.Connection, result: AnalysisSourceResult
+    ) -> None:
+        row = connection.execute(
+            "SELECT source_order, source_name FROM analysis_source_results"
+            " WHERE revision_id = ? AND asset_id = ?",
+            (result.revision_id, result.asset_id),
+        ).fetchone()
+        if row is not None and (
+            int(row["source_order"]) != result.source_order
+            or str(row["source_name"]) != result.source_name
+        ):
+            connection.rollback()
+            raise AnalysisError(
+                f"분석 결과 {result.asset_id}의 신원이 기록과 다르다 — 같은 리비전에서"
+                " 원본의 자리가 바뀌었으면 새 리비전을 만들어야 한다"
+            )
+        connection.execute(
+            "INSERT INTO analysis_source_results (revision_id, asset_id, source_order,"
+            " source_name, fingerprint, status, speech_status, execution_mode,"
+            " document_path, record_path, window_count, segment_count, cached_from,"
+            " error, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(revision_id, asset_id) DO UPDATE SET"
+            " fingerprint = excluded.fingerprint, status = excluded.status,"
+            " speech_status = excluded.speech_status,"
+            " execution_mode = excluded.execution_mode,"
+            " document_path = excluded.document_path, record_path = excluded.record_path,"
+            " window_count = excluded.window_count,"
+            " segment_count = excluded.segment_count,"
+            " cached_from = excluded.cached_from, error = excluded.error,"
+            " updated_at = excluded.updated_at",
+            self._source_values(result),
+        )
 
     def source_result(self, revision_id: str, asset_id: str) -> AnalysisSourceResult | None:
         with self._connect() as connection:

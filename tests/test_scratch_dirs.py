@@ -49,7 +49,7 @@ def test_the_prefix_carries_this_pid_and_only_known_kinds() -> None:
 def test_liveness_follows_signal_zero() -> None:
     assert process_alive(os.getpid())
     assert not process_alive(_dead_pid())
-    if os.getuid() != 0:
+    if os.name == "posix" and os.getuid() != 0:
         assert process_alive(1)  # launchd/init — 권한 없음은 살아 있음이다
 
 

@@ -224,7 +224,8 @@ def test_transcribe_covers_every_chunk_with_bound_identity(tmp_path: Path) -> No
         request_id="run-1",
         workdir=tmp_path,
     )
-    assert provider.seen == [
+    # 청크는 함께 보낸다(P-5, D159) — 보낸 차례가 아니라 보낸 요청(신원 · 샘플 범위)을 본다.
+    assert sorted(provider.seen) == [
         ("run-1:chunk-0000", 0, 160000),
         ("run-1:chunk-0001", 160000, 320000),
     ]

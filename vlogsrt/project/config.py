@@ -624,6 +624,29 @@ GAP_REFILL_SETTINGS = GapRefillSettings()
 """지금 쓰는 빈칸 고르기 기준 — 주입이 없으면 이 하나를 읽는다."""
 
 
+@dataclass(frozen=True)
+class SyncReportRetention:
+    """자막 시각 확인 보고서를 원본마다 몇 개 남기나(W-15F ⑧, D165) — 외부 근거 없는 조정 대상.
+
+    보고서는 자막 리비전마다 하나라 고칠 때마다 쌓였다. 쓸 때 그 원본의 가장 새
+    `keep_per_source`개만 남긴다(방금 쓴 것은 언제나). 8은 지금 리비전 · 시각 맞춤 「되돌리기」로
+    돌아갈 바로 앞 리비전 · 다른 기준으로 잰 몇 개를 넉넉히 담는다 — 지운 보고서는 다음 확인이
+    무료 로컬 VAD로 다시 잰다.
+    `SyncCheckSettings`의 칸이 **아니다** — 보고서 열쇠(`settings8`)·낡음 판정·어느 지문에도 없다.
+    """
+
+    keep_per_source: int = 8
+
+    def __post_init__(self) -> None:
+        keep = self.keep_per_source
+        if isinstance(keep, bool) or not isinstance(keep, int) or keep < 1:
+            raise ValueError(f"keep_per_source는 1 이상의 정수여야 한다: {keep!r}")
+
+
+SYNC_REPORT_RETENTION = SyncReportRetention()
+"""지금 쓰는 보고서 보관 수 — 주입이 없으면 이 하나를 읽는다."""
+
+
 def gap_refill_problems(settings: GapRefillSettings) -> list[str]:
     """값역 — 잇는 거리·넓힘은 0 이상의 정확 유리수(초)다."""
     problems: list[str] = []

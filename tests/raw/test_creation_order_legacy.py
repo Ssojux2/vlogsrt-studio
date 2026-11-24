@@ -28,9 +28,6 @@ from vlogsrt.project.raw.segment_review import (
     unreviewed_auto_exclusions,
 )
 
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
-
 needs_ffmpeg = co.needs_ffmpeg
 MEMO = "확인 필요: 사람이 덧붙인 말"  # 기계 메모 머리를 단 사람 메모 — 내용으로는 안 보인다
 

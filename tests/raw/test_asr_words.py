@@ -28,45 +28,25 @@ from typing import Any
 import pytest
 
 from vlogsrt import log
-from vlogsrt.config import Config
 from vlogsrt.models import Chunk
-from vlogsrt.project.raw import analysis_workflow, capabilities, sync_report, timing_truth
+from vlogsrt.project.raw import capabilities, sync_report, timing_truth
 from vlogsrt.project.raw import understanding as stage1
-from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
 from vlogsrt.project.raw.caption_provider import (
-    TransportTimingProvider,
     audio_chunk_binding,
     parse_timing_response,
-    timing_transcription_request,
 )
 from vlogsrt.project.raw.config import (
-    STAGE1_TIMESTAMP_GRANULARITIES,
     RawCaptionContract,
     RawWorkflowConfig,
     caption_problems,
     stage1_timing_view,
 )
-from vlogsrt.project.raw.understanding import SampleSpan, SelectedAudio
-from vlogsrt.transcribe import AudioTranscriptionRequest
+from vlogsrt.project.raw.understanding import SelectedAudio
 
 F = Fraction
 BEFORE_SHUTDOWN = date(2026, 10, 2)
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "api" / "fr_day_1_2_fhd.whisper.json"
 REPORT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "timing_truth_report.py"
-
-
-class WordSender:
-    """전송 경계의 가짜 — 요청을 기록하고 단어·신뢰도가 있는 시간 응답을 돌려준다."""
-
-    def __init__(self, payload: dict[str, Any]) -> None:
-        self.payload = payload
-        self.requests: list[AudioTranscriptionRequest] = []
-
-    def send_request(
-        self, request: AudioTranscriptionRequest, cfg: Config, **_: Any
-    ) -> dict[str, Any]:
-        self.requests.append(request)
-        return self.payload
 
 
 WORDED = {
@@ -127,51 +107,7 @@ def parse(tmp_path: Path, payload: dict[str, Any], duration: float) -> Any:
     )
 
 
-def run_stage1(tmp_path: Path, payload: dict[str, Any], cache: Path | None = None) -> Any:
-    sender = WordSender(payload)
-    evidence = stage1.transcribe_selected_audio(
-        audio_of(tmp_path),
-        (SampleSpan(0, 160000),),
-        settings=RawWorkflowConfig(),
-        understanding=RawUnderstandingSettings(),
-        provider=TransportTimingProvider(sender=sender, cfg=Config()),
-        on=BEFORE_SHUTDOWN,
-        request_id="run-1",
-        workdir=tmp_path,
-        cache_dir=cache,
-    )
-    return evidence, sender
-
-
 # ── 요청 — 1단계만 단어를 묻고, 저장된 설정·열쇠는 그대로 ──────────────────────
-
-
-def test_stage_one_asks_for_segments_and_words_from_a_segment_only_workspace(
-    tmp_path: Path,
-) -> None:
-    stored = RawWorkflowConfig()
-    assert stored.caption.timestamp_granularities == ("segment",)
-    _evidence, sender = run_stage1(tmp_path, WORDED)
-    (request,) = sender.requests
-    assert request.timestamp_granularities == STAGE1_TIMESTAMP_GRANULARITIES == ("segment", "word")
-    assert request.temperature == Config().transcribe_temperature  # D28 그대로
-
-
-def test_the_chunk_key_is_the_stored_settings_key(tmp_path: Path) -> None:
-    """단어를 물어도 열쇠는 저장된 설정의 것 그대로 — 이미 산 전사를 다시 사지 않는다."""
-    cache = tmp_path / "cache"
-    run_stage1(tmp_path, WORDED, cache)
-    wav = hashlib.sha256((tmp_path / "asr-chunk-0000.wav").read_bytes()).hexdigest()
-    expected = stage1.asr_chunk_key(
-        wav, "TransportTimingProvider", RawWorkflowConfig(), SampleSpan(0, 160000)
-    )
-    assert [path.stem for path in cache.glob("*.json")] == [expected]
-
-
-def test_final_captions_still_ask_for_segments_only(tmp_path: Path) -> None:
-    chunk, _binding = chunk_of(tmp_path, 5.0)
-    request = timing_transcription_request(chunk, settings=RawWorkflowConfig(), temperature=0.6)
-    assert request.timestamp_granularities == ("segment",)
 
 
 def test_the_stage_one_view_only_changes_the_granularity() -> None:
@@ -283,67 +219,6 @@ def test_bad_scores_are_left_out_not_invented(tmp_path: Path) -> None:
 
 
 # ── 기록 — 있으면 싣고, 없으면 옛 바이트 그대로 ────────────────────────────────
-
-
-def test_the_chunk_record_carries_scores_per_segment_and_words(tmp_path: Path) -> None:
-    evidence, _sender = run_stage1(tmp_path, WORDED)
-    (chunk,) = stage1.asr_evidence_json(evidence)["chunks"]
-    assert chunk["segments"] == [
-        {
-            "start": 0.5,
-            "end": 2.0,
-            "text": " 안녕 하세요",
-            "no_speech_prob": 0.1,
-            "avg_logprob": -0.3,
-        },
-        {"start": 3.0, "end": 4.5, "text": " 좋아", "no_speech_prob": 0.7, "avg_logprob": -1.2},
-    ]
-    assert chunk["words"] == WORDED["words"]
-
-
-def test_without_words_or_scores_the_record_has_no_new_fields(tmp_path: Path) -> None:
-    evidence, _sender = run_stage1(
-        tmp_path, {"segments": [{"start": 0.1, "end": 0.9, "text": "a"}]}
-    )
-    (chunk,) = stage1.asr_evidence_json(evidence)["chunks"]
-    assert "words" not in chunk
-    assert chunk["segments"] == [{"start": 0.1, "end": 0.9, "text": "a"}]
-
-
-def test_the_cache_keeps_words_and_scores_and_replays_them(tmp_path: Path) -> None:
-    cache = tmp_path / "cache"
-    first, _sender = run_stage1(tmp_path, WORDED, cache)
-    (entry,) = cache.glob("*.json")
-    stored = json.loads(entry.read_text(encoding="utf-8"))["outcome"]
-    assert stored["words"] == [[0.62, 1.1, "안녕"], [1.1, 1.94, "하세요"], [3.2, 4.4, "좋아"]]
-    assert stored["segment_scores"] == [[0.1, -0.3], [0.7, -1.2]]
-    again, sender = run_stage1(tmp_path, {"segments": []}, cache)
-    assert sender.requests == []  # 캐시에서 나왔다
-    assert stage1.asr_evidence_json(again) == stage1.asr_evidence_json(first)
-
-
-def test_the_stage_one_record_rebuilds_the_same_evidence(tmp_path: Path) -> None:
-    evidence, _sender = run_stage1(tmp_path, WORDED)
-    document = {"asr": stage1.asr_evidence_json(evidence)}
-    rebuilt = analysis_workflow._asr_from_artifact(document)
-    assert stage1.asr_evidence_json(rebuilt) == document["asr"]
-
-
-def test_utterances_do_not_carry_words_or_scores(tmp_path: Path) -> None:
-    """원본 자막을 심는 줄은 W-25c 앞과 같은 칸이다 — 심기가 새 리비전을 만들지 않는다."""
-    evidence, _sender = run_stage1(tmp_path, WORDED)
-    rows = stage1.utterances_json(stage1.utterance_evidence(audio_of(tmp_path), evidence))
-    assert {key for row in rows for key in row} == {
-        "utterance_id",
-        "chunk_index",
-        "position",
-        "text",
-        "start",
-        "end",
-        "start_sample",
-        "end_sample",
-        "evidence_id",
-    }
 
 
 # ── 보고서 — 단어 경계 ─────────────────────────────────────────────────────────

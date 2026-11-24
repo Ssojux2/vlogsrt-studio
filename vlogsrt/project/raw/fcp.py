@@ -557,13 +557,17 @@ def _hop_parts(
 ) -> tuple[str, list[str]]:
     """링크 한 칸을 표기로만 넘는다 — 대상의 (앵커, 칸 + 남은 칸). 조회는 안 한다.
 
-    `os.readlink`는 심볼릭 링크와 Windows 연결 지점(junction)을 함께 읽는다.
+    `os.readlink`는 심볼릭 링크와 Windows 연결 지점(junction)을 함께 읽는다. 표기 규칙은
+    `type(link)`(`WindowsPath`·`PosixPath`)로 고른다 — 바탕 `Path`는 Windows에서도
+    `PureWindowsPath`의 하위 형이 아니어서 Windows 표기를 POSIX로 읽고 `\\\\?\\` 앞머리가
+    칸(`?`)이 됐다(W-84a).
     """
     try:
         text = os.readlink(link)
     except OSError as error:
         raise FcpLibraryError(f"링크 표기를 읽지 못했다: {link} ({error})") from error
-    target_anchor, parts = _split_anchored(_link_target(Path, text, anchor, resolved))
+    target = _link_target(type(link), text, anchor, resolved)
+    target_anchor, parts = _split_anchored(target)
     return target_anchor, parts + remaining
 
 

@@ -105,7 +105,7 @@ def test_workspace_chooser_opens_existing_folder_workspace(tmp_path: Path) -> No
     server = _server(tmp_path, str(tmp_path / "a"))
     view = server.open_project_chooser_view()
     assert server.current_signature() is not None
-    assert view[-3] == str(tmp_path / "a")  # 읽기전용 경로 표시
+    assert view[-2] == str(tmp_path / "a")  # 읽기전용 경로 표시
     assert server._path_chooser.calls == [ui_chooser.WORKSPACE_KIND]
     _ = created
 
@@ -163,9 +163,9 @@ def test_fcpbundle_choice_opens_managed_workspace_with_deduped_scan(tmp_path: Pa
     assert root is not None
     assert root == (tmp_path / "제주-vlogsrt").resolve()  # 라이브러리 밖 안정 자리
     assert not root.is_relative_to(library)
-    assert view[-3] == str(root)
-    assert view[-2] == str(library.resolve())  # 출처 표시 = 라이브러리 경로(읽기전용)
-    ingest_md = view[6]
+    assert view[-2] == str(root)
+    assert view[-1] == str(library.resolve())  # 출처 표시 = 라이브러리 경로(읽기전용)
+    ingest_md = view[5]
     assert "FCP 라이브러리" in ingest_md
     assert "끊어진" not in ingest_md or "gone.mov" in ingest_md  # 끊어진 링크가 보인다
     assert server._ingest_proposal is not None
@@ -207,7 +207,7 @@ def test_fcp_rescan_from_view_outputs_through_confirm_and_copy(tmp_path: Path) -
     library = _fcp_library(tmp_path)
     server = _server(tmp_path, str(library))
     view = server.open_project_chooser_view()
-    signature, source_display = view[1], view[-2]
+    signature, source_display = view[1], view[-1]
     assert source_display == str(library.resolve())  # 출처 표시가 라이브러리를 가리킨다
 
     # 실제 화면이 하는 대로 — 보기의 출처 표시 값으로 프록시 재조사.
@@ -247,8 +247,8 @@ def test_fcp_scan_failure_stays_visible_and_resumable(
 
     monkeypatch.setattr(server.raw, "scan_fcp_library", exploding)
     view = server.open_project_chooser_view()
-    assert "조사 실패" in view[6] and "폭발" in view[6]  # 조용한 빈 성공이 아니다
-    assert view[-2] == str(library.resolve())  # 출처 표시는 라이브러리를 계속 가리킨다
+    assert "조사 실패" in view[5] and "폭발" in view[5]  # 조용한 빈 성공이 아니다
+    assert view[-1] == str(library.resolve())  # 출처 표시는 라이브러리를 계속 가리킨다
     signature = server.current_signature()
 
     monkeypatch.undo()
@@ -280,19 +280,6 @@ def test_source_folder_chooser_sets_listing_and_cancel_preserves(tmp_path: Path)
     assert server._last_listing is not None and server._last_listing.path == str(card)
 
 
-def test_final_video_chooser_success_and_cancel(tmp_path: Path) -> None:
-    """최종 영상 선택기 — 경로가 표시 칸으로 가고, 취소는 표시를 그대로 둔다."""
-    server = _server(tmp_path)
-    server.create_workspace_view("A", str(tmp_path / "a"))
-    final = tmp_path / "final-cut.mov"
-    final.write_bytes(b"f")
-    server._path_chooser._responses = [str(final)]  # type: ignore[attr-defined]
-    assert server.final_video_chooser_view() == str(final)
-    server._path_chooser._responses = [None]  # type: ignore[attr-defined]
-    with pytest.raises(gr.Error, match="취소"):
-        server.final_video_chooser_view()
-
-
 def test_generic_sd_regression_through_chooser_entries(tmp_path: Path) -> None:
     """일반 SD/폴더 흐름 회귀 — 선택기 입력구로 열고·골라 조사→확정→복사까지 간다."""
     card = tmp_path / "card" / "DCIM"
@@ -303,7 +290,7 @@ def test_generic_sd_regression_through_chooser_entries(tmp_path: Path) -> None:
 
     view = server.create_project_chooser_view("제주")
     signature = view[1]
-    root = Path(view[-3])
+    root = Path(view[-2])
     assert server.workspace_root() == root
 
     server.source_folder_chooser_view()
@@ -337,17 +324,14 @@ def test_actual_blocks_bindings_and_readonly_paths(tmp_path: Path, local_socket:
 
     assert server._ws_path_box is not None
     assert server._source_box is not None
-    assert server._caption_path_box is not None
     assert server._project_name_box is not None
     assert server._open_button is not None
     assert server._create_button is not None
     assert server._browse_button is not None
     assert server._scan_button is not None
-    assert server._caption_pick_button is not None
     # 경로 입력 칸은 전부 읽기전용 — 이름 칸(경로 아님)은 그대로 쓸 수 있다.
     assert server._ws_path_box.interactive is False
     assert server._source_box.interactive is False
-    assert server._caption_path_box.interactive is False
     assert server._project_name_box.interactive is not False
 
     def bound(dep: dict) -> object:
@@ -357,7 +341,6 @@ def test_actual_blocks_bindings_and_readonly_paths(tmp_path: Path, local_socket:
     assert open_dep["inputs"] == []  # 경로 입력 없음 — 선택기가 유일한 길이다
     assert server._ws_path_box._id in open_dep["outputs"]
     assert server._source_box._id in open_dep["outputs"]  # 전환은 낡은 출처 표시를 지운다
-    assert server._caption_path_box._id in open_dep["outputs"]
     assert str(open_dep["api_name"]).startswith("false")  # API 노출 없음(숨김 표기)
     assert open_dep["api_visibility"] == "private"
     assert app.fns[open_dep["id"]].concurrency_limit == 1
@@ -375,12 +358,6 @@ def test_actual_blocks_bindings_and_readonly_paths(tmp_path: Path, local_socket:
     assert str(browse_dep["api_name"]).startswith("false")
     assert app.fns[browse_dep["id"]].concurrency_id == ui_chooser.CHOOSER_CONCURRENCY_ID
 
-    pick_dep = _click_dep(app, server._caption_pick_button)
-    assert pick_dep["inputs"] == []
-    assert pick_dep["outputs"] == [server._caption_path_box._id]
-    assert str(pick_dep["api_name"]).startswith("false")
-    assert app.fns[pick_dep["id"]].concurrency_id == ui_chooser.CHOOSER_CONCURRENCY_ID
-
     scan_dep = _click_dep(app, server._scan_button)
     assert server._signature_state._id in scan_dep["inputs"]
     assert server._source_box._id in scan_dep["inputs"]  # 읽기전용 표시가 조사 입력이다
@@ -388,7 +365,7 @@ def test_actual_blocks_bindings_and_readonly_paths(tmp_path: Path, local_socket:
     assert server._ingest_md._id in scan_dep["outputs"]
 
 
-def test_workspace_switch_clears_stale_source_and_caption_displays(tmp_path: Path) -> None:
+def test_workspace_switch_clears_stale_source_display(tmp_path: Path) -> None:
     """작업공간 전환은 낡은 출처 표시를 지운다 — 이전 프로젝트 경로가 남지 않는다."""
     library = _fcp_library(tmp_path)
     server = _server(tmp_path, str(library), str(tmp_path / "card"))
@@ -399,6 +376,6 @@ def test_workspace_switch_clears_stale_source_and_caption_displays(tmp_path: Pat
 
     server.create_workspace_view("B", str(tmp_path / "b"))
     switched = server.open_workspace_view(str(tmp_path / "b"))  # 다른 작업공간으로 전환
-    assert switched[-3] == str((tmp_path / "b").resolve())
-    assert switched[-2] == "" and switched[-1] == ""  # 낡은 출처·최종 영상 표시는 비었다
+    assert switched[-2] == str((tmp_path / "b").resolve())
+    assert switched[-1] == ""  # 낡은 출처 표시는 비었다
     assert server._ingest_proposal is None  # FCP 조사 제안도 새 상태로 시작

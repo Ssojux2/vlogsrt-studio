@@ -26,7 +26,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import replace
 from datetime import datetime
 from fractions import Fraction
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -53,7 +53,30 @@ needs_installed_dtd = pytest.mark.skipif(
 F = Fraction
 NTSC = F(1001, 30000)
 BT709 = ("bt709", "bt709", "bt709")
-BUNDLE = Path("/Users/ssojux2/Movies/test_dir/260810_wangbang.fcpbundle")
+
+
+_NATIVE_TO_POSIX_URI: dict[str, str] = {}
+"""`os_absolute`가 지은 경로의 이 운영체제 URI → 원래 POSIX URI(바이트 고정 시험이 되돌린다)."""
+
+
+def os_absolute(posix: str) -> Path:
+    """POSIX 꼴 가짜 경로를 이 운영체제의 절대 경로로 — Windows에서 `/Users/…`는 드라이브가 없어
+    절대 경로가 아니다(제품의 검사가 맞다). macOS·Linux에서는 그대로다."""
+    path = Path(os.path.abspath(posix))
+    _NATIVE_TO_POSIX_URI[path.as_uri()] = PurePosixPath(posix).as_uri()
+    return path
+
+
+def posix_render(document: ft.TimelineDocument) -> bytes:
+    """문서 바이트 — 고정한 sha는 macOS에서 잰 것이라 Windows의 `file:///D:/…`를 POSIX URI로
+    되돌린 뒤 견준다(W-84a). POSIX에서는 `ft.render` 그대로다."""
+    raw = ft.render(document)
+    for native, posix in sorted(_NATIVE_TO_POSIX_URI.items(), key=lambda item: -len(item[0])):
+        raw = raw.replace(native.encode(), posix.encode())
+    return raw
+
+
+BUNDLE = os_absolute("/Users/ssojux2/Movies/test_dir/260810_wangbang.fcpbundle")
 ORIGINALS = BUNDLE / "clips" / "Original Media"
 
 # 실측(읽기 전용) — 라이브러리 `FFMIORADAsset`의 mediaIdentifier·mediaRange와 원본 타임코드.
@@ -246,7 +269,7 @@ def edge_mixed() -> ft.TimelineDocument:
         report=frames_report(NTSC, (0, 1, "green")),
         cues=(cue_at(0, 0, "x"),),
     )
-    bundle = Path("/Users/me/Movies/My Lib.fcpbundle")
+    bundle = os_absolute("/Users/me/Movies/My Lib.fcpbundle")
     return ft.plan(
         [first, unanalysed, unknown, single], title="vlogsrt · 테스트 · 2026-10-09 18:30",
         library_bundle=bundle,
@@ -1254,7 +1277,7 @@ def test_single_orientation_documents_keep_the_w16_sequence_format(name: str) ->
 
 
 def test_single_orientation_bytes_match_the_pre_w26_render() -> None:
-    assert hashlib.sha256(ft.render(one_side_document())).hexdigest() == ONE_SIDE_SHA256
+    assert hashlib.sha256(posix_render(one_side_document())).hexdigest() == ONE_SIDE_SHA256
 
 
 # ─── 11c. 프레임레이트가 섞이면 많은 쪽 레이트 하나로 (W-27d, D71) ─────────────
@@ -1328,7 +1351,7 @@ def test_conform_rate_spellings_cover_every_supported_rate() -> None:
 @pytest.mark.parametrize("name", sorted(SINGLE_RATE_SHA256))
 def test_single_rate_documents_keep_their_pre_w27d_bytes(name: str) -> None:
     document = one_side_document() if name == "one_side" else EDGE_DOCUMENTS[name]()
-    raw = ft.render(document)
+    raw = posix_render(document)
     assert hashlib.sha256(raw).hexdigest() == SINGLE_RATE_SHA256[name]
     assert b"conform-rate" not in raw
     assert all(not source.sequence_frames for source in document.sources)
@@ -1565,9 +1588,10 @@ def test_library_media_uses_its_identifier_and_others_get_a_prefixed_lowercase_u
     assert library_asset.attrib["uid"] == rep.attrib["sig"] == ID_0008
     assert rep.attrib["kind"] == "original-media"
     assert rep.attrib["src"] == (
-        "file:///Users/ssojux2/Movies/test_dir/260810_wangbang.fcpbundle/clips/"
-        "Original%20Media/DJI_20260811125046_0008_D.mov"
+        BUNDLE.as_uri() + "/clips/Original%20Media/DJI_20260811125046_0008_D.mov"
     )
+    if os.name == "posix":
+        assert BUNDLE.as_uri() == "file:///Users/ssojux2/Movies/test_dir/260810_wangbang.fcpbundle"
     for asset, name in zip(
         assets[1:], ("DJI_20260811131238_0014_D", "DJI_20260811153216_0019_D"), strict=True
     ):
@@ -1610,7 +1634,7 @@ def test_import_options_link_media_and_point_at_the_original_library() -> None:
     """번들 URI는 디렉터리 꼴(끝 `/`)이다 — Final Cut 자신의 내보내기가 그렇게 적는다
     (이 기기 실물: `<library location="file:///Volumes/SubSSD/EU.fcpbundle/">`)."""
     root = parsed(real_like_document())
-    uri = "file:///Users/ssojux2/Movies/test_dir/260810_wangbang.fcpbundle/"
+    uri = BUNDLE.as_uri() + "/"
     options = [o.attrib for o in root.findall("./import-options/option")]
     assert options == [
         {"key": "library location", "value": uri},
@@ -1622,7 +1646,9 @@ def test_import_options_link_media_and_point_at_the_original_library() -> None:
 
 
 def test_without_a_library_the_options_still_link_but_name_no_location() -> None:
-    loose = ft.SourceInput(media=media("loose", frames=10, ident=None, folder=Path("/tmp/x")))
+    loose = ft.SourceInput(
+        media=media("loose", frames=10, ident=None, folder=os_absolute("/tmp/x"))
+    )
     root = parsed(ft.plan([loose], title="t", library_bundle=None))
     options = [o.attrib for o in root.findall("./import-options/option")]
     assert options == [

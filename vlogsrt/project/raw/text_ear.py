@@ -10,7 +10,11 @@ whisper 원본의 글자는 이제 Gemini 3.5 Transcribe 단어가 메인이다(
 
 정하는 순서(`resolve`):
 
-1. 시간 엔진이 whisper가 아니면 → `none`(Gemini 원본에는 다른 귀가 없다, D104 — 예전엔 gpt 후보였다)
+1. 시간 엔진이 whisper가 아니면(Gemini 원본, D187) → 다시 듣기가 기다리면 이번 차례에 이미 고정된
+   귀, 없으면 `hydrogen` · 이번 차례에 고정된 귀가 있으면 그 귀 · 원본 자막 문서가 이미 있으면
+   `none`(W-114c 이전에 들은 Gemini 영상 — 결속·지문이 바이트 그대로다) · 처음 듣는 영상은
+   `hydrogen`. 「새로 듣는 글자 귀」 표지는 whisper 원본의 것이라 보지 않는다(옛 값 `gpt`·`gemini`가
+   남아 있을 수 있다).
 2. 다시 듣기가 기다리면 → 이번 차례에 이미 고정된 귀, 없으면 「새로 듣는 글자 귀」
 3. 이번 차례에 고정된 귀가 있으면 → 그 귀
 4. 원본 자막 문서가 이미 있으면 → `gpt`(W-35b 이전에 들은 영상)
@@ -33,10 +37,13 @@ EAR_GPT = "gpt"
 EAR_GEMINI = "gemini"
 """Gemini 3.5 Transcribe 단어를 whisper 줄에 배정한다(D95)."""
 EAR_NONE = "none"
-"""다른 귀가 없다 — Gemini 시간 엔진 원본(D104). 글자와 시각이 한 응답이라 묻지 않는다(자막을 바꾸지
-못하는
-후보에 돈을 쓰지 않는다)."""
-EARS = (EAR_GPT, EAR_GEMINI, EAR_NONE)
+"""다른 귀가 없다 — W-114c 이전에 들은 Gemini 시간 엔진 원본(D104). 글자와 시각이 한 응답이다."""
+EAR_HYDROGEN = "hydrogen"
+"""Gemini 원본의 줄 글자를 Gemini 4 Hydrogen이 같은 청크 WAV로 다시 듣는다(D187) — 시각·줄은
+Transcribe 그대로, 줄 아이디로만 맞춘다(`hydrogen_text`)."""
+EARS = (EAR_GPT, EAR_GEMINI, EAR_NONE, EAR_HYDROGEN)
+DEFAULT_GEMINI_ENGINE_EAR = EAR_HYDROGEN
+"""처음 듣거나 다시 듣는 Gemini 원본의 글자 귀 — 사용자 지시(2026-11-21, D187)."""
 
 TABLE = "source_text_ears"
 META_KEY = "stage1_text_ear"
@@ -87,17 +94,18 @@ def pin(workspace: Any, asset_id: str, epoch: int, ear: str) -> None:
 
 def resolve(workspace: Any, asset_id: str) -> str:
     """그 원본이 지금 쓰는 글자 귀 — 정하는 순서는 모듈 설명 그대로다."""
-    if timing_engine.resolve(workspace, asset_id) != TIMING_ENGINE_WHISPER:
-        return EAR_NONE
+    gemini = timing_engine.resolve(workspace, asset_id) != TIMING_ENGINE_WHISPER
+    fresh = DEFAULT_GEMINI_ENGINE_EAR if gemini else new_hearing_ear(workspace)
+    heard = EAR_NONE if gemini else EAR_GPT
     state = asr_epoch.state(workspace, asset_id)
     found = pinned(workspace, asset_id, state.epoch)
     if state.pending:
-        return found or new_hearing_ear(workspace)
+        return found or fresh
     if found is not None:
         return found
     if source_transcript.load(workspace, asset_id) is not None:
-        return EAR_GPT
-    return new_hearing_ear(workspace)
+        return heard
+    return fresh
 
 
 def _require_ear(ear: str) -> None:
@@ -124,10 +132,12 @@ def _read(workspace: Any) -> tuple[dict[tuple[str, int], str], str | None]:
 
 
 __all__ = [
+    "DEFAULT_GEMINI_ENGINE_EAR",
     "DEFAULT_NEW_HEARING_EAR",
     "EARS",
     "EAR_GEMINI",
     "EAR_GPT",
+    "EAR_HYDROGEN",
     "EAR_NONE",
     "META_KEY",
     "TABLE",

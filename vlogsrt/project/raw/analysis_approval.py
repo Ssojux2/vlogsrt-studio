@@ -216,12 +216,22 @@ def require_text_approval(
         preflight_online_transcription,
     )
     from vlogsrt.project.raw.config import (
+        GEMINI_ANALYSIS_PROFILES,
         GEMINI_TRANSCRIBE_PROFILES,
         TIMING_ENGINE_GEMINI,
         TIMING_ENGINES,
         timing_engine_view,
     )
 
+    analysis = GEMINI_ANALYSIS_PROFILES.get(expected)
+    if analysis is not None:  # Hydrogen 글자 귀(D187) — 생성 모델이라 수명주기는 단가 유효 기간이다
+        from vlogsrt.project.raw.gemini_cost import price_current
+
+        if not price_current(analysis, on=on):
+            raise AnalysisApprovalError(
+                f"글자 귀 {analysis.label}의 단가가 {on.isoformat()}에 유효하지 않다 — 가격 미정"
+            )
+        return
     gemini = expected in GEMINI_TRANSCRIBE_PROFILES
     view = (
         timing_engine_view(workflow, TIMING_ENGINES[TIMING_ENGINE_GEMINI]) if gemini else workflow

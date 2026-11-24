@@ -229,23 +229,49 @@ def _fake_probe() -> Any:
 
 
 _REPORT_NICE = "import os, time; time.sleep(0.4); print(os.getpriority(os.PRIO_PROCESS, 0))"
+_PRIORITY_CLASS = (
+    "import ctypes\n"
+    "from ctypes import wintypes\n"
+    "k = ctypes.windll.kernel32\n"
+    "k.GetCurrentProcess.restype = wintypes.HANDLE\n"
+    "k.GetPriorityClass.argtypes = [wintypes.HANDLE]\n"
+    "k.GetPriorityClass.restype = wintypes.DWORD\n"
+    "value = k.GetPriorityClass(k.GetCurrentProcess())\n"
+)
+"""Windows 우선순위 등급 — 핸들은 64비트라 형을 적는다(적지 않으면 ctypes가 잘라 0이 나왔다)."""
+_REPORT_CLASS = "import time\ntime.sleep(0.4)\n" + _PRIORITY_CLASS + "print(value)\n"
+_BELOW_NORMAL_CLASS = 0x4000
+"""Windows에는 nice가 없다 — 「보통보다 낮음」 등급이 같은 양보다(`preprocess._launch`, D100 §1)."""
+
+
+def _own_priority() -> int:
+    """이 프로세스의 우선순위 — POSIX는 nice, Windows는 우선순위 등급."""
+    if sys.platform == "win32":
+        scope: dict[str, Any] = {}
+        exec(_PRIORITY_CLASS, scope)  # 자식과 같은 글로 잰다
+        return int(scope["value"])
+    return os.getpriority(os.PRIO_PROCESS, 0)
+
+
+def _child_priority(**options: Any) -> int:
+    report = _REPORT_CLASS if sys.platform == "win32" else _REPORT_NICE
+    completed = preprocess.run_process(
+        [sys.executable, "-c", report], capture_output=True, text=True, **options
+    )
+    assert completed.returncode == 0, completed.stderr
+    return int(completed.stdout.strip())
 
 
 def test_a_prioritized_process_really_runs_at_the_lower_priority() -> None:
-    expected = max(os.getpriority(os.PRIO_PROCESS, 0), 10)
-    completed = preprocess.run_process(
-        [sys.executable, "-c", _REPORT_NICE], capture_output=True, text=True, priority=10
-    )
-    assert completed.returncode == 0
-    assert int(completed.stdout.strip()) == expected
+    if sys.platform == "win32":
+        expected = _BELOW_NORMAL_CLASS
+    else:
+        expected = max(_own_priority(), 10)
+    assert _child_priority(priority=10) == expected
 
 
 def test_without_priority_the_fast_path_and_the_niceness_are_unchanged() -> None:
-    before = os.getpriority(os.PRIO_PROCESS, 0)
-    completed = preprocess.run_process(
-        [sys.executable, "-c", _REPORT_NICE], capture_output=True, text=True
-    )
-    assert int(completed.stdout.strip()) == before
+    assert _child_priority() == _own_priority()
 
 
 def test_priority_takes_the_popen_path_and_keeps_registry_and_progress(
@@ -262,6 +288,7 @@ def test_priority_takes_the_popen_path_and_keeps_registry_and_progress(
         return real_popen([sys.executable, "-c", "pass"], **kwargs)
 
     monkeypatch.setattr(preprocess.subprocess, "Popen", popen)
+    monkeypatch.setattr(sys, "platform", "darwin")  # nice 길 — Windows는 등급 플래그다(위 시험)
     monkeypatch.setattr(preprocess, "_lower_priority", lambda pid, nice: calls.append((pid, nice)))
     monkeypatch.setattr(
         preprocess.subprocess, "run", lambda *a, **k: pytest.fail("nice는 Popen 길이다")
@@ -269,7 +296,9 @@ def test_priority_takes_the_popen_path_and_keeps_registry_and_progress(
     argv = ["ffmpeg", "-hide_banner", "-i", "/media/in.mov", "/out/x.jpg"]
     preprocess.run_process(argv, capture_output=True, text=True, priority=10, step="썸네일 추출")
     progress = launched[0][2]
-    assert launched[0][1] == "-progress" and progress.startswith(f"file:{tmp_path / 'progress'}/")
+    assert launched[0][1] == "-progress" and progress.startswith(
+        f"file:{tmp_path / 'progress'}{os.sep}"
+    )
     assert launched[0][3:] == argv[1:]  # 진행 파일 말고는 받은 argv 그대로
     assert len(calls) == 1 and calls[0][1] == 10
     assert preprocess.active_processes() == ()  # 끝나면 내려간다
@@ -279,13 +308,18 @@ def test_lowering_a_finished_child_is_quiet(monkeypatch: pytest.MonkeyPatch) -> 
     def gone(*_args: object) -> int:
         raise ProcessLookupError
 
-    monkeypatch.setattr(preprocess.os, "getpriority", gone)
+    monkeypatch.setattr(preprocess.os, "getpriority", gone, raising=False)
+    monkeypatch.setattr(preprocess.os, "setpriority", lambda *_: None, raising=False)
+    monkeypatch.setattr(preprocess.os, "PRIO_PROCESS", 0, raising=False)
     preprocess._lower_priority(999_999, 10)  # 예외가 새지 않는다
 
 
 def test_lowering_never_raises_the_priority(monkeypatch: pytest.MonkeyPatch) -> None:
     set_calls: list[int] = []
-    monkeypatch.setattr(preprocess.os, "getpriority", lambda *_: 15)
-    monkeypatch.setattr(preprocess.os, "setpriority", lambda *a: set_calls.append(a[2]))
+    monkeypatch.setattr(preprocess.os, "getpriority", lambda *_: 15, raising=False)
+    monkeypatch.setattr(
+        preprocess.os, "setpriority", lambda *a: set_calls.append(a[2]), raising=False
+    )
+    monkeypatch.setattr(preprocess.os, "PRIO_PROCESS", 0, raising=False)
     preprocess._lower_priority(1234, 10)
     assert set_calls == []  # 이미 더 낮다 — 높이지 않는다

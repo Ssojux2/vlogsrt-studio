@@ -1,7 +1,6 @@
 PY := $(shell test -x .venv/bin/python && echo .venv/bin/python || echo python3)
-GOLDEN := golden
 
-.PHONY: check test lint types types-win invariant eval verify fixtures ui venv clean
+.PHONY: check test lint types types-win invariant ui venv clean
 
 check: lint types test invariant
 
@@ -26,20 +25,6 @@ invariant:
 # 웹 UI. gradio·numpy·onnxruntime이 필요하다 — make venv가 함께 깐다(pip install -e ".[ui,project]").
 ui:
 	$(PY) -u -m ui.app
-
-eval:
-	$(PY) -m vlogsrt.cli evalset --golden $(GOLDEN) --out docs/DASHBOARD.md
-
-# "자막이 소리와 안 맞는다"는 신고가 들어왔을 때 원인을 절단/전사로 가른다.
-# 녹화된 픽스처와 전처리 캐시, 그리고 실행이 남긴 trace.json만 읽는다. API를 부르지 않는다.
-#   make verify STEM=fr_day_1_2_fhd [OUT=out]
-verify:
-	$(PY) scripts/verify_timing.py $(STEM) --out $(or $(OUT),out)
-
-# 사람만 실행한다. 실제 API 호출이고 유료다.
-fixtures:
-	@echo "실제 API를 호출합니다. 약 \$$0.06/편."
-	@echo "  $(PY) -m vlogsrt.cli record $(GOLDEN)/ep01.mp4"
 
 # 실행 파일(실행.command·실행.bat)과 같은 꾸러미 + 개발 도구. 표지를 남겨 실행 파일이 다시 깔지 않는다(D100 §8).
 venv:

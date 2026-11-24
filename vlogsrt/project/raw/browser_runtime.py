@@ -26,7 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -52,7 +52,6 @@ from vlogsrt.project.raw.config import (
 )
 from vlogsrt.project.raw.models import AnalysisEstimate, AnalysisSemanticEstimate
 from vlogsrt.transcribe import (
-    LiveTranscriber,
     create_claude_client,
     create_gemini_client,
     create_vision_client,
@@ -63,6 +62,16 @@ STT_KEY_ENV = "OPENAI_API_KEY"
 
 STT_BASE_URL_ENV = "OPENAI_BASE_URL"
 """선택 공개 엔드포인트 — 비면 공개 엔드포인트 그대로(전송 경계가 못 박는다)."""
+
+
+@dataclass(frozen=True, slots=True)
+class LiveRequestCarrier:
+    """실제 호출 제공자가 영수증 관찰자·취소 문을 넘겨받는 자리 — 스스로는 아무것도 보내지 않는다.
+
+    whisper 전송(`LiveTranscriber`)이 이 둘을 실어 나르던 자리다(D163 — whisper 은퇴)."""
+
+    observer: Any = None
+    cancellation: Callable[[], None] | None = None
 
 
 class BrowserRuntimeError(RuntimeError):
@@ -195,11 +204,7 @@ def live_transport_for_credentials(
     만든다 — 엔드포인트·버전·시간 한도는 **그 모델의** 프로파일 값이다(D54·D58).
     """
     return LiveAnalysisTransport(
-        sender=LiveTranscriber(
-            api_key=credentials.api_key,
-            base_url=credentials.base_url,
-            observer=request_usage.observer(),
-        ),
+        sender=LiveRequestCarrier(observer=request_usage.observer()),
         cfg=Config(),
         client=create_vision_client(api_key=credentials.api_key, base_url=credentials.base_url),
         asr_approvals=asr_approvals,
@@ -272,33 +277,6 @@ def production_live_transport(
         on=on,
         claude=capture_claude_credentials(os.environ if environ is None else environ),
         gemini=capture_gemini_credentials(os.environ if environ is None else environ),
-    )
-
-
-def caption_transport_providers(
-    credentials: EnvironmentCredentials,
-) -> tuple[Any, Any]:
-    """최종 자막 실제 실행의 생산 제공자 — 시간·문구가 같은 정본 전송 경계를 지난다.
-
-    화면 4의 승인된 실행에서만 만든다. 제공자 클래스는 받아들인 A7 어댑터
-    (`caption_provider`) 그대로 — 여기서 새 전송 길을 만들지 않는다. 호출 0회:
-    객체를 만들 뿐이고 첫 전송은 실행 문(승인·환경·네트워크)이 연 뒤에야
-    일어난다(§14.3).
-    """
-    from vlogsrt.project.raw.caption_provider import (
-        TransportTextProvider,
-        TransportTimingProvider,
-    )
-
-    sender = LiveTranscriber(
-        api_key=credentials.api_key,
-        base_url=credentials.base_url,
-        observer=request_usage.observer(),
-    )
-    cfg = Config()
-    return (
-        TransportTimingProvider(sender=sender, cfg=cfg),
-        TransportTextProvider(sender=sender, cfg=cfg),
     )
 
 
@@ -452,10 +430,17 @@ def _rescue_approval_fields(estimate: AnalysisEstimate) -> dict[str, Any]:
 def _quoted_text_fields(
     quoted: Sequence[AnalysisEstimate], text_model: str, identity: str | None
 ) -> dict[str, dict[str, Any]]:
-    """사람이 본 견적 줄마다 승인의 글자 칸 — 물을 청크를 센 줄만(D59 19d), 신원이 없으면 없다."""
-    if not quoted or identity is None:
+    """사람이 본 견적 줄마다 승인의 글자 칸 — 물을 청크를 센 줄만(D59 19d).
+
+    gpt 다른 귀 줄은 digest가 묶은 신원(`identity`)이 없으면 없다. Gemini 글자 모델 줄(Hydrogen
+    글자 귀 D187 · Gemini 글자 경로 W-35b)은 신원을 그 모델에서 잰다(교차 확인 꼬리표 밖)."""
+    if not quoted:
         return {}
-    fields = {item.asset_id: _text_approval_fields(item, text_model, identity) for item in quoted}
+    fields = {
+        item.asset_id: _text_approval_fields(item, text_model, identity or "")
+        for item in quoted
+        if item.text_model is not None or identity is not None
+    }
     return {asset_id: values for asset_id, values in fields.items() if values}
 
 
@@ -469,23 +454,32 @@ def _text_approval_fields(
     if not estimate.text_chunk_count:
         return {}
     if estimate.text_model is not None:
-        from vlogsrt.project.raw import gemini_text
-        from vlogsrt.project.raw.config import GEMINI_TEXT_SETTINGS
-
-        if estimate.text_model != GEMINI_TEXT_SETTINGS.model:
-            raise BrowserRuntimeError(f"승인 범위의 글자 모델을 모른다: {estimate.text_model!r}")
         if estimate.text_usd is None:
             raise BrowserRuntimeError(
-                f"Gemini 글자 경로의 단가가 재확인 기한을 지나 가격 미정이다:"
-                f" {estimate.source_name} — 단가를 확인해 고친 뒤 다시 승인하라(W-35b)"
+                f"글자 귀 {estimate.text_model}의 단가가 재확인 기한을 지나 가격 미정이다:"
+                f" {estimate.source_name} — 단가를 확인해 고친 뒤 다시 승인하라(W-35b·D187)"
             )
-        text_model, identity = estimate.text_model, gemini_text.text_identity(GEMINI_TEXT_SETTINGS)
+        text_model, identity = estimate.text_model, _gemini_text_identity(estimate.text_model)
     return {
         "text_model": text_model,
         "text_identity": identity,
         "text_chunk_budget": int(estimate.text_chunk_count),
         "text_chunk_keys": estimate.text_chunk_keys,
     }
+
+
+def _gemini_text_identity(model: str) -> str:
+    """견적 줄의 글자 모델이 묻는 요청 신원 — Hydrogen 글자 귀(D187) 또는 Gemini 글자 경로(W-35b).
+
+    힌트가 없어 용어집이 신원에 들지 않는다. 그 밖의 모델은 승인 범위가 모르는 모델이다."""
+    from vlogsrt.project.raw import gemini_text, hydrogen_text_pass
+    from vlogsrt.project.raw.config import GEMINI_TEXT_SETTINGS, HYDROGEN_TEXT
+
+    if model == HYDROGEN_TEXT.model:
+        return hydrogen_text_pass.text_identity(HYDROGEN_TEXT)
+    if model == GEMINI_TEXT_SETTINGS.model:
+        return gemini_text.text_identity(GEMINI_TEXT_SETTINGS)
+    raise BrowserRuntimeError(f"승인 범위의 글자 모델을 모른다: {model!r}")
 
 
 def _phase_artifact_for(service: Any, root: Path, revision_id: str, asset_id: str) -> Any:
@@ -606,7 +600,6 @@ __all__ = [
     "STT_BASE_URL_ENV",
     "STT_KEY_ENV",
     "asr_estimate_digest",
-    "caption_transport_providers",
     "capture_claude_credentials",
     "capture_gemini_credentials",
     "capture_environment_credentials",

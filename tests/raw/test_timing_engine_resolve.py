@@ -1,9 +1,9 @@
 """원본마다 시간 엔진(W-31d, D92) — 정하는 순서와 고정.
 
-1. 다시 듣기가 기다리면 → 이번 차례에 이미 고정된 엔진, 없으면 「새로 듣는 엔진」
+1. 다시 듣기가 기다리면 → 이번 차례에 고정된 엔진(은퇴한 whisper면 무시), 없으면 「새로 듣는 엔진」
 2. 이번 차례에 고정된 엔진이 있으면 → 그 엔진
 3. 원본 자막 문서가 이미 있으면 → whisper(이미 산 34개는 그대로)
-4. 처음 듣는 영상 → 「새로 듣는 엔진」
+4. 처음 듣는 영상 → 「새로 듣는 엔진」(Gemini 하나 — whisper는 은퇴했다, D163)
 
 고정은 1단계가 시작될 때(첫 유료 호출 전) 쓰이고 바뀌지 않는다. whisper 원본의 설정 보기는 같은
 객체라 열쇠·지문·결속이 바이트 그대로다(결속 꼬리표가 없다).
@@ -45,6 +45,11 @@ def _seed_document(workspace: Any, asset_id: str) -> None:
         db.commit()
 
 
+def _old_whisper_marker(workspace: Any) -> None:
+    """은퇴 전에 「새로 듣는 엔진」을 whisper로 고른 작업공간의 표지(D104 이전 흐름)."""
+    workspace.set_meta_value(timing_engine.META_KEY, TIMING_ENGINE_WHISPER)
+
+
 def test_the_default_new_hearing_engine_is_gemini_now() -> None:
     # D104(2026-10-29 사용자 지시) — whisper 종료를 기다리지 않는다.
     assert timing_engine.DEFAULT_NEW_HEARING_ENGINE == TIMING_ENGINE_GEMINI
@@ -53,10 +58,10 @@ def test_the_default_new_hearing_engine_is_gemini_now() -> None:
 def test_a_never_heard_video_follows_the_new_hearing_engine(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
     assert timing_engine.resolve(workspace, "a") == TIMING_ENGINE_GEMINI
-    timing_engine.set_new_hearing_engine(workspace, TIMING_ENGINE_WHISPER)  # 이전 엔진도 고른다
-    assert timing_engine.new_hearing_engine(workspace) == TIMING_ENGINE_WHISPER
-    assert timing_engine.resolve(workspace, "a") == TIMING_ENGINE_WHISPER
-    assert timing_engine.binding_tag(workspace, "a") is None
+    with pytest.raises(RawWorkspaceError, match="은퇴"):  # whisper는 은퇴했다(D163)
+        timing_engine.set_new_hearing_engine(workspace, TIMING_ENGINE_WHISPER)
+    _old_whisper_marker(workspace)  # 옛 작업공간이 남긴 표지는 무시한다
+    assert timing_engine.new_hearing_engine(workspace) == TIMING_ENGINE_GEMINI
     timing_engine.set_new_hearing_engine(workspace, TIMING_ENGINE_GEMINI)
     assert timing_engine.new_hearing_engine(workspace) == TIMING_ENGINE_GEMINI
     assert timing_engine.resolve(workspace, "a") == TIMING_ENGINE_GEMINI
@@ -81,7 +86,7 @@ def test_a_relisten_hears_with_the_new_engine_and_the_pin_holds_afterwards(tmp_p
     assert timing_engine.resolve(workspace, "v") == TIMING_ENGINE_GEMINI
     timing_engine.pin(workspace, "v", epoch, TIMING_ENGINE_GEMINI)  # 1단계가 시작될 때
     asr_epoch.mark_heard(workspace, "v", epoch)
-    timing_engine.set_new_hearing_engine(workspace, TIMING_ENGINE_WHISPER)  # 나중에 바꿔도
+    _old_whisper_marker(workspace)  # 나중에 표지가 바뀌어도
     assert timing_engine.resolve(workspace, "v") == TIMING_ENGINE_GEMINI
     view = timing_engine.source_workflow(workspace, "v", RawWorkflowConfig())
     assert view.models.timing_model == TIMING_ENGINES[TIMING_ENGINE_GEMINI].model
@@ -92,8 +97,25 @@ def test_a_pending_relisten_keeps_the_engine_its_run_already_pinned(tmp_path: Pa
     timing_engine.set_new_hearing_engine(workspace, TIMING_ENGINE_GEMINI)
     epoch = asr_epoch.bump(workspace, "p").epoch
     timing_engine.pin(workspace, "p", epoch, TIMING_ENGINE_GEMINI)
-    timing_engine.set_new_hearing_engine(workspace, TIMING_ENGINE_WHISPER)
+    _old_whisper_marker(workspace)
     assert timing_engine.resolve(workspace, "p") == TIMING_ENGINE_GEMINI
+
+
+def test_a_pending_relisten_pinned_to_whisper_hears_with_gemini(tmp_path: Path) -> None:
+    """은퇴 전에 whisper로 고정되고 끝나지 않은 다시 듣기 — 새 엔진으로 듣고 고정을 바꾼다(D163).
+
+    끝난 차례의 whisper 고정은 그대로다(이미 들은 자막은 읽기만 한다)."""
+    workspace = _workspace(tmp_path)
+    _seed_document(workspace, "p")
+    epoch = asr_epoch.bump(workspace, "p").epoch
+    timing_engine.pin(workspace, "p", epoch, TIMING_ENGINE_WHISPER)
+    assert timing_engine.resolve(workspace, "p") == TIMING_ENGINE_GEMINI
+    timing_engine.pin(workspace, "p", epoch, TIMING_ENGINE_GEMINI)
+    assert timing_engine.pinned(workspace, "p", epoch) == TIMING_ENGINE_GEMINI
+    asr_epoch.mark_heard(workspace, "p", epoch)
+    timing_engine.pin(workspace, "q", 0, TIMING_ENGINE_WHISPER)  # 끝난 차례
+    with pytest.raises(RawWorkspaceError, match="고정"):
+        timing_engine.pin(workspace, "q", 0, TIMING_ENGINE_GEMINI)
 
 
 def test_a_pin_never_changes_and_unknown_engines_are_refused(tmp_path: Path) -> None:
@@ -124,6 +146,7 @@ def test_a_render_scope_reads_the_engine_state_once(tmp_path: Path) -> None:
     timing_engine.pin(workspace, "a", 0, TIMING_ENGINE_GEMINI)
     with read_scope.open():
         first = [timing_engine.resolve(workspace, asset) for asset in ("a", "b", "c")]
-        timing_engine.set_new_hearing_engine(workspace, TIMING_ENGINE_WHISPER)
+        timing_engine.set_new_hearing_engine(workspace, TIMING_ENGINE_GEMINI)
+        _old_whisper_marker(workspace)
         again = [timing_engine.resolve(workspace, asset) for asset in ("a", "b", "c")]
     assert first == again == [TIMING_ENGINE_GEMINI] * 3  # 범위 안에서는 한 번 읽은 값

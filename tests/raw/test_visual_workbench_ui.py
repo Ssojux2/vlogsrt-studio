@@ -33,7 +33,6 @@ import re
 import shutil
 import subprocess
 import time
-from datetime import date
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -166,45 +165,13 @@ def test_workbench_html_has_no_script_and_escapes_model() -> None:
     assert "data-vl-empty" in placeholder and "계획이 &lt;없다&gt;" in placeholder
 
 
-def test_player_and_caption_shells_expose_contract_ids() -> None:
+def test_player_shell_exposes_contract_ids() -> None:
     """껍데기 아이디 계약 — 실행본과 A5 하네스가 짚는 대상들."""
     shell = ui_facade.visual_player_shell_html(None, "안내")
     for anchor in ("visual-video", "visual-rail", "vl-repeat", "vl-pause", "vl-clock"):
         assert f'id="{anchor}"' in shell, anchor
     assert "src=" not in shell  # 미리보기가 없으면 src도 없다(빈 성공 꾸미기 없음)
     assert 'src="/media/abc"' in ui_facade.visual_player_shell_html("/media/abc", "안내")
-    player = ui_facade.caption_overlay_player_html(
-        "/media/x", waveform="<svg></svg>", provenance="출처"
-    )
-    for anchor in ("caption-video", "caption-overlay", "cap-overlay-toggle"):
-        assert f'id="{anchor}"' in player, anchor
-    assert 'class="cap-overlay cap-overlay-on"' in player
-    assert 'aria-pressed="true"' in player
-    # 출처 원문(경로·sha·코덱·등록 ID)은 접힌 상세로 — 기본 재생기에는 사람 글자만.
-    assert "영상 상세" in player and "출처" in player
-    assert player.index("<details") > player.index('id="cap-overlay-toggle"')
-    workbench = ui_facade.caption_workbench_html({"empty": None, "cues": []})
-    for anchor in (
-        "cap-cues",
-        "cap-text",
-        "cap-start",
-        "cap-end",
-        "cap-cue-id",
-        "cap-save",
-        "cap-confirm",
-    ):
-        assert f'id="{anchor}"' in workbench, anchor
-    # 정밀 시각·큐 ID는 접힌 상세 안에 — 기본 흐름은 글자 저장·확정만 본다
-    # (아이디·읽기 전용·실행본 선택자 계약은 그대로).
-    details_at = workbench.index("정밀 시각")
-    for anchor in ("cap-start", "cap-end", "cap-cue-id", "cap-save-time"):
-        assert workbench.index(f'id="{anchor}"') > details_at, anchor
-    for anchor in ("cap-save", "cap-confirm", "cap-text"):
-        assert workbench.index(f'id="{anchor}"') < details_at, anchor
-    details = ui_facade.caption_workbench_details_html(
-        {"empty": None, "details": [{"id": "a|b", "whisper": "w"}], "provenance": "p"}
-    )
-    assert "<details" in details and "a|b" in details and "whisper" in details
 
 
 def test_ui_facade_still_has_no_derived_imports() -> None:
@@ -213,7 +180,7 @@ def test_ui_facade_still_has_no_derived_imports() -> None:
 
     sources = set(vars(module))
     assert not any(name.startswith(("vlogsrt", "gradio", "fastapi")) for name in sources)
-    assert ui_facade.VISUAL_BOOTSTRAP_JS and ui_facade.CAPTION_BOOTSTRAP_JS
+    assert ui_facade.VISUAL_BOOTSTRAP_JS
     assert "watch(" in ui_facade.VISUAL_BOOTSTRAP_JS  # 공개 클라이언트 계약을 쓴다
 
 
@@ -353,16 +320,6 @@ checkpoints.push({ case: 'visual-bootstrap',
   wireVisual: typeof windowScope.__vlWireVisual === 'function',
   propsStashed: windowScope.__vlVisualWorkbenchProps !== undefined,
   serverStashed: windowScope.__vlVisualWorkbenchServer !== undefined });
-
-const captionBootEl = el({ id: 'caption-workbench-block' });
-captionBootEl._doc = docStub({});
-const captionBoot = runEntrypoint(bootstraps.caption, captionBootEl,
-  { value: '' }, {});
-checkpoints.push({ case: 'caption-bootstrap',
-  watchRegistered: captionBoot.watchCalls.length === 1,
-  wireCaption: typeof windowScope.__vlWireCaption === 'function',
-  propsStashed: windowScope.__vlCaptionWorkbenchProps !== undefined,
-  serverStashed: windowScope.__vlCaptionWorkbenchServer !== undefined });
 
 // ── 유리수 라이브러리 — 정수 정확, Number('1/5') 금지 ──────────────────────
 const VL = windowScope.__vlLib;
@@ -747,141 +704,6 @@ checkpoints.push({ case: 'prepare-no-track-default',
   omitted: prepCall && JSON.stringify(prepCall.payload.audioSelections) === '{}',
   tokenAgain: prepCall && prepCall.payload.token === 'tok-1' });
 
-// ── 자막 작업대 배선 ───────────────────────────────────────────────────────
-function captionModel() {
-  return {
-    epoch: 'cap-epoch-1', token: 'cap-tok-1', signature: 'ws-sig', runId: 'run-1',
-    head: 3, canConfirm: false, blockReason: '열린 경고 1개', provenance: '출처 — final',
-    cues: [
-      { id: 'a0000', startMs: '500', endMs: '2500', text: '망원동 카페', basis: 'auto',
-        seek: '0.500000', endSeek: '2.500000' },
-      { id: 'm0001', startMs: '3000', endMs: '3400', text: '수동 큐', basis: 'manual',
-        seek: '3.000000', endSeek: '3.400000' },
-    ],
-  };
-}
-
-function captionEnv(serverHandlers, propsFactory) {
-  const model = captionModel();
-  const root = el({ id: 'caption-workbench', attrs: { 'data-vl-model': JSON.stringify(model) } });
-  const cues = el({ id: 'cap-cues' });
-  const msg = el({ id: 'cap-msg' });
-  const textEl = el({ id: 'cap-text' });
-  const startEl = el({ id: 'cap-start' });
-  const endEl = el({ id: 'cap-end' });
-  const cueIdEl = el({ id: 'cap-cue-id' });
-  const overlay = el({ id: 'caption-overlay' });
-  const toggle = el({ id: 'cap-overlay-toggle', attrs: { 'aria-pressed': 'true' } });
-  const vid = videoStub('caption-video');
-  const registry = {
-    'caption-workbench': root, 'cap-cues': cues, 'cap-msg': msg, 'cap-text': textEl,
-    'cap-start': startEl, 'cap-end': endEl, 'cap-cue-id': cueIdEl,
-    'caption-overlay': overlay, 'cap-overlay-toggle': toggle, 'caption-video': vid.video,
-  };
-  const doc = docStub(registry);
-  Object.keys(registry).forEach((k) => { registry[k]._doc = doc; });
-  const serverCalls = [];
-  const held = [];
-  const server = {};
-  Object.keys(serverHandlers || {}).forEach((name) => {
-    server[name] = (payload) => {
-      serverCalls.push({ name, payload: JSON.parse(JSON.stringify(payload)) });
-      const out = serverHandlers[name](payload);
-      if (out && out.__hold) {
-        // 지연 응답 — 늦은 null/거부 응답 재료(A9). resolve·reject 둘 다 붙잡는다.
-        const deferred = {};
-        deferred.promise = new Promise((resolve, reject) => {
-          deferred.resolve = resolve;
-          deferred.reject = reject;
-        });
-        held.push({ name, payload, deferred });
-        return deferred.promise;
-      }
-      return Promise.resolve(out);
-    };
-  });
-  const propsCalls = [];
-  const props = propsFactory ? propsFactory(propsCalls)
-    : { set value(v) { propsCalls.push(String(v)); }, get value() { return ''; } };
-  const block = el({ id: 'caption-workbench-block' });
-  block._doc = doc;
-  runEntrypoint(bootstraps.caption, block, props, server);
-  return { model, root, cues, msg, textEl, startEl, endEl, cueIdEl, overlay, toggle, vid,
-    server, serverCalls, props, propsCalls, registry, doc, held, block,
-    click(target) {
-      (this.root._listeners.click || []).slice().forEach((fn) => fn({ target }));
-    },
-    rewired() { windowScope.__vlWireCaption(root, doc); } };
-}
-
-const capEnv = captionEnv({});
-checkpoints.push({ case: 'caption-render',
-  rows: capEnv.cues.innerHTML.includes('data-vl-cue="a0000"') &&
-    capEnv.cues.innerHTML.includes('수동 큐'),
-  seekAttrs: capEnv.cues.innerHTML.includes('data-seek-start="0.500000"'),
-  manualMark: capEnv.cues.innerHTML.includes('cap-row-manual'),
-  editorFilled: capEnv.cueIdEl.value === 'a0000' && capEnv.textEl.value === '망원동 카페',
-  msFilled: capEnv.startEl.value === '500' && capEnv.endEl.value === '2500' });
-
-// 행 선택 — 클라이언트 전용(재생기 이동·재생, 서버 0회).
-capEnv.click({ getAttribute: (k) => (k === 'data-vl-cue' ? 'm0001' : null) });
-checkpoints.push({ case: 'cue-row-client-only',
-  seeked: Math.abs(capEnv.vid.state.currentTime - 3.0) < 1e-9,
-  played: capEnv.vid.calls.play === 1,
-  noServer: capEnv.serverCalls.length === 0,
-  refilled: capEnv.cueIdEl.value === 'm0001' && capEnv.textEl.value === '수동 큐' });
-
-// 오버레이 — start<=t<end (측정 매핑 그대로). 2.5초는 a0000의 끝=경계 밖.
-capEnv.vid.tick(1.0);
-const inside = capEnv.overlay.textContent;
-capEnv.vid.tick(2.5);
-const boundary = capEnv.overlay.textContent;
-capEnv.vid.tick(3.2);
-const manualInside = capEnv.overlay.textContent;
-checkpoints.push({ case: 'caption-overlay',
-  inside: inside === '망원동 카페',
-  endExclusive: boundary === '',
-  manual: manualInside === '수동 큐' });
-
-// 오버레이 토글 — 클라이언트 전용.
-capEnv.toggle._listeners.click.slice().forEach((fn) => fn());
-checkpoints.push({ case: 'overlay-toggle',
-  pressedOff: capEnv.toggle.attrs['aria-pressed'] === 'false',
-  noServerStill: capEnv.serverCalls.length === 0 });
-
-// 저장 — 실제 진입점이 심은 서버 전역으로 머리·토큰과 함께 한 번 간다.
-const capSave = captionEnv({
-  cap_save: () => ({ ok: true, echoEpoch: 'cap-epoch-1', html: '<p>new</p>', message: '저장했다' }),
-});
-capSave.cueIdEl.value = 'a0000';
-capSave.textEl.value = '손으로 고친 글자';
-capSave.click({ getAttribute: (k) => (k === 'id' ? 'cap-save' : null) });
-await new Promise((resolve) => setTimeout(resolve, 0));
-const capCall = capSave.serverCalls[0];
-checkpoints.push({ case: 'caption-save',
-  calledOnce: capSave.serverCalls.length === 1 && capCall.name === 'cap_save',
-  headBound: capCall.payload.head === 3,
-  signature: capCall.payload.signature === 'ws-sig',
-  tokenCarried: capCall.payload.token === 'cap-tok-1',
-  applied: capSave.propsCalls.length === 1 });
-
-// 늦은 저장 응답 — epoch가 다르면 적용 없음.
-const capLate = captionEnv({
-  cap_save: () => ({ ok: true, echoEpoch: 'old', html: '<p>stale</p>' }),
-});
-capLate.cueIdEl.value = 'a0000';
-capLate.textEl.value = 'x';
-capLate.click({ getAttribute: (k) => (k === 'id' ? 'cap-save' : null) });
-await new Promise((resolve) => setTimeout(resolve, 0));
-checkpoints.push({ case: 'caption-late-dropped', dropped: capLate.propsCalls.length === 0 });
-
-// 확정 게이트 — 조건이 남아 있으면 서버 없이 안내.
-const capGate = captionEnv({});
-capGate.click({ getAttribute: (k) => (k === 'id' ? 'cap-confirm' : null) });
-checkpoints.push({ case: 'caption-confirm-gate',
-  blocked: capGate.msg.textContent.includes('열린 경고'),
-  noServer: capGate.serverCalls.length === 0 });
-
 // 자식 원소 클릭 — 글자 칸을 눌러도 그 단추의 사건으로(A5 실측 결함).
 const envChild = visualEnv({});
 const childSpan = { getAttribute: () => null,
@@ -1003,84 +825,10 @@ checkpoints.push({ case: 'old-video-unloaded',
   loopCleared: windowScope.__vlVisualWorkbenchState.loop === null,
   newVideoWired: freshVid.calls.srcSets.length === 1 });
 
-// 자막 행의 글자 칸 클릭 — 그 행 선택으로(A5 실측 결함).
-const capChild = captionEnv({});
-capChild.click({ getAttribute: () => null,
-  parentNode: { getAttribute: (k) => (k === 'data-vl-cue' ? 'm0001' : null) } });
-checkpoints.push({ case: 'caption-child-click',
-  refilled: capChild.cueIdEl.value === 'm0001' &&
-    capChild.textEl.value === '수동 큐',
-  seeked: Math.abs(capChild.vid.state.currentTime - 3.0) < 1e-9,
-  noServer: capChild.serverCalls.length === 0 });
-
-// 자막 옛 클로저 — A→B→A(새 epoch·새 토큰) 뒤 붙잡아 둔 옛 클릭은 새 화면의
-// 편집 칸·큐 목록·재생기를 바꾸지 않는다(A6 실측 결함).
-const capAba = captionEnv({});
-capAba.click({ getAttribute: (k) => (k === 'data-vl-cue' ? 'm0001' : null) });
-const capAbaOld = capAba.root._listeners.click[0];
-const capAbaModel = captionModel();
-capAbaModel.epoch = 'cap-epoch-2';
-capAbaModel.token = 'cap-tok-2';
-capAba.root.setAttribute('data-vl-model', JSON.stringify(capAbaModel));
-capAba.rewired();
-const capAbaBefore = { sel: windowScope.__vlCaptionWorkbenchState.selectedId,
-  cues: capAba.cues.innerHTML, text: capAba.textEl.value,
-  time: capAba.vid.state.currentTime, plays: capAba.vid.calls.play };
-capAbaOld({ target: { getAttribute: (k) => (k === 'data-vl-cue' ? 'm0001' : null) } });
-await new Promise((resolve) => setTimeout(resolve, 0));
-checkpoints.push({ case: 'caption-old-closure-inert',
-  selectionKept: windowScope.__vlCaptionWorkbenchState.selectedId === capAbaBefore.sel,
-  cuesKept: capAba.cues.innerHTML === capAbaBefore.cues,
-  editorKept: capAba.textEl.value === capAbaBefore.text,
-  seekKept: capAba.vid.state.currentTime === capAbaBefore.time &&
-    capAba.vid.calls.play === capAbaBefore.plays,
-  noServer: capAba.serverCalls.length === 0 });
-
-// 자막 껍데기 교체(작업공간 전환·새 원본) — 떨어진 옛 영상을 능동 언로드하고
-// 청취를 해제하며 오버레이·선택을 지운다. 옛 영상의 timeupdate는 새 오버레이를
-// 건드리지 않는다(A6 실측: 재생·주소·청취가 남던 결함).
-const capLife = captionEnv({});
-capLife.click({ getAttribute: (k) => (k === 'data-vl-cue' ? 'm0001' : null) });
-const capOldVid = capLife.vid;
-capOldVid.video.play();
-capOldVid.tick(3.1);
-capLife.overlay.textContent = '지워야 할 옛 오버레이';
-const capFreshVid = videoStub('caption-video');
-capLife.registry['caption-video'] = capFreshVid.video;
-const capLifeModel = captionModel();
-capLifeModel.epoch = 'cap-epoch-9';
-capLifeModel.token = 'cap-tok-9';
-capLife.root.setAttribute('data-vl-model', JSON.stringify(capLifeModel));
-capLife.rewired();
-capOldVid.tick(3.2);
-checkpoints.push({ case: 'caption-old-video-unloaded',
-  paused: capOldVid.video.paused === true,
-  unloaded: capOldVid.calls.unload >= 1 && capOldVid.video.src === '',
-  listenersDetached: (capOldVid.listeners.timeupdate || []).length === 0,
-  overlayCleared: capLife.overlay.textContent === '',
-  selectionReset: windowScope.__vlCaptionWorkbenchState.selectedId === null,
-  editorRefilled: capLife.cueIdEl.value === 'a0000',
-  freshVideoWired: (capFreshVid.listeners.timeupdate || []).length === 1 });
-
-// 보통의 저장 재렌더 — epoch만 바뀌고 토큰이 같으면 같은 화면이다: 영상은
-// 그대로 재생되고(언로드 0) 선택도 산다(껍데기 교체 때만 정리한다).
-const capKeep = captionEnv({});
-capKeep.click({ getAttribute: (k) => (k === 'data-vl-cue' ? 'm0001' : null) });
-const capKeepModel = captionModel();
-capKeepModel.epoch = 'cap-epoch-3';
-capKeep.root.setAttribute('data-vl-model', JSON.stringify(capKeepModel));
-capKeep.rewired();
-checkpoints.push({ case: 'caption-save-rerender-keeps-video',
-  sameElement: capKeep.vid.video.id === 'caption-video',
-  noUnload: capKeep.vid.calls.unload === 0 && capKeep.vid.calls.pause === 0,
-  selectionKept: windowScope.__vlCaptionWorkbenchState.selectedId === 'm0001',
-  tickAlive: (capKeep.vid.listeners.timeupdate || []).length === 1 });
-
 // ── 값 갱신 순서 — watch가 먼저 불리고 DOM 교체는 마이크로태스크로 미뤄진다 ──
 // (A7 실측: watch가 옛 뿌리를 다시 묶는 사이 교체가 그것을 떼어내 새 화면이
 // 빈 채 남던 결함). 커밋은 문서 뿌리를 새 원소로 바꾼다(innerHTML 교체의 효과).
 const visualWatchFn = visualBoot.watchCalls[0].fn;
-const captionWatchFn = captionBoot.watchCalls[0].fn;
 
 // 지연 커밋(영상) — watch 시점에는 아직 옛 뿌리다: 배선 세대는 그때 오르지
 // 않는다. 커밋 뒤 새 뿌리만 정확히 한 번 묶인다.
@@ -1185,68 +933,6 @@ checkpoints.push({ case: 'direct-props-no-watch-observer-rewires',
     envNoWatch.thumbs.innerHTML.includes('data-vl-card="segB1"') === false,
   noServer: envNoWatch.serverCalls.length === 0 });
 
-// 지연 커밋(자막) — 보통의 저장 재렌더(같은 토큰·새 epoch): 커밋 뒤 새 뿌리를
-// 묶되 영상은 그대로 재생되고 선택도 산다. 오버레이는 현재 시각으로 다시 칠해진다.
-const capDefer = captionEnv({});
-capDefer.click({ getAttribute: (k) => (k === 'data-vl-cue' ? 'm0001' : null) });
-capDefer.vid.state.currentTime = 3.2;
-capDefer.vid.video.play();
-const capDeferModel = captionModel();
-capDeferModel.epoch = 'cap-epoch-deferred';
-capDeferModel.cues[0].text = '수정된 자동 큐';
-const capDeferRoot = el({ id: 'caption-workbench',
-  attrs: { 'data-vl-model': JSON.stringify(capDeferModel) } });
-const capSerialBefore = windowScope.__vlCaptionWireSerial;
-capDefer.props.value = '<div id="caption-workbench"></div>';
-Promise.resolve().then(() => {
-  capDefer.registry['caption-workbench'] = capDeferRoot;
-  flushObservers(capDefer.block);
-});
-captionWatchFn('<div id="caption-workbench"></div>');
-const capSerialAtWatch = windowScope.__vlCaptionWireSerial;
-await new Promise((resolve) => setTimeout(resolve, 0));
-await new Promise((resolve) => setTimeout(resolve, 0));
-checkpoints.push({ case: 'caption-deferred-commit-rewires',
-  noWireAtWatch: capSerialAtWatch === capSerialBefore,
-  wiredAfterCommit: windowScope.__vlCaptionWireSerial === capSerialBefore + 1,
-  cuesRendered: capDefer.cues.innerHTML.includes('수정된 자동 큐'),
-  selectionKept: windowScope.__vlCaptionWorkbenchState.selectedId === 'm0001',
-  editorRefilled: capDefer.textEl.value === '수동 큐',
-  videoAlive: capDefer.vid.calls.unload === 0 && capDefer.vid.calls.pause === 0 &&
-    capDefer.vid.video.paused === false,
-  tickAlive: (capDefer.vid.listeners.timeupdate || []).length === 1,
-  overlayFresh: capDefer.overlay.textContent === '수동 큐',
-  noFlushLoop: (() => {
-    flushObservers(capDefer.block);
-    return capDeferRoot._listeners.click.length === 1;
-  })() });
-
-// 자막도 watch 없는 직접 대입 길 — 관찰자(부팅 때 상시)가 커밋을 잡아 새
-// 뿌리를 묶는다(작업공간 전환 뒤 첫 저장 응답 등 실제 경로).
-const capNoWatch = captionEnv({});
-const capNoWatchModel = captionModel();
-capNoWatchModel.epoch = 'cap-epoch-nowatch';
-capNoWatchModel.cues[1].text = '직접 대입 큐';
-const capNoWatchRoot = el({ id: 'caption-workbench',
-  attrs: { 'data-vl-model': JSON.stringify(capNoWatchModel) } });
-const capNoWatchSerial = windowScope.__vlCaptionWireSerial;
-capNoWatch.props.value = '<div id="caption-workbench"></div>';
-Promise.resolve().then(() => {
-  capNoWatch.registry['caption-workbench'] = capNoWatchRoot;
-  flushObservers(capNoWatch.block);
-});
-await new Promise((resolve) => setTimeout(resolve, 0));
-await new Promise((resolve) => setTimeout(resolve, 0));
-checkpoints.push({ case: 'caption-direct-props-no-watch-rewires',
-  wiredByObserver: windowScope.__vlCaptionWireSerial === capNoWatchSerial + 1,
-  cuesRendered: capNoWatch.cues.innerHTML.includes('직접 대입 큐'),
-  // 같은 화면 생명(같은 토큰)이라 선택 m0001이 이어지고, 편집 칸은 **커밋된
-  // 모델의** 그 행으로 다시 채워진다.
-  editorRefilledFromCommit: capNoWatch.cueIdEl.value === 'm0001' &&
-    capNoWatch.textEl.value === '직접 대입 큐',
-  videoAlive: capNoWatch.vid.calls.unload === 0,
-  noServer: capNoWatch.serverCalls.length === 0 });
-
 // ── 그 자리 morph — 설치본 렌더기(we/Te)는 같은 태그의 뿌리를 원소째 바꾸지 ──
 // 않고 data-vl-model 속성과 동적 자식만 갈아친다(A8 실측: rootIdentityPreserved
 // 참·DOM 머리는 새 것·카드 0). 세터는 렌더(=morph)만 마이크로태스크로 미루고
@@ -1343,88 +1029,6 @@ checkpoints.push({ case: 'morph-attribute-only-rewires',
   attrWatched: envAttr.block.__vlObservers[0].options.attributes === true &&
     envAttr.block.__vlObservers[0].options.attributeFilter[0] === 'data-vl-model' });
 
-// 자막 그 자리 morph — 실제 cap_save 응답이 같은 뿌리를 morph해도 같은 토큰의
-// 화면 생명은 산다: 영상 그대로 재생, 선택 이어짐, 편집 칸은 커밋된 모델로.
-let capMorphEnv = null;
-let capMorphNext = null;
-const capMorph = captionEnv({
-  cap_save: () => ({ ok: true, echoEpoch: 'cap-epoch-1', message: '저장했다',
-    html: '<div id="caption-workbench"></div>' }),
-}, (calls) => ({
-  set value(v) {
-    calls.push(String(v));
-    const next = capMorphNext;
-    Promise.resolve().then(() => {
-      if (!capMorphEnv || !next) { return; }
-      capMorphEnv.root.setAttribute('data-vl-model', JSON.stringify(next));
-      capMorphEnv.cues.innerHTML = '';
-      flushObservers(capMorphEnv.block);
-    });
-  },
-  get value() { return ''; },
-}));
-capMorphEnv = capMorph;
-const capMorphSerial = windowScope.__vlCaptionWireSerial;
-capMorph.click({ getAttribute: (k) => (k === 'data-vl-cue' ? 'm0001' : null) });
-capMorph.vid.state.currentTime = 3.2;
-capMorph.vid.video.play();
-capMorph.cueIdEl.value = 'a0000';
-capMorph.textEl.value = 'morph 수정 큐';
-capMorphNext = captionModel();
-capMorphNext.epoch = 'cap-epoch-morph';
-capMorphNext.cues[0].text = 'morph 수정 큐';
-capMorph.click({ getAttribute: (k) => (k === 'id' ? 'cap-save' : null) });
-await new Promise((resolve) => setTimeout(resolve, 0));
-await new Promise((resolve) => setTimeout(resolve, 0));
-checkpoints.push({ case: 'morph-caption-save-keeps-screen-life',
-  replyApplied: capMorph.propsCalls.length === 1,
-  wiredOnce: windowScope.__vlCaptionWireSerial === capMorphSerial + 1,
-  cuesFromCommit: capMorph.cues.innerHTML.includes('morph 수정 큐'),
-  selectionKept: windowScope.__vlCaptionWorkbenchState.selectedId === 'm0001',
-  editorFromCommit: capMorph.cueIdEl.value === 'm0001' &&
-    capMorph.textEl.value === '수동 큐',
-  videoAlive: capMorph.vid.calls.unload === 0 && capMorph.vid.calls.pause === 0 &&
-    capMorph.vid.video.paused === false && capMorph.vid.video.currentTime === 3.2,
-  clickSingle: capMorph.root._listeners.click.length === 1,
-  tickSingle: (capMorph.vid.listeners.timeupdate || []).length === 1,
-  overlayFresh: capMorph.overlay.textContent === '수동 큐',
-  messageKept: capMorph.msg.textContent.includes('저장했다'),
-  noLoop: (() => {
-    flushObservers(capMorph.block);
-    return windowScope.__vlCaptionWireSerial === capMorphSerial + 1;
-  })(),
-  saveOnce: capMorph.serverCalls.length === 1 });
-
-// morph로 온 새 화면 토큰(작업공간 전환이 morph로 도착) — 선택은 정리되고
-// 편집 칸은 커밋된 첫 큐로, 옛 클로저는 물러난다. 영상 원소가 그대로면
-// 언로드하지 않는다(껍데기 교체 때만 정리 — 기존 계약).
-const capSwitch = captionEnv({});
-capSwitch.click({ getAttribute: (k) => (k === 'data-vl-cue' ? 'm0001' : null) });
-const capSwitchOld = capSwitch.root._listeners.click[0];
-const capSwitchModel = captionModel();
-capSwitchModel.epoch = 'cap-epoch-switch';
-capSwitchModel.token = 'cap-tok-switch';
-capSwitchModel.cues[0].text = '전환 뒤 큐';
-capSwitch.root.setAttribute('data-vl-model', JSON.stringify(capSwitchModel));
-capSwitch.cues.innerHTML = '';
-flushObservers(capSwitch.block);
-const capSwitchBefore = { sel: windowScope.__vlCaptionWorkbenchState.selectedId,
-  text: capSwitch.textEl.value, time: capSwitch.vid.state.currentTime };
-capSwitchOld({ target: { getAttribute: (k) => (k === 'data-vl-cue' ? 'a0000' : null) } });
-await new Promise((resolve) => setTimeout(resolve, 0));
-checkpoints.push({ case: 'morph-new-token-resets-screen',
-  rewired: windowScope.__vlCaptionWorkbenchState.model.token === 'cap-tok-switch',
-  selectionReset: windowScope.__vlCaptionWorkbenchState.selectedId === null,
-  editorFirstCue: capSwitch.cueIdEl.value === 'a0000' &&
-    capSwitch.textEl.value === '전환 뒤 큐',
-  videoElementKept: capSwitch.vid.calls.unload === 0 &&
-    (capSwitch.vid.listeners.timeupdate || []).length === 1,
-  oldClosureInert: windowScope.__vlCaptionWorkbenchState.selectedId === capSwitchBefore.sel &&
-    capSwitch.textEl.value === capSwitchBefore.text &&
-    capSwitch.vid.state.currentTime === capSwitchBefore.time,
-  noServer: capSwitch.serverCalls.length === 0,
-  noLateRestoration: capSwitch.propsCalls.length === 0 });
-
 // 관찰자 없는 길 — 저장 응답의 대입 직후 스케줄러(call()의 __vl*WorkbenchRewire
 // 환기, A8 실측: 짝이 안 맞으면 no-op이었다)만으로 재배선되는지. 이 케이스의
 // props는 morph만 하고 관찰자를 환기하지 않는다.
@@ -1520,58 +1124,6 @@ checkpoints.push({ case: 'placeholder-recovery-visual',
   cardsRendered: envEmpty.thumbs.innerHTML.includes('data-vl-card="segA1"'),
   actionAlive: windowScope.__vlVisualWorkbenchState.selectedId === 'segA2' &&
     Math.abs(envEmpty.vid.state.currentTime - 1) < 1e-9 });
-
-// 자막 자리표시 morph — 편집 칸·큐·오버레이 청소와 영상 능동 언로드(재생 중이던
-// 것까지), 반복 무동작, 새 토큰 모델로 회복.
-const capEmpty = captionEnv({});
-capEmpty.click({ getAttribute: (k) => (k === 'data-vl-cue' ? 'm0001' : null) });
-capEmpty.vid.state.currentTime = 3.2;
-capEmpty.vid.video.play();
-const capEmptyOld = capEmpty.root._listeners.click[0];
-const capEmptySerial = windowScope.__vlCaptionWireSerial;
-capEmpty.root.removeAttribute('data-vl-model');
-capEmpty.root.setAttribute('data-vl-empty', '1');
-capEmpty.cues.innerHTML = '<p class="vl-note">등록된 최종 영상이 없다</p>';
-flushObservers(capEmpty.block);
-const capEmptyState = windowScope.__vlCaptionWorkbenchState;
-const capTorn = { model: capEmptyState.model, sel: capEmptyState.selectedId,
-  cueId: capEmpty.cueIdEl.value, text: capEmpty.textEl.value,
-  start: capEmpty.startEl.value, end: capEmpty.endEl.value,
-  cues: capEmpty.cues.innerHTML, msg: capEmpty.msg.textContent,
-  overlay: capEmpty.overlay.textContent,
-  paused: capEmpty.vid.video.paused, unload: capEmpty.vid.calls.unload,
-  src: capEmpty.vid.video.src,
-  ticks: (capEmpty.vid.listeners.timeupdate || []).length };
-flushObservers(capEmpty.block); // 반복 통보 — 무동작
-const capAfterRepeat = windowScope.__vlCaptionWireSerial;
-const capRecover = captionModel();
-capRecover.epoch = 'cap-epoch-recovered';
-capRecover.token = 'cap-tok-recovered';
-capRecover.cues[0].text = '회복 큐';
-capEmpty.root.removeAttribute('data-vl-empty');
-capEmpty.root.setAttribute('data-vl-model', JSON.stringify(capRecover));
-capEmpty.cues.innerHTML = '';
-flushObservers(capEmpty.block);
-const capRecBeforeOld = { cueId: capEmpty.cueIdEl.value, text: capEmpty.textEl.value,
-  time: capEmpty.vid.state.currentTime, plays: capEmpty.vid.calls.play };
-capEmptyOld({ target: { getAttribute: (k) => (k === 'data-vl-cue' ? 'a0000' : null) } });
-checkpoints.push({ case: 'placeholder-morph-tears-down-caption',
-  generationInvalidated: capAfterRepeat === capEmptySerial + 1 &&
-    windowScope.__vlCaptionWireSerial === capEmptySerial + 2,
-  stateCleared: capTorn.model === null && capTorn.sel === null,
-  editorCleared: capTorn.cueId === '' && capTorn.text === '' &&
-    capTorn.start === '' && capTorn.end === '',
-  cuesMsgOverlayCleared: capTorn.cues === '' && capTorn.msg === '' &&
-    capTorn.overlay === '',
-  videoUnloaded: capTorn.paused === true && capTorn.unload >= 1 && capTorn.src === '',
-  ticksRemoved: capTorn.ticks === 0,
-  recovered: capEmptyState.model.token === 'cap-tok-recovered' &&
-    capEmpty.cues.innerHTML.includes('회복 큐'),
-  oldClosureInert: capEmpty.cueIdEl.value === capRecBeforeOld.cueId &&
-    capEmpty.textEl.value === capRecBeforeOld.text &&
-    capEmpty.vid.state.currentTime === capRecBeforeOld.time &&
-    capEmpty.vid.calls.play === capRecBeforeOld.plays,
-  noServer: capEmpty.serverCalls.length === 0 });
 
 // ── 늦은 실패 응답 — 화면이 바뀐 뒤 도착한 null·거부의 내용은 새 화면에 닿지 않는다 ──
 // (A9 실측: null·거부 분기가 echoEpoch 검사 앞이라 무가드였다). 요청이 나간 배선 세대·
@@ -1692,68 +1244,6 @@ checkpoints.push({ case: 'fresh-propose-error-closes-draft',
   invalidShown: envProposeErr.panel.innerHTML.includes('적용 불가'),
   reasonKept: envProposeErr.panel.innerHTML.includes('스냅한 경계가 조각 밖이다'),
   notPending: windowScope.__vlVisualWorkbenchState.draft.pending === false });
-// 자막 — 같은 결함의 짝: 늦은 null·거부 무효, 신선한 진단 보존.
-const capLateEnv = captionEnv({ cap_save: () => ({ __hold: true }) });
-capLateEnv.cueIdEl.value = 'a0000';
-capLateEnv.textEl.value = '늦은 자막 저장';
-capLateEnv.click({ getAttribute: (k) => (k === 'id' ? 'cap-save' : null) });
-await new Promise((resolve) => setTimeout(resolve, 0));
-const capLateSwitch = captionModel();
-capLateSwitch.epoch = 'cap-epoch-late';
-capLateSwitch.token = 'cap-tok-late';
-capLateEnv.root.setAttribute('data-vl-model', JSON.stringify(capLateSwitch));
-capLateEnv.cues.innerHTML = '';
-flushObservers(capLateEnv.block);
-const capLateBefore = { msg: capLateEnv.msg.textContent,
-  lastMsg: windowScope.__vlCaptionWorkbenchState.lastMsg };
-capLateEnv.held[0].deferred.resolve(null);
-await new Promise((resolve) => setTimeout(resolve, 0));
-checkpoints.push({ case: 'late-null-inert-caption',
-  msgHonest: droppedHonest(capLateBefore.msg, capLateEnv.msg.textContent,
-    windowScope.__vlCaptionWorkbenchState.lastMsg, '비어') });
-capLateEnv.click({ getAttribute: (k) => (k === 'id' ? 'cap-save' : null) });
-await new Promise((resolve) => setTimeout(resolve, 0));
-const capLateSwitch2 = captionModel();
-capLateSwitch2.epoch = 'cap-epoch-late-2';
-capLateSwitch2.token = 'cap-tok-late-2';
-capLateEnv.root.setAttribute('data-vl-model', JSON.stringify(capLateSwitch2));
-capLateEnv.cues.innerHTML = '';
-flushObservers(capLateEnv.block);
-const capLateBefore2 = { msg: capLateEnv.msg.textContent,
-  lastMsg: windowScope.__vlCaptionWorkbenchState.lastMsg };
-capLateEnv.held[1].deferred.reject(new Error('자막 늦은 거부'));
-await new Promise((resolve) => setTimeout(resolve, 0));
-checkpoints.push({ case: 'late-reject-inert-caption',
-  msgHonest: droppedHonest(capLateBefore2.msg, capLateEnv.msg.textContent,
-    windowScope.__vlCaptionWorkbenchState.lastMsg, '자막 늦은 거부') });
-const capFreshFail = captionEnv({ cap_save: () => ({ __hold: true }) });
-capFreshFail.cueIdEl.value = 'a0000';
-capFreshFail.textEl.value = '신선한 자막';
-capFreshFail.click({ getAttribute: (k) => (k === 'id' ? 'cap-save' : null) });
-await new Promise((resolve) => setTimeout(resolve, 0));
-capFreshFail.held[0].deferred.resolve(null);
-await new Promise((resolve) => setTimeout(resolve, 0));
-const capFreshNullMsg = capFreshFail.msg.textContent;
-capFreshFail.click({ getAttribute: (k) => (k === 'id' ? 'cap-save' : null) });
-await new Promise((resolve) => setTimeout(resolve, 0));
-capFreshFail.held[1].deferred.reject(new Error('자막 거부 사유'));
-await new Promise((resolve) => setTimeout(resolve, 0));
-checkpoints.push({ case: 'fresh-failure-diagnostics-preserved-caption',
-  nullShown: capFreshNullMsg === '서버 응답이 비어 있습니다.',
-  rejectShown: capFreshFail.msg.textContent === '서버 오류입니다. 자막 거부 사유' });
-// 자막 — 실제 생산자 오류(빈 글자 저장)도 echo 없이 그대로 보인다(저장 중 잔류 없음).
-const capFreshServerErr = captionEnv({
-  cap_save: () => ({ ok: false,
-    error: '글자를 적으세요 — 지울 수 없다(수동 확정은 확정 단계다).' }),
-});
-capFreshServerErr.cueIdEl.value = 'a0000';
-capFreshServerErr.textEl.value = '';
-capFreshServerErr.click({ getAttribute: (k) => (k === 'id' ? 'cap-save' : null) });
-await new Promise((resolve) => setTimeout(resolve, 0));
-checkpoints.push({ case: 'fresh-server-error-shown-caption',
-  errorShown: capFreshServerErr.msg.textContent.includes('글자를 적으세요'),
-  notStuckSending: capFreshServerErr.msg.textContent.includes('보내는 중') === false });
-
 // ── 재계획 morph 뒤 선택 — 계획 세대가 바뀌면 옛 ID가 다른 구간에 재주조될 수 ──
 // 있다(ROOT 실측: 같은 ID 문자열이 다른 조각에 붙어 하이라이트가 재생 머리 밖
 // 구간을 가리켰다). 커밋된 선택(서버가 매핑으로 보존한 것)이 이기고 이어지는
@@ -1938,176 +1428,6 @@ checkpoints.push({ case: 'late-replan-after-refresh-inert',
   noExtraCommit: envInflight.propsCalls.length === inflightBefore.props,
   footnoteKept: envInflight.registry['vl-footnote'].textContent === inflightBefore.foot });
 
-// ── 확정 게시의 내려받기 — 등록 미디어 ID(`/media/<id>`) 링크만 안전한 <a>로 ──
-// 싣는다(사용자 글자·임의 경로가 HTML이 되는 길 없음). 이어오는 안내가 각주를
-// 갈아끼우면 링크도 함께 물러난다(낡은 머리 링크 잔류 없음).
-const capConfirmModel = captionModel();
-capConfirmModel.canConfirm = true;
-const capDl = captionEnv({
-  cap_confirm: () => ({ ok: true, echoEpoch: 'cap-epoch-1',
-    message: '확정 게시 완료 — 검토 머리 3. 내려받기는 아래 링크로.',
-    html: '<div id="caption-workbench"></div>',
-    downloads: [
-      { label: 'SRT', href: '/media/srt-file-id' },
-      { label: 'VTT', href: '/media/vtt-file-id' },
-      { label: '위험', href: 'https://example.invalid/x' },
-    ] }),
-  cap_save: () => ({ ok: true, echoEpoch: 'cap-epoch-1',
-    html: '<div id="caption-workbench"></div>', message: '저장했다' }),
-});
-capDl.root.setAttribute('data-vl-model', JSON.stringify(capConfirmModel));
-capDl.rewired();
-capDl.click({ getAttribute: (k) => (k === 'id' ? 'cap-confirm' : null) });
-await new Promise((resolve) => setTimeout(resolve, 0));
-const dlAnchors = (capDl.msg._children || [])
-  .filter((child) => child && child.tagName === 'a');
-checkpoints.push({ case: 'confirm-downloads-safe-anchors',
-  calledOnce: capDl.serverCalls.length === 1 &&
-    capDl.serverCalls[0].name === 'cap_confirm',
-  humanStatus: capDl.msg.textContent.includes('확정 게시 완료') &&
-    capDl.msg.textContent.includes('[') === false,
-  twoAnchors: dlAnchors.length === 2 &&
-    dlAnchors[0].href === '/media/srt-file-id' &&
-    dlAnchors[1].href === '/media/vtt-file-id',
-  labelsSafe: dlAnchors[0].textContent === 'SRT' &&
-    dlAnchors[1].textContent === 'VTT' &&
-    dlAnchors.every((a) => a.attrs.download === ''),
-  evilFiltered: (capDl.msg._children || [])
-    .every((child) => !child.href || String(child.href).indexOf('/media/') === 0),
-  replyApplied: capDl.propsCalls.length === 1 });
-// 커밋 morph 뒤 재배선 — 안내문 복원과 함께 상태의 링크도 다시 붙는다(ROOT 실측:
-// 옛 DOM에만 붙은 링크는 실제 커밋이 지운다 — 설치본 검증은 scratch 프로브).
-capDl.rewired();
-const repaintAnchors = (capDl.msg._children || [])
-  .filter((child) => child && child.tagName === 'a');
-checkpoints.push({ case: 'confirm-links-repaint-after-rewire',
-  messageRestored: capDl.msg.textContent.includes('확정 게시 완료'),
-  anchorsRepainted: repaintAnchors.length === 2 &&
-    repaintAnchors[0].href === '/media/srt-file-id' });
-capDl.cueIdEl.value = 'a0000';
-capDl.textEl.value = '이어오는 편집';
-capDl.click({ getAttribute: (k) => (k === 'id' ? 'cap-save' : null) });
-await new Promise((resolve) => setTimeout(resolve, 0));
-checkpoints.push({ case: 'confirm-links-clear-on-next-message',
-  messageFresh: capDl.msg.textContent.includes('저장했다'),
-  anchorsGone: (capDl.msg._children || []).length === 0 });
-
-// ── 같은 화면 생명의 낡은 원본 출력 방어 — 저장으로 머리가 오른 뒤 도착한 옛 ──
-// 원본 처리(등록·실행·검토)의 지연 출력이 **낮은 머리**의 HTML로 화면을 되돌리던
-// 길(ROOT 실측: 머리2 화면의 편집 칸·행·오버레이가 옛 글자로 굴러갔다). 토큰이
-// 같고 머리가 낮으면 지금 커밋된 모델을 다시 그린다 — 이어오는 저장도 지금 머리를
-// 싣는다. 같은 머리 재렌더는 그대로 받아들인다.
-const rollbackSaved = captionModel();
-rollbackSaved.epoch = 'cap-epoch-rb-saved';
-rollbackSaved.head = 4;
-rollbackSaved.cues[0].text = '최종 화면에서 수정했습니다';
-let rbSaveCalls = 0;
-const envRollback = captionEnv({
-  cap_save: (p) => {
-    rbSaveCalls += 1;
-    return rbSaveCalls <= 2
-      ? { ok: true, echoEpoch: p.epoch,
-        message: '저장했다 — 큐 `a0000`.',
-        html: '<div id="caption-workbench"></div>' }
-      : { __hold: true };
-  },
-});
-envRollback.cueIdEl.value = 'a0000';
-envRollback.textEl.value = '최종 화면에서 수정했습니다';
-envRollback.click({ getAttribute: (k) => (k === 'id' ? 'cap-save' : null) });
-await new Promise((resolve) => setTimeout(resolve, 0));
-envRollback.root.setAttribute('data-vl-model', JSON.stringify(rollbackSaved));
-envRollback.cues.innerHTML = '';
-flushObservers(envRollback.block);
-await new Promise((resolve) => setTimeout(resolve, 0));
-const rollbackSerial = windowScope.__vlCaptionWireSerial;
-// 옛 원본 출력의 지연 도착 — 같은 토큰, 저장 전 머리(3)의 옛 서버 뼈대.
-const rollbackStale = captionModel();
-rollbackStale.epoch = 'cap-epoch-rb-stale';
-rollbackStale.head = 3;
-rollbackStale.cues[0].text = 'ROOT F4 수동 자막';
-envRollback.root.setAttribute('data-vl-model', JSON.stringify(rollbackStale));
-envRollback.cues.innerHTML = '<button type="button" class="cap-row" data-vl-cue="a0000">' +
-  '<span class="cap-row-text">ROOT F4 수동 자막</span></button>';
-envRollback.textEl.value = 'ROOT F4 수동 자막';
-flushObservers(envRollback.block);
-await new Promise((resolve) => setTimeout(resolve, 0));
-await new Promise((resolve) => setTimeout(resolve, 0));
-checkpoints.push({ case: 'stale-native-lower-head-rolled-back',
-  headKept: windowScope.__vlCaptionWorkbenchState.model.head === 4,
-  cuesRepainted: envRollback.cues.innerHTML.includes('최종 화면에서 수정했습니다') &&
-    envRollback.cues.innerHTML.includes('ROOT F4 수동 자막') === false,
-  editorFromCommitted: envRollback.textEl.value === '최종 화면에서 수정했습니다',
-  repairNotRewire: windowScope.__vlCaptionWireSerial === rollbackSerial,
-  noLoop: (() => {
-    flushObservers(envRollback.block);
-    return windowScope.__vlCaptionWireSerial === rollbackSerial;
-  })() });
-// 이어오는 저장 — 화면이 묶인 머리(2)를 싣는다(옛 머리로 거부되는 길이 아니라).
-envRollback.cueIdEl.value = 'a0000';
-envRollback.textEl.value = '이어오는 편집';
-envRollback.click({ getAttribute: (k) => (k === 'id' ? 'cap-save' : null) });
-await new Promise((resolve) => setTimeout(resolve, 0));
-const rollbackCall = envRollback.serverCalls[envRollback.serverCalls.length - 1];
-checkpoints.push({ case: 'rollback-next-save-carries-current-head',
-  headCarried: rollbackCall && rollbackCall.payload.head === 4,
-  bothSaves: envRollback.serverCalls.filter((c) => c.name === 'cap_save').length === 2 });
-// 같은 머리의 재렌더(보통의 새로고침)는 그대로 받아들인다 — 세대만 갈린다.
-const rollbackRerender = captionModel();
-rollbackRerender.epoch = 'cap-epoch-rb-rerender';
-rollbackRerender.head = 4;
-rollbackRerender.cues[0].text = '최종 화면에서 수정했습니다';
-envRollback.root.setAttribute('data-vl-model', JSON.stringify(rollbackRerender));
-envRollback.cues.innerHTML = '';
-flushObservers(envRollback.block);
-await new Promise((resolve) => setTimeout(resolve, 0));
-checkpoints.push({ case: 'equal-head-rerender-still-accepted',
-  epochFresh: windowScope.__vlCaptionWorkbenchState.model.epoch === 'cap-epoch-rb-rerender',
-  headStill: windowScope.__vlCaptionWorkbenchState.model.head === 4 });
-// A10 실측 짝 — 대기 중인 진짜 저장 사이에 옛 원본 출력이 와도, 방어가 배선
-// 세대를 다시 만들지 않으므로 진짜 응답은 살아서 그대로 적용된다.
-envRollback.cueIdEl.value = 'a0000';
-envRollback.textEl.value = '대기 중 저장';
-envRollback.click({ getAttribute: (k) => (k === 'id' ? 'cap-save' : null) });
-await new Promise((resolve) => setTimeout(resolve, 0));
-const pendingSerial = windowScope.__vlCaptionWireSerial;
-const pendingProps = envRollback.propsCalls.length;
-const rollbackStaleAgain = captionModel();
-rollbackStaleAgain.epoch = 'cap-epoch-rb-stale-again';
-rollbackStaleAgain.head = 3;
-envRollback.root.setAttribute('data-vl-model', JSON.stringify(rollbackStaleAgain));
-envRollback.cues.innerHTML = '<button type="button" class="cap-row" data-vl-cue="a0000">' +
-  '<span class="cap-row-text">ROOT F4 수동 자막</span></button>';
-flushObservers(envRollback.block);
-await new Promise((resolve) => setTimeout(resolve, 0));
-await new Promise((resolve) => setTimeout(resolve, 0));
-checkpoints.push({ case: 'pending-save-survives-stale-native',
-  generationKept: windowScope.__vlCaptionWireSerial === pendingSerial,
-  headKeptStill: windowScope.__vlCaptionWorkbenchState.model.head === 4,
-  cuesStillCommitted: envRollback.cues.innerHTML.includes('최종 화면에서 수정했습니다') });
-envRollback.held[envRollback.held.length - 1].deferred.resolve({ ok: true,
-  echoEpoch: 'cap-epoch-rb-rerender', message: '저장했다 — 큐 `a0000`.',
-  html: '<div id="caption-workbench"></div>' });
-await new Promise((resolve) => setTimeout(resolve, 0));
-checkpoints.push({ case: 'pending-save-applies-after-repair',
-  messageShown: envRollback.msg.textContent.includes('저장했다'),
-  replyApplied: envRollback.propsCalls.length === pendingProps + 1 });
-// 같은 작업공간의 **새 실행** — 머리가 낮게 다시 시작해도(같은 토큰·다른 runId)
-// 의도한 현재 화면이니 방어가 문을 닫지 않는다(A10 11번째 짝).
-const newRunModel = captionModel();
-newRunModel.epoch = 'cap-epoch-rb-newrun';
-newRunModel.runId = 'run-2';
-newRunModel.head = 0;
-newRunModel.cues[0].text = '새 실행 첫 큐';
-envRollback.root.setAttribute('data-vl-model', JSON.stringify(newRunModel));
-envRollback.cues.innerHTML = '';
-flushObservers(envRollback.block);
-await new Promise((resolve) => setTimeout(resolve, 0));
-checkpoints.push({ case: 'new-run-lower-head-accepted',
-  runBound: windowScope.__vlCaptionWorkbenchState.model.runId === 'run-2',
-  headBound: windowScope.__vlCaptionWorkbenchState.model.head === 0,
-  cuesFromNewRun: envRollback.cues.innerHTML.includes('새 실행 첫 큐') });
-
 // 모델 칸(W-24 세션 G) — 실제 그리기는 모델을 뿌리의 숨은 첫 칸 글자로 싣고, 그라디오 morph는
 // 그 칸의 글자 마디만 고친다(characterData). 칸이 있으면 속성이 아니라 칸을 읽는다.
 const envHolder = visualEnv({});
@@ -2129,30 +1449,6 @@ checkpoints.push({ case: 'model-holder-rewires',
   textWatched: envHolder.block.__vlObservers[0].options.characterData === true &&
     envHolder.block.__vlObservers[0].options.subtree === true });
 
-// 자막 모델 칸 — 같은 실행의 낮은 머리(낡은 출력)는 속성이 아니라 칸의 글자를 지금 모델로
-// 되돌린다. 새 배선 세대는 만들지 않는다.
-const capHolderEnv = captionEnv({});
-const captionHolder = el({ attrs: { 'data-vl-model-json': '' } });
-capHolderEnv.root.firstElementChild = captionHolder;
-capHolderEnv.root.removeAttribute('data-vl-model');
-const capHolderModel = captionModel();
-capHolderModel.epoch = 'cap-epoch-holder';
-capHolderModel.head = 4;
-captionHolder.textContent = JSON.stringify(capHolderModel);
-flushObservers(capHolderEnv.block);
-const capHolderSerial = windowScope.__vlCaptionWireSerial;
-const capHolderStale = captionModel();
-capHolderStale.epoch = 'cap-epoch-holder-stale';
-captionHolder.textContent = JSON.stringify(capHolderStale);
-flushObservers(capHolderEnv.block);
-checkpoints.push({ case: 'caption-model-holder',
-  wired: windowScope.__vlCaptionWorkbenchState.model.epoch === 'cap-epoch-holder',
-  headKept: windowScope.__vlCaptionWorkbenchState.model.head === 4,
-  holderRestored: JSON.parse(captionHolder.textContent).head === 4,
-  noAttribute: capHolderEnv.root.getAttribute('data-vl-model') === null,
-  noRewire: windowScope.__vlCaptionWireSerial === capHolderSerial,
-  textWatched: capHolderEnv.block.__vlObservers[0].options.characterData === true });
-
 process.stdout.write(JSON.stringify(checkpoints));
 })().catch((err) => { console.error(err); process.exit(1); });
 """
@@ -2168,10 +1464,7 @@ def test_client_bootstraps_execute_real_interactions(tmp_path: Path) -> None:
     """
     harness = tmp_path / "v2f1-harness.js"
     harness.write_text(_NODE_HARNESS, encoding="utf-8")
-    payload = {
-        "visual": ui_facade.VISUAL_BOOTSTRAP_JS,
-        "caption": ui_facade.CAPTION_BOOTSTRAP_JS,
-    }
+    payload = {"visual": ui_facade.VISUAL_BOOTSTRAP_JS}
     payload_file = tmp_path / "v2f1-payload.json"
     payload_file.write_text(json.dumps(payload), encoding="utf-8")
     completed = subprocess.run(
@@ -2192,10 +1485,6 @@ def test_client_bootstraps_execute_real_interactions(tmp_path: Path) -> None:
     holds("visual-bootstrap", "wireVisual")
     holds("visual-bootstrap", "propsStashed")
     holds("visual-bootstrap", "serverStashed")
-    holds("caption-bootstrap", "watchRegistered")
-    holds("caption-bootstrap", "wireCaption")
-    holds("caption-bootstrap", "propsStashed")
-    holds("caption-bootstrap", "serverStashed")
     holds("rat-parse", "exact")
     holds("rat-parse", "parsedNotNaN")
     holds("rat-parse", "badRejected")
@@ -2263,28 +1552,6 @@ def test_client_bootstraps_execute_real_interactions(tmp_path: Path) -> None:
     holds("signature-rides", "epochRides")
     holds("prepare-no-track-default", "omitted")
     holds("prepare-no-track-default", "tokenAgain")
-    holds("caption-render", "rows")
-    holds("caption-render", "seekAttrs")
-    holds("caption-render", "manualMark")
-    holds("caption-render", "editorFilled")
-    holds("caption-render", "msFilled")
-    holds("cue-row-client-only", "seeked")
-    holds("cue-row-client-only", "played")
-    holds("cue-row-client-only", "noServer")
-    holds("cue-row-client-only", "refilled")
-    holds("caption-overlay", "inside")
-    holds("caption-overlay", "endExclusive")
-    holds("caption-overlay", "manual")
-    holds("overlay-toggle", "pressedOff")
-    holds("overlay-toggle", "noServerStill")
-    holds("caption-save", "calledOnce")
-    holds("caption-save", "headBound")
-    holds("caption-save", "signature")
-    holds("caption-save", "tokenCarried")
-    holds("caption-save", "applied")
-    holds("caption-late-dropped", "dropped")
-    holds("caption-confirm-gate", "blocked")
-    holds("caption-confirm-gate", "noServer")
     holds("child-click-traversal", "selected")
     holds("child-click-traversal", "seeked")
     holds("child-click-traversal", "noServer")
@@ -2311,25 +1578,6 @@ def test_client_bootstraps_execute_real_interactions(tmp_path: Path) -> None:
     holds("old-video-unloaded", "listenersDetached")
     holds("old-video-unloaded", "loopCleared")
     holds("old-video-unloaded", "newVideoWired")
-    holds("caption-child-click", "refilled")
-    holds("caption-child-click", "seeked")
-    holds("caption-child-click", "noServer")
-    holds("caption-old-closure-inert", "selectionKept")
-    holds("caption-old-closure-inert", "cuesKept")
-    holds("caption-old-closure-inert", "editorKept")
-    holds("caption-old-closure-inert", "seekKept")
-    holds("caption-old-closure-inert", "noServer")
-    holds("caption-old-video-unloaded", "paused")
-    holds("caption-old-video-unloaded", "unloaded")
-    holds("caption-old-video-unloaded", "listenersDetached")
-    holds("caption-old-video-unloaded", "overlayCleared")
-    holds("caption-old-video-unloaded", "selectionReset")
-    holds("caption-old-video-unloaded", "editorRefilled")
-    holds("caption-old-video-unloaded", "freshVideoWired")
-    holds("caption-save-rerender-keeps-video", "sameElement")
-    holds("caption-save-rerender-keeps-video", "noUnload")
-    holds("caption-save-rerender-keeps-video", "selectionKept")
-    holds("caption-save-rerender-keeps-video", "tickAlive")
     holds("deferred-commit-rewires-new-root", "noWireAtWatch")
     holds("deferred-commit-rewires-new-root", "wiredAfterCommit")
     holds("deferred-commit-rewires-new-root", "newRootWired")
@@ -2348,20 +1596,6 @@ def test_client_bootstraps_execute_real_interactions(tmp_path: Path) -> None:
     holds("direct-props-no-watch-observer-rewires", "newRootWired")
     holds("direct-props-no-watch-observer-rewires", "rendered")
     holds("direct-props-no-watch-observer-rewires", "noServer")
-    holds("caption-deferred-commit-rewires", "noWireAtWatch")
-    holds("caption-deferred-commit-rewires", "wiredAfterCommit")
-    holds("caption-deferred-commit-rewires", "cuesRendered")
-    holds("caption-deferred-commit-rewires", "selectionKept")
-    holds("caption-deferred-commit-rewires", "editorRefilled")
-    holds("caption-deferred-commit-rewires", "videoAlive")
-    holds("caption-deferred-commit-rewires", "tickAlive")
-    holds("caption-deferred-commit-rewires", "overlayFresh")
-    holds("caption-deferred-commit-rewires", "noFlushLoop")
-    holds("caption-direct-props-no-watch-rewires", "wiredByObserver")
-    holds("caption-direct-props-no-watch-rewires", "cuesRendered")
-    holds("caption-direct-props-no-watch-rewires", "editorRefilledFromCommit")
-    holds("caption-direct-props-no-watch-rewires", "videoAlive")
-    holds("caption-direct-props-no-watch-rewires", "noServer")
     holds("morph-save-rewires-same-root", "replyApplied")
     holds("morph-save-rewires-same-root", "wiredOnce")
     holds("morph-save-rewires-same-root", "freshModelBound")
@@ -2381,27 +1615,6 @@ def test_client_bootstraps_execute_real_interactions(tmp_path: Path) -> None:
     holds("morph-attribute-only-rewires", "attrWatched")
     for key in ("rewired", "epochFresh", "onceOnly", "textWatched"):
         holds("model-holder-rewires", key)
-    for key in ("wired", "headKept", "holderRestored", "noAttribute", "noRewire", "textWatched"):
-        holds("caption-model-holder", key)
-    holds("morph-caption-save-keeps-screen-life", "replyApplied")
-    holds("morph-caption-save-keeps-screen-life", "wiredOnce")
-    holds("morph-caption-save-keeps-screen-life", "cuesFromCommit")
-    holds("morph-caption-save-keeps-screen-life", "selectionKept")
-    holds("morph-caption-save-keeps-screen-life", "editorFromCommit")
-    holds("morph-caption-save-keeps-screen-life", "videoAlive")
-    holds("morph-caption-save-keeps-screen-life", "clickSingle")
-    holds("morph-caption-save-keeps-screen-life", "tickSingle")
-    holds("morph-caption-save-keeps-screen-life", "overlayFresh")
-    holds("morph-caption-save-keeps-screen-life", "messageKept")
-    holds("morph-caption-save-keeps-screen-life", "noLoop")
-    holds("morph-caption-save-keeps-screen-life", "saveOnce")
-    holds("morph-new-token-resets-screen", "rewired")
-    holds("morph-new-token-resets-screen", "selectionReset")
-    holds("morph-new-token-resets-screen", "editorFirstCue")
-    holds("morph-new-token-resets-screen", "videoElementKept")
-    holds("morph-new-token-resets-screen", "oldClosureInert")
-    holds("morph-new-token-resets-screen", "noServer")
-    holds("morph-new-token-resets-screen", "noLateRestoration")
     holds("postassign-rewires-without-observer", "wiredByScheduler")
     holds("postassign-rewires-without-observer", "modelFresh")
     holds("postassign-rewires-without-observer", "rendered")
@@ -2417,15 +1630,6 @@ def test_client_bootstraps_execute_real_interactions(tmp_path: Path) -> None:
     holds("placeholder-recovery-visual", "freshBound")
     holds("placeholder-recovery-visual", "cardsRendered")
     holds("placeholder-recovery-visual", "actionAlive")
-    holds("placeholder-morph-tears-down-caption", "generationInvalidated")
-    holds("placeholder-morph-tears-down-caption", "stateCleared")
-    holds("placeholder-morph-tears-down-caption", "editorCleared")
-    holds("placeholder-morph-tears-down-caption", "cuesMsgOverlayCleared")
-    holds("placeholder-morph-tears-down-caption", "videoUnloaded")
-    holds("placeholder-morph-tears-down-caption", "ticksRemoved")
-    holds("placeholder-morph-tears-down-caption", "recovered")
-    holds("placeholder-morph-tears-down-caption", "oldClosureInert")
-    holds("placeholder-morph-tears-down-caption", "noServer")
     holds("late-null-inert", "footnoteHonest")
     holds("late-null-inert", "thumbsKept")
     holds("late-reject-inert", "footnoteHonest")
@@ -2439,12 +1643,6 @@ def test_client_bootstraps_execute_real_interactions(tmp_path: Path) -> None:
     holds("fresh-propose-error-closes-draft", "invalidShown")
     holds("fresh-propose-error-closes-draft", "reasonKept")
     holds("fresh-propose-error-closes-draft", "notPending")
-    holds("late-null-inert-caption", "msgHonest")
-    holds("late-reject-inert-caption", "msgHonest")
-    holds("fresh-failure-diagnostics-preserved-caption", "nullShown")
-    holds("fresh-failure-diagnostics-preserved-caption", "rejectShown")
-    holds("fresh-server-error-shown-caption", "errorShown")
-    holds("fresh-server-error-shown-caption", "notStuckSending")
     holds("inflight-refresh-carries-shown-context", "replanWentFirst")
     holds("inflight-refresh-carries-shown-context", "refreshHolds")
     holds("inflight-refresh-carries-shown-context", "planCarried")
@@ -2470,33 +1668,6 @@ def test_client_bootstraps_execute_real_interactions(tmp_path: Path) -> None:
     holds("replan-morph-honors-committed-selection", "playheadKept")
     holds("replan-morph-honors-committed-selection", "videoKept")
     holds("replan-morph-local-selection-still-wins", "saveTargetsLocal")
-    holds("confirm-downloads-safe-anchors", "calledOnce")
-    holds("confirm-downloads-safe-anchors", "humanStatus")
-    holds("confirm-downloads-safe-anchors", "twoAnchors")
-    holds("confirm-downloads-safe-anchors", "labelsSafe")
-    holds("confirm-downloads-safe-anchors", "evilFiltered")
-    holds("confirm-downloads-safe-anchors", "replyApplied")
-    holds("confirm-links-repaint-after-rewire", "messageRestored")
-    holds("confirm-links-repaint-after-rewire", "anchorsRepainted")
-    holds("confirm-links-clear-on-next-message", "messageFresh")
-    holds("confirm-links-clear-on-next-message", "anchorsGone")
-    holds("stale-native-lower-head-rolled-back", "headKept")
-    holds("stale-native-lower-head-rolled-back", "cuesRepainted")
-    holds("stale-native-lower-head-rolled-back", "editorFromCommitted")
-    holds("stale-native-lower-head-rolled-back", "noLoop")
-    holds("rollback-next-save-carries-current-head", "headCarried")
-    holds("rollback-next-save-carries-current-head", "bothSaves")
-    holds("equal-head-rerender-still-accepted", "epochFresh")
-    holds("equal-head-rerender-still-accepted", "headStill")
-    holds("stale-native-lower-head-rolled-back", "repairNotRewire")
-    holds("pending-save-survives-stale-native", "generationKept")
-    holds("pending-save-survives-stale-native", "headKeptStill")
-    holds("pending-save-survives-stale-native", "cuesStillCommitted")
-    holds("pending-save-applies-after-repair", "messageShown")
-    holds("pending-save-applies-after-repair", "replyApplied")
-    holds("new-run-lower-head-accepted", "runBound")
-    holds("new-run-lower-head-accepted", "headBound")
-    holds("new-run-lower-head-accepted", "cuesFromNewRun")
 
 
 # ── 3. 서버 함수 — 실백엔드·합성 미디어 ──────────────────────────────────────
@@ -2560,6 +1731,7 @@ def test_visual_server_functions_bind_client_revision(tmp_path: Path) -> None:
         "vl_sync_recheck",  # 자막 시각 「다시 재기」(D55)
         "vl_relisten",  # 「다시 듣기」(D59 19b) — 차례만 올린다(유료 호출 0회)
         "vl_refill",  # 「빈칸 재전사 승인」(D59 19f) — 보이는 견적·digest를 대조한 뒤에만 작업
+        "vl_hydrogen_retext",  # 「글자 다시 받기(Hydrogen)」(W-114d) — 범위 digest를 대조한다
         "vl_snap_apply",  # 「시각 맞춤 적용(무료)」(D59 19h) — 화면이 본 제안 sha를 대조한다
         "vl_snap_revert",  # 「되돌리기」(D59 19h) — 화면이 본 리비전에만
         "vl_timing_truth",  # 「참 시작」·「참 끝」(W-25b) — 자막과 따로, 화면이 본 리비전에만
@@ -2929,7 +2101,7 @@ def test_visual_replan_and_epoch_distinct_across_switches(tmp_path: Path) -> Non
     b_workbench = server.visual_workbench_render(server.workspace_root())[1]
     assert "data-vl-empty" in b_workbench  # B에는 검토 리비전이 없다 — 빈 성공 아님
     reopened = server.open_workspace_view(str(root))
-    a_epoch = _model_of(reopened[-5])["epoch"]  # 영상 작업대 본문(-2는 출처 표시 칸)
+    a_epoch = _model_of(reopened[-3])["epoch"]  # 영상 작업대 본문(-1은 출처 표시 칸)
     again_epoch = _model_of(server.visual_workbench_render(root)[1])["epoch"]
     assert len({first_epoch, a_epoch, again_epoch}) == 3  # 매 그림마다 고유
     assert server.current_signature() == signature_before  # 같은 프로젝트 재오픈
@@ -3104,249 +2276,6 @@ def test_visual_pending_refresh_maps_old_plan_selection(tmp_path: Path) -> None:
     assert unknown_model["selectedId"] != selected
 
 
-# ── 자막 작업대 — 실제 등록·실행·저장·게이트 ─────────────────────────────────
-
-
-class _FakeTiming:
-    def timed_transcript(self, *, binding: Any, chunk: Any, settings: Any, on: date, **kw: Any):
-        from vlogsrt.project.raw.caption_provider import parse_timing_response
-
-        return parse_timing_response(
-            {"segments": [{"text": " 망원동 커피에 왔어요", "start": 0.5, "end": 2.5}]},
-            binding=binding,
-            model=settings.models.timing_model,
-            provider=settings.caption.timing_provider,
-            chunk_duration=chunk.duration,
-            chunk_offset=chunk.offset,
-        )
-
-
-class _FakeText:
-    def text_transcript(self, *, binding: Any, chunk: Any, settings: Any, on: date, **kw: Any):
-        from vlogsrt.project.raw.caption_provider import parse_text_response
-
-        return parse_text_response(
-            {"text": "망원동 카페에 왔어요"}, binding=binding, model=settings.models.text_model
-        )
-
-
-@needs_ffmpeg
-def test_caption_workbench_save_and_gates(tmp_path: Path) -> None:
-    """자막 작업대 — 모델·저장(글자·시각)·늦은 머리·게이트·오버레이 재생기."""
-    video = tmp_path / "final.mp4"
-    _encode(
-        [
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=size=320x180:rate=25:duration=4",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=440:duration=4",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-ac",
-            "1",
-            str(video),
-        ]
-    )
-    server = workspace_service.RawWorkspaceUi(
-        port=7860,
-        state_path=tmp_path / "state.json",
-        caption_providers=lambda: (_FakeTiming(), _FakeText()),
-    )
-    view = server.create_workspace_view("자막작업대", str(tmp_path / "ws"))
-    signature = view[1]
-    root = server.workspace_root()
-    assert root is not None
-
-    markdown, player = server.caption_register_view(signature, str(video), "f1", "자동(첫 트랙)")
-    assert "ready" in markdown
-    assert 'id="caption-overlay"' in player and 'id="cap-overlay-toggle"' in player
-    assert 'id="caption-video"' in player  # 기존 아이디 계약 유지
-    # 등록 전에는 작업대가 안내다.
-    assert "data-vl-empty" in server.caption_workbench_value(root)
-
-    server.caption_prepare_view(signature, "run-1")
-    note = server.caption_run_view(signature, "run-1", True)
-    assert _wait_terminal(server, root, note.split("`")[1]).status == "succeeded"
-    server.caption_review_view(signature, "run-1")
-
-    value = server.caption_workbench_value(root)
-    assert 'id="cap-cues"' in value and "<details" in value
-    model = _model_of(value)
-    cue = model["cues"][0]
-    assert cue["id"] == "a0000" and cue["startMs"] == "500" and cue["endMs"] == "2500"
-    assert cue["seek"] and cue["seek"] != ""  # 측정 매핑이 심어졌다(오버레이·행 이동용)
-    assert model["head"] is not None and model["signature"] == signature
-
-    fns = {fn.__name__: fn for fn in server._caption_server_functions()}
-    assert list(fns) == ["cap_save", "cap_confirm"]
-    saved = fns["cap_save"](
-        {
-            "epoch": model["epoch"],
-            "token": model["token"],
-            "signature": signature,
-            "head": model["head"],
-            "op": "text",
-            "cueId": "a0000",
-            "text": "손으로 고친 글자",
-            "startMs": "",
-            "endMs": "",
-        }
-    )
-    assert saved["ok"] and saved["echoEpoch"] == model["epoch"], saved
-    after = _model_of(saved["html"])
-    assert after["cues"][0]["text"] == "손으로 고친 글자"
-    assert after["cues"][0]["basis"] == "manual"
-    assert after["epoch"] != model["epoch"]
-    assert 'id="visual-video"' not in saved["html"] and "<script" not in saved["html"]
-
-    # 늦은 머리 저장 — 화면이 본 머리가 서버 머리와 다르면 거부.
-    late = fns["cap_save"](
-        {
-            "epoch": after["epoch"],
-            "token": after["token"],
-            "signature": signature,
-            "head": model["head"],
-            "op": "text",
-            "cueId": "a0000",
-            "text": "덮어쓰기",
-            "startMs": "",
-            "endMs": "",
-        }
-    )
-    assert late["ok"] is False and "늦었다" in late["error"]
-
-    # 시각 저장(ms 정수만).
-    timed = fns["cap_save"](
-        {
-            "epoch": after["epoch"],
-            "token": after["token"],
-            "signature": signature,
-            "head": after["head"],
-            "op": "time",
-            "cueId": "a0000",
-            "text": "",
-            "startMs": "600",
-            "endMs": "2600",
-        }
-    )
-    assert timed["ok"], timed
-    timed_model = _model_of(timed["html"])
-    assert timed_model["cues"][0]["startMs"] == "600" and timed_model["cues"][0]["endMs"] == "2600"
-    bad_ms = fns["cap_save"](
-        {
-            "epoch": timed_model["epoch"],
-            "token": timed_model["token"],
-            "signature": signature,
-            "head": timed_model["head"],
-            "op": "time",
-            "cueId": "a0000",
-            "text": "",
-            "startMs": "x",
-            "endMs": "2000",
-        }
-    )
-    assert bad_ms["ok"] is False
-
-    # 잘못된 서명 — 거부(500 아님).
-    bad_sig = fns["cap_save"](
-        {
-            "epoch": "x",
-            "signature": "없는작업공간",
-            "head": 1,
-            "op": "text",
-            "cueId": "a0000",
-            "text": "x",
-            "startMs": "",
-            "endMs": "",
-        }
-    )
-    assert bad_sig["ok"] is False and "바뀌었습니다" in bad_sig["error"]
-
-    # ms 환산은 정확히 — 이진 부동 잔여가 1200을 1199로 자르지 않는다(A5 실측).
-    assert ui_facade.fraction_ms(Fraction(1.2)) == 1200  # 이진 부동에서 온 값
-    assert ui_facade.fraction_ms(Fraction(6, 5)) == 1200  # 정확한 유리수
-    assert ui_facade.fraction_ms(1.2) == 1200
-    assert ui_facade.fraction_ms(Fraction(1199, 1000)) == 1199
-    assert ui_facade.fraction_ms(Fraction(1199500, 10**6)) == 1200  # 동률은 올린다
-
-    # 확정은 화면이 보낸 머리에 묶인다 — 옛 머리 번호로 최신 머리를 게시하지
-    # 못한다(A5 실측: head 0 요청이 head 1을 확정 게시하던 결함).
-    stale_confirm = fns["cap_confirm"](
-        {
-            "epoch": timed_model["epoch"],
-            "token": timed_model["token"],
-            "signature": signature,
-            "head": model["head"],
-        }
-    )
-    assert stale_confirm["ok"] is False and "확정이 늦었다" in stale_confirm["error"]
-    fresh_confirm = fns["cap_confirm"](
-        {
-            "epoch": timed_model["epoch"],
-            "token": timed_model["token"],
-            "signature": signature,
-            "head": timed_model["head"],
-        }
-    )
-    assert fresh_confirm["ok"], fresh_confirm
-    # 작업대 확정 흐름 — 사람 문장 + 등록 미디어 ID 내려받기만(원문 마크다운·해시는
-    # 고급 패널 상세가 싣는다). 링크는 실제 등록 파일로 제공된다.
-    assert "확정 게시 완료" in fresh_confirm["message"]
-    downloads = fresh_confirm["downloads"]
-    assert [(d["label"], d["href"].startswith("/media/")) for d in downloads] == [
-        ("SRT", True),
-        ("VTT", True),
-    ]
-    for entry in downloads:
-        media_id = entry["href"].rsplit("/", 1)[-1]
-        registered = next(
-            m for m in server.raw.list_media(root, kind="artifact") if m.file_id == media_id
-        )
-        assert (root / registered.relative_path).is_file()
-
-
-def test_caption_confirm_gate_reports_open_items(tmp_path: Path) -> None:
-    """확정 조건 표시 — 미해결 항목이 남으면 canConfirm 거짓과 이유가 값으로 간다."""
-    placeholder = ui_facade.caption_workbench_html({"empty": "안내"})
-    assert "data-vl-empty" in placeholder
-    model = {
-        "empty": None,
-        "epoch": "e",
-        "signature": "s",
-        "runId": "run-1",
-        "head": 2,
-        "cues": [
-            {
-                "id": "a0000",
-                "startMs": "0",
-                "endMs": "1",
-                "text": "t",
-                "basis": "auto",
-                "seek": "0",
-                "endSeek": "1",
-            }
-        ],
-        "canConfirm": False,
-        "blockReason": "열린 경고 1개",
-        "provenance": "",
-        "details": [],
-    }
-    value = ui_facade.caption_workbench_html(model)  # type: ignore[arg-type]
-    assert 'id="cap-confirm"' in value and "data-vl-model-json" in value
-    parsed = _model_of(value)
-    assert parsed["canConfirm"] is False and parsed["blockReason"] == "열린 경고 1개"
-
-
 # ── 배선 — 작업대 구성요소가 전환·새로고침 출력에 실제로 묶여 있다 ───────────
 
 
@@ -3366,9 +2295,10 @@ def test_stage_layout_declared_dom_and_css() -> None:
     # 목록은 무대 높이 전체, 타임라인은 재생기와 오른쪽 열 아래를 함께 덮는다(D57 B). 오른쪽 열의
     # 맨 위(quote)는 승인 단추가 묶는 분석 견적, 그 아래가 추천 구간 목록(ranges), 그 아래가
     # 「고급 도구」로 펼치는 패널이다(W-46b, D100 §7b — 네 영역).
+    # 그 아래 덱(deck)이 원본 범위 타임라인이다(W-85, D145 — Final Cut의 아래 덱).
     assert (
         '"thumbs player quote" "thumbs player ranges" "thumbs player panel" "thumbs timeline'
-        ' timeline"\n    "foot foot foot"' in css
+        ' timeline"\n    "deck deck deck" "foot foot foot"' in css
     )
     assert "#vl-thumbs { grid-area: thumbs; }" in css
     assert "#visual-preview { grid-area: player;" in css
@@ -3382,7 +2312,8 @@ def test_stage_layout_declared_dom_and_css() -> None:
     # 먼저, 목록·패널·상태 줄(사용자 결정 6 · D57 B).
     mobile = css.index("@media (max-width: 860px)")
     assert (
-        css.index('"quote" "player" "timeline" "ranges" "thumbs" "panel" "foot"', mobile) > mobile
+        css.index('"quote" "player" "timeline" "deck" "ranges" "thumbs" "panel" "foot"', mobile)
+        > mobile
     )
     assert "grid-template-columns: minmax(0, 1fr)" in css[mobile:]
     # 색은 작업대 토큰(D57) — 밝은·어두운 두 벌이 같은 이름을 쓴다. 본점(강조)은 하나다.
@@ -3397,17 +2328,12 @@ def test_stage_layout_declared_dom_and_css() -> None:
         assert f"var({token}" in css, token
     assert "#2f6db3" not in css  # 본점은 토큰 한 곳(design_tokens)에서만 값이 정해진다
     assert css.count("var(--vl-accent)") >= 3  # 강조(선택한 컷·손잡이·주 단추)
-    # 자막 무대 — 재생기와 큐 목록+편집기가 나란히, 좁은 화면에서도 재생기 먼저.
-    assert 'grid-template-areas: "player cues"' in css
-    assert "#caption-stage .vl-stage-cell { display: contents; }" in css
-    assert "#caption-player { grid-area: player; }" in css
-    assert "#caption-workbench { grid-area: cues; }" in css
-    assert css.index('"player" "cues"', mobile) > mobile
+    # 은퇴한 자막 무대(D162)의 규칙은 남지 않는다.
+    assert "#caption-" not in css and ".cap-" not in css
     # 네이티브 포장 — 그라디오 .html-container가 무대 칸 사이에 남아 배치를
     # 가로막던 결함(ROOT 1440x900 실측: 재생기 x116 w276 · 패널이 아래로). 무대
     # **범위 안에서만** 편다 — 범용 `.html-container` 덮어쓰기는 없다.
     assert "#visual-stage .html-container { display: contents !important; }" in css
-    assert "#caption-stage .html-container { display: contents !important; }" in css
     stripped_css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
     bare_selectors = [
         part.strip()
@@ -3417,7 +2343,7 @@ def test_stage_layout_declared_dom_and_css() -> None:
     ]
     assert bare_selectors, "html-container 규칙이 있어야 한다"
     for selector in bare_selectors:
-        assert selector.startswith(("#visual-stage", "#caption-stage")), selector
+        assert selector.startswith("#visual-stage"), selector
     # 껍데기도 첫 주소 표식을 심는다 — 첫 배선이 같은 주소를 다시 대입하지 않는다.
     shell = ui_facade.visual_player_shell_html("/media/x", "안내")
     assert 'data-vl-src="/media/x"' in shell
@@ -3437,7 +2363,11 @@ def test_stage_layout_has_no_fixed_list_width_or_inner_overflow() -> None:
     마지막에 이기던 구조라 치수는 한 블록에만 둔다.
     """
     css = ui_facade.WORKBENCH_CSS
-    assert "grid-template-columns: var(--vl-list-col) minmax(0, 1fr) var(--vl-panel-col);" in css
+    # 가운데 열은 Final Cut 위 덱 비율 토큰(W-85, D145) — 여전히 minmax(0, …)라 줄어든다.
+    assert (
+        "grid-template-columns: var(--vl-list-col) minmax(0, var(--vl-viewer-fr))"
+        " var(--vl-panel-col);" in css
+    )
     assert "height: max(var(--vl-stage-min-h), calc(100vh - var(--vl-stage-top)));" in css
     assert "grid-template-columns: minmax(0, 1fr); align-content: start" in css
     for stale in (
@@ -3553,7 +2483,6 @@ def test_global_shortcuts_declared_once() -> None:
     assert "VL_SEEK_SECONDS = 5" in js and "VL_FALLBACK_FRAME_SECONDS = 1 / 30" in js
     # ←/→는 렠 손잡이 몫이다 — 전역 표에 없다.
     assert '"ArrowLeft"' not in js.split("VL_SHORTCUT_ACTIONS = ", 1)[1].split("};", 1)[0]
-    assert "__vlGlobalKeysBound" not in ui_facade.CAPTION_BOOTSTRAP_JS
     assert js.count("W.__vlStageFitBound = true") == 1
     assert "--vl-stage-top" in js
 
@@ -3573,10 +2502,8 @@ const vis = { id: 'visual-video', offsetParent: {}, paused: true, ended: false, 
   currentTime: 10, duration: 100,
   play() { this.paused = false; this.played += 1; return Promise.resolve(); },
   pause() { this.paused = true; } };
-const hid = { id: 'caption-video', offsetParent: null, paused: true, touched: 0,
-  play() { this.touched += 1; throw new Error('hidden'); }, pause() { this.touched += 1; } };
 const foot = el({ id: 'vl-footnote' });
-const reg = { 'visual-video': vis, 'caption-video': hid, 'vl-footnote': foot,
+const reg = { 'visual-video': vis, 'vl-footnote': foot,
   'visual-stage': stage };
 const keyEl = el({ id: 'visual-workbench-block' });
 keyEl._doc = { getElementById(id) { return reg[id] || null; },
@@ -3647,7 +2574,7 @@ checkpoints.push({ case: 'global-shortcuts', bound, played,
   seek: near(j, 5) && near(jClamp, 0) && near(l, 15) && near(lClamp, 100),
   frame: near(period.t, 10 + 1 / 30) && period.paused && near(comma, 9.96),
   blocked, noVideo: noVideo.prevented === 0 && noVideoUp.prevented === 0,
-  playFailed: foot.textContent, hiddenTouched: hid.touched });
+  playFailed: foot.textContent });
 """
 
 
@@ -3668,9 +2595,7 @@ def test_global_shortcuts_execute_on_visible_video(tmp_path: Path) -> None:
     )
     payload = tmp_path / "payload.json"
     payload.write_text(
-        json.dumps(
-            {"visual": ui_facade.VISUAL_BOOTSTRAP_JS, "caption": ui_facade.CAPTION_BOOTSTRAP_JS}
-        ),
+        json.dumps({"visual": ui_facade.VISUAL_BOOTSTRAP_JS}),
         encoding="utf-8",
     )
     completed = subprocess.run(
@@ -3689,7 +2614,6 @@ def test_global_shortcuts_execute_on_visible_video(tmp_path: Path) -> None:
     assert report["blocked"] == [True] * 11, report["blocked"]
     assert report["noVideo"] is True
     assert report["playFailed"] == "재생할 수 없습니다: NotAllowedError"
-    assert report["hiddenTouched"] == 0
 
 
 def test_legend_names_three_tiers_with_pattern_cue() -> None:
@@ -3814,9 +2738,7 @@ def _run_tier_harness(tmp_path: Path) -> dict[str, Any]:
     )
     payload = tmp_path / "payload.json"
     payload.write_text(
-        json.dumps(
-            {"visual": ui_facade.VISUAL_BOOTSTRAP_JS, "caption": ui_facade.CAPTION_BOOTSTRAP_JS}
-        ),
+        json.dumps({"visual": ui_facade.VISUAL_BOOTSTRAP_JS}),
         encoding="utf-8",
     )
     completed = subprocess.run(
@@ -4156,125 +3078,6 @@ def test_advanced_context_rejects_old_and_stale_native_events(
 
 
 @needs_ffmpeg
-def test_advanced_caption_context_rejects_old_head_and_aba(
-    tmp_path: Path, local_socket: None
-) -> None:
-    """자막 고급(수동 편집·확정)의 실제 배선 — 옛 머리·옛 토큰 사건 거부(F2-2).
-
-    A6 실측 재현: 옛 머리(0)의 수동 편집이 머리 1→2로 적용되고, 이어 옛 머리
-    확정이 최신 머리를 게시하던 결함. 문맥 검증이 먼저면 큐·머리·확정 어느 것도
-    바뀌지 않는다.
-    """
-    video = tmp_path / "final.mp4"
-    _encode(
-        [
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=size=320x180:rate=25:duration=4",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=440:duration=4",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-ac",
-            "1",
-            str(video),
-        ]
-    )
-    server = workspace_service.RawWorkspaceUi(
-        port=7860,
-        state_path=tmp_path / "state.json",
-        caption_providers=lambda: (_FakeTiming(), _FakeText()),
-    )
-    view = server.create_workspace_view("자막문맥", str(tmp_path / "ws"))
-    signature = view[1]
-    root = server.workspace_root()
-    assert root is not None
-    server.caption_register_view(signature, str(video), "f1", "자동(첫 트랙)")
-    server.caption_prepare_view(signature, "run-1")
-    note = server.caption_run_view(signature, "run-1", True)
-    assert _wait_terminal(server, root, note.split("`")[1]).status == "succeeded"
-    server.caption_review_view(signature, "run-1")
-    server.build_blocks()
-    handlers = server._advanced_handlers
-
-    # 화면 문맥 — 검토 새로고침 배선이 내리는 값 그대로.
-    _md, _table, _player, _dd, _wb, nonce, shown_head = handlers["caption-refresh"](
-        signature, "run-1"
-    )
-    assert nonce == server._caption_lifetime_token
-    assert shown_head == server._caption_head_sequence
-
-    # 클라이언트 B의 수동 편집 — 머리가 한 칸 옮는다.
-    result = handlers["caption-edit"](
-        nonce,
-        shown_head,
-        signature,
-        "글자 교정",
-        "a0000",
-        "B 클라이언트 글자",
-        "",
-        "",
-        "",
-        "",
-        "",
-    )
-    head_after_b = result[-1]
-    assert head_after_b == shown_head + 1
-
-    # 늦은 클라이언트 A 사건 — 옛 머리 편집은 거부다(지속본 무오염).
-    with pytest.raises(gr.Error, match="늦었다"):
-        handlers["caption-edit"](
-            nonce,
-            shown_head,
-            signature,
-            "글자 교정",
-            "a0000",
-            "OLD NATIVE CAPTION EVENT",
-            "",
-            "",
-            "",
-            "",
-            "",
-        )
-    ws = server._caption_ws(root)
-    bundle = ws.review_bundle(server._caption_run_identity(server._require_caption_identity(root)))
-    assert bundle.state.head_revision == head_after_b
-    row = next(r for r in bundle.state.rows if r.cue.cue_id == "a0000")
-    assert row.cue.text == "B 클라이언트 글자"
-
-    # 옛 머리 확정도 거부 — 최신 머리를 몰래 게시하지 않는다(A6 결함의 축).
-    with pytest.raises(gr.Error, match="늦었다"):
-        handlers["caption-confirm"](nonce, shown_head, signature, "run-1", True)
-    published_dir = root / "final" / "captions" / "published"
-    assert not published_dir.exists() or not any(published_dir.iterdir())
-
-    # 지금 문맥 확정 — 게시된다.
-    published = handlers["caption-confirm"](nonce, head_after_b, signature, "run-1", True)
-    assert "확정 완료" in published[0]
-
-    # A→B→A — 옛 토큰 편집은 머리가 옮겨도 거부다.
-    server.create_workspace_view("B", str(tmp_path / "ws-b"))
-    server.open_workspace_view(str(root))
-    signature = server.current_signature()
-    server.caption_register_view(signature, str(video), "f1", "자동(첫 트랙)")
-    server.caption_prepare_view(signature, "run-1")
-    server.caption_review_view(signature, "run-1")
-    with pytest.raises(gr.Error, match="토큰"):
-        handlers["caption-edit"](
-            nonce, head_after_b, signature, "글자 교정", "a0000", "OLD ABA", "", "", "", "", ""
-        )
-
-
-@needs_ffmpeg
 def test_visual_token_lifetime_rejects_old_aba(tmp_path: Path) -> None:
     """A→B→A 수명 토큰 — 같은 서명·같은 머리여도 옛 사건은 거부된다(F1c)."""
     server = _new_server(tmp_path)
@@ -4312,7 +3115,7 @@ def test_visual_token_lifetime_rejects_old_aba(tmp_path: Path) -> None:
     # A→B→A — 서명은 같아도 토큰은 다시 파진다.
     server.create_workspace_view("B", str(tmp_path / "ws-b"))
     reopened = server.open_workspace_view(str(root))
-    model_a2 = _model_of(reopened[-5])  # 영상 작업대 본문(뒤에 경로 표시 칸 세 개가 붙는다)
+    model_a2 = _model_of(reopened[-3])  # 영상 작업대 본문(뒤에 경로 표시 칸 두 개가 붙는다)
     assert model_a2["signature"] == model["signature"]  # 결정적 서명 — 같다
     assert model_a2["token"] != token_a1  # 수명 토큰 — 다르다
 
@@ -4380,102 +3183,8 @@ def test_visual_token_lifetime_rejects_old_aba(tmp_path: Path) -> None:
     assert fresh_note["ok"] and "A2 메모" in fresh_note["html"]
 
 
-@needs_ffmpeg
-def test_caption_token_rejects_old_aba(tmp_path: Path) -> None:
-    """자막 작업대 수명 토큰 — A→B→A 뒤 옛 저장·확정은 거부된다(F1c)."""
-    video = tmp_path / "final.mp4"
-    _encode(
-        [
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=size=320x180:rate=25:duration=4",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=440:duration=4",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-ac",
-            "1",
-            str(video),
-        ]
-    )
-    server = workspace_service.RawWorkspaceUi(
-        port=7860,
-        state_path=tmp_path / "state.json",
-        caption_providers=lambda: (_FakeTiming(), _FakeText()),
-    )
-    view = server.create_workspace_view("자막ABA", str(tmp_path / "ws"))
-    signature = view[1]
-    root = server.workspace_root()
-    assert root is not None
-    server.caption_register_view(signature, str(video), "f1", "자동(첫 트랙)")
-    server.caption_prepare_view(signature, "run-1")
-    note = server.caption_run_view(signature, "run-1", True)
-    assert _wait_terminal(server, root, note.split("`")[1]).status == "succeeded"
-    server.caption_review_view(signature, "run-1")
-    model = _model_of(server.caption_workbench_value(root))
-    token_cap1 = model["token"]
-    fns = {fn.__name__: fn for fn in server._caption_server_functions()}
-
-    # A→B→A — 자막 토큰도 작업공간 전환마다 다시 파진다. 전환은 자막 화면 상태도
-    # 지우므로 같은 최종 영상을 다시 등록·검토해 A2 화면을 만든다(실행은 이미
-    # 끝났고 새 제공자 호출은 없다).
-    server.create_workspace_view("B", str(tmp_path / "ws-b"))
-    reopened = server.open_workspace_view(str(root))
-    signature = server.current_signature()
-    server.caption_register_view(signature, str(video), "f1", "자동(첫 트랙)")
-    server.caption_prepare_view(signature, "run-1")  # 실행 신원을 다시 세운다(로컬)
-    server.caption_review_view(signature, "run-1")
-    model2 = _model_of(server.caption_workbench_value(root))
-    assert model2["token"] != token_cap1
-    del reopened
-
-    # 옛 토큰 저장 — 머리가 맞아도 거부다.
-    old_save = fns["cap_save"](
-        {
-            "epoch": model["epoch"],
-            "token": token_cap1,
-            "signature": signature,
-            "head": model2["head"],
-            "op": "text",
-            "cueId": "a0000",
-            "text": "OLD CAPTION EVENT",
-            "startMs": "",
-            "endMs": "",
-        }
-    )
-    assert old_save["ok"] is False and "토큰" in old_save["error"]
-    old_confirm = fns["cap_confirm"](
-        {"epoch": model["epoch"], "token": token_cap1, "signature": signature, "head": 1}
-    )
-    assert old_confirm["ok"] is False and "토큰" in old_confirm["error"]
-    # 지금 토큰으로는 저장된다.
-    fresh = fns["cap_save"](
-        {
-            "epoch": model2["epoch"],
-            "token": model2["token"],
-            "signature": signature,
-            "head": model2["head"],
-            "op": "text",
-            "cueId": "a0000",
-            "text": "A2 자막",
-            "startMs": "",
-            "endMs": "",
-        }
-    )
-    assert fresh["ok"] and "A2 자막" in fresh["html"]
-
-
 def test_blocks_wire_workbench_outputs(tmp_path: Path, local_socket: None) -> None:
-    """조립 뒤 전환·페이지 로드 출력에 작업대 세 구성요소가 포함된다."""
+    """조립 뒤 전환·페이지 로드 출력에 작업대 두 구성요소가 포함된다."""
     server = _new_server(tmp_path)
     # 그라디오 .fillable 폭 상한은 CSS가 아니라 fill_width로 푼다(D50).
     blocks = server.build_blocks()
@@ -4489,14 +3198,14 @@ def test_blocks_wire_workbench_outputs(tmp_path: Path, local_socket: None) -> No
     outputs = server._selection_outputs()
     assert server._visual_player_block in outputs
     assert server._visual_workbench_block in outputs
-    assert server._caption_workbench_block in outputs
     assert server._signature_state in server._load_outputs()
     values = server.workspace_view_values()
     assert len(values) == len(outputs)
-    # 보기 꼬리: …·영상 작업대 본문(-5)·자막 작업대 본문(-4)·경로 표시 세 칸(-3~-1).
-    assert 'id="visual-workbench"' in values[-5]
-    assert 'id="caption-workbench"' in values[-4]
-    assert values[-2] == "" and values[-1] == ""  # 일반 작업공간 — 출처·최종 영상 표시는 비다
+    # 보기 꼬리: …·영상 작업대 본문(-3)·경로 표시 두 칸(-2~-1).
+    assert 'id="visual-workbench"' in values[-3]
+    assert values[-1] == ""  # 일반 작업공간 — 출처 표시는 비다
+    # 숨은 「자막」 탭은 걷었다(D162) — 그 구성요소가 조립에 남지 않는다.
+    assert "caption-workbench-block" not in by_id and "caption-stage" not in by_id
     # 3단 무대 — 껍데기·본문 두 구성요소가 같은 `#visual-stage` Row 안에 있고
     # 각자 vl-stage-cell 껍데기 계약을 단다(F1a: display:contents 대상).
     player_block = server._visual_player_block
@@ -4506,22 +3215,6 @@ def test_blocks_wire_workbench_outputs(tmp_path: Path, local_socket: None) -> No
     assert getattr(stage, "elem_id", None) == "visual-stage"
     assert "vl-stage-cell" in getattr(player_block, "elem_classes", ())
     assert "vl-stage-cell" in getattr(workbench_block, "elem_classes", ())
-    # 자막 무대 — 재생기·자막 작업대가 같은 `#caption-stage` Row 안에 나란히 있고
-    # 세팅(설정 안내·등록·실행)은 접힌 아코디언 안으로 물러난다(ROOT 실측 재배치).
-    cap_player = server._caption_player_html
-    cap_workbench = server._caption_workbench_block
-    cap_stage = cap_player.parent
-    assert cap_stage is not None and cap_stage is cap_workbench.parent
-    assert getattr(cap_stage, "elem_id", None) == "caption-stage"
-    assert "vl-stage-cell" in getattr(cap_player, "elem_classes", ())
-    assert "vl-stage-cell" in getattr(cap_workbench, "elem_classes", ())
-    assert server._settings_md is not None and server._settings_md.parent is not None
-    assert isinstance(server._settings_md.parent, gr.Accordion)
-    assert server._settings_md.parent is not cap_stage
-    # 자막 등록 기록(64자리 지문 등)도 접힌 상세로 — 같은 객체·출력 배선 그대로.
-    assert server._caption_md is not None
-    assert isinstance(server._caption_md.parent, gr.Accordion)
-    assert server._caption_md.parent is not cap_stage
     # 서버 함수가 구성요소에 실제로 붙어 있다(공개 server_functions 경계).
     assert server._visual_workbench_block.server_fns
     names = [fn.__name__ for fn in server._visual_workbench_block.server_fns]
@@ -4537,6 +3230,7 @@ def test_blocks_wire_workbench_outputs(tmp_path: Path, local_socket: None) -> No
         "vl_sync_recheck",  # 자막 시각 「다시 재기」(D55)
         "vl_relisten",  # 「다시 듣기」(D59 19b) — 차례만 올린다(유료 호출 0회)
         "vl_refill",  # 「빈칸 재전사 승인」(D59 19f) — 보이는 견적·digest를 대조한 뒤에만 작업
+        "vl_hydrogen_retext",  # 「글자 다시 받기(Hydrogen)」(W-114d) — 범위 digest를 대조한다
         "vl_snap_apply",  # 「시각 맞춤 적용(무료)」(D59 19h) — 화면이 본 제안 sha를 대조한다
         "vl_snap_revert",  # 「되돌리기」(D59 19h) — 화면이 본 리비전에만
         "vl_timing_truth",  # 「참 시작」·「참 끝」(W-25b) — 자막과 따로, 화면이 본 리비전에만
@@ -4544,16 +3238,9 @@ def test_blocks_wire_workbench_outputs(tmp_path: Path, local_socket: None) -> No
         "vl_snap_all_apply",  # 「확인한 영상 모두 적용(무료)」(W-25e) — 확인 때의 토큰을 대조한다
         "vl_source_detail",  # 고르지 않은 영상의 패널 칸 읽기(W-71, D122) — 쓰지 않는다
     ]
-    cap_names = [fn.__name__ for fn in server._caption_workbench_block.server_fns]
-    assert cap_names == ["cap_save", "cap_confirm"]
-    # 고급(기존) 패널 문맥 상태 — 네 gr.State가 만들어지고 실제 배선이 문맥
+    # 고급(기존) 패널 문맥 상태 — 두 gr.State가 만들어지고 실제 배선이 문맥
     # (수명 토큰·화면이 본 리비전/머리)을 입력·출력에 단다(F2-2, A6 실측).
-    for context_state in (
-        server._edit_context_state,
-        server._review_head_state,
-        server._caption_context_state,
-        server._caption_head_state,
-    ):
+    for context_state in (server._edit_context_state, server._review_head_state):
         assert isinstance(context_state, gr.State)
     wirings = server._advanced_wirings
     gated_review = {
@@ -4580,16 +3267,7 @@ def test_blocks_wire_workbench_outputs(tmp_path: Path, local_socket: None) -> No
         inputs, outputs = wirings[name]
         assert server._edit_context_state in inputs and server._review_head_state in inputs, name
         assert server._review_head_state in outputs and server._edit_context_state in outputs, name
-    for name in ("caption-edit", "caption-confirm"):
-        inputs, outputs = wirings[name]
-        assert server._caption_context_state in inputs, name
-        assert server._caption_head_state in inputs, name
-        assert server._caption_context_state in outputs, name
-        assert server._caption_head_state in outputs, name
-    for name in ("caption-register", "caption-refresh"):
-        inputs, outputs = wirings[name]
-        assert server._caption_context_state in outputs, name
-        assert server._caption_head_state in outputs, name
+    assert not any(name.startswith("caption-") for name in wirings)
     # 문맥 검증은 배선 핸들러 안에 있다 — 뷰 함수 서명(직접 호출 호환)은 그대로.
     import inspect
 
@@ -4597,22 +3275,6 @@ def test_blocks_wire_workbench_outputs(tmp_path: Path, local_socket: None) -> No
         "signature",
         "segment_id",
         "note",
-    ]
-    assert list(inspect.signature(server.caption_edit_view).parameters) == [
-        "signature",
-        "operation",
-        "cue_id",
-        "text",
-        "start_ms",
-        "end_ms",
-        "second_id",
-        "index_text",
-        "warning_key",
-    ]
-    assert list(inspect.signature(server.caption_confirm_view).parameters) == [
-        "signature",
-        "run_id",
-        "confirm",
     ]
     with pytest.raises(AttributeError):
         _ = server._visual_workbench_block.vl_missing  # 없는 함수는 그대로 없다

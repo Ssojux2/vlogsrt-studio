@@ -33,14 +33,12 @@ pytest.importorskip(
 
 import gradio as gr  # noqa: E402
 
+from tests.raw.gemini_echo import GeminiEcho
 from ui import workspace_service  # noqa: E402
 from vlogsrt.config import Config  # noqa: E402
 from vlogsrt.project.raw import browser_runtime  # noqa: E402
 from vlogsrt.project.raw import service as raw_service  # noqa: E402
 from vlogsrt.project.raw.config import OPENAI_LUNA_MODEL  # noqa: E402
-
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
 
 needs_ffmpeg = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
@@ -76,13 +74,13 @@ def test_production_transport_refuses_missing_key_with_actionable_error() -> Non
 
 
 def test_production_transport_builds_canonical_boundaries() -> None:
-    """키가 있으면 정본 경계(LiveTranscriber·Responses 클라이언트)로 만든다."""
+    """키가 있으면 정본 경계(관찰자 운반자·Responses 클라이언트)로 만든다."""
     transport = browser_runtime.production_live_transport(
         asr_approvals=lambda *a: {},
         luna_approvals=lambda *a: {},
         environ={"OPENAI_API_KEY": "sk-test-only"},
     )
-    assert type(transport.sender).__name__ == "LiveTranscriber"
+    assert type(transport.sender).__name__ == "LiveRequestCarrier"  # 오디오 전송 없음(D163)
     assert transport.cfg.api_max_retries >= 1  # 엔진 재시도 정책 그대로
     assert hasattr(transport.client, "responses")  # Luna가 쓰는 Responses 클라이언트
 
@@ -370,16 +368,8 @@ def test_a_claude_estimate_without_a_ceiling_mints_nothing(tmp_path: Path) -> No
 # ── 브라우저 생산 흐름 — 가짜 전송 경계로 끝까지(승인은 화면이 주조한다) ────────
 
 
-class _CountingSender:
-    """전사 전송 경계 가짜 — 보낸 수만 센다(유료 호출 없음)."""
-
-    def __init__(self, segments: list[dict[str, object]]) -> None:
-        self.calls: list[object] = []
-        self._segments = segments
-
-    def send_request(self, request, cfg, *, kind, stem, source):
-        self.calls.append(request)
-        return {"segments": list(self._segments)}
+class _CountingSender(GeminiEcho):
+    """Gemini 시간 엔진 가짜 — 보낸 수만 센다(유료 호출 없음, D163 — whisper 은퇴)."""
 
 
 class _CountingClient:
@@ -492,6 +482,7 @@ def test_browser_production_flow_fake_sends(tmp_path: Path, monkeypatch) -> None
     # OpenAI 가짜 Luna 클라이언트 — W-18(D58) 이전 작업공간처럼 gpt-6-luna를 저장해 둔다
     luna = replace(config.models, luna_model=OPENAI_LUNA_MODEL)
     server.raw.update_settings(root, replace(config, models=luna, network_mode="online"))
+    server.raw.set_new_hearing_engine(root, raw_service.TIMING_ENGINE_GEMINI)  # D163
     assets = {a.source_name: a for a in server.raw.list_source_assets(root)}
 
     # 주조 단위 확인 — 오디오 원본만 승인이 생기고, 측정값을 그대로 묶는다.
@@ -512,6 +503,7 @@ def test_browser_production_flow_fake_sends(tmp_path: Path, monkeypatch) -> None
         client=client,
         asr_approvals=server._production_asr_approvals,
         luna_approvals=server._production_luna_approvals,
+        timing_client=sender.client(),
     )
 
     # 1단계(전사) — Luna 0호출로 의미 승인 대기에 멈춘다.
@@ -567,6 +559,7 @@ def test_browser_production_refusals_are_zero_send(tmp_path: Path, monkeypatch) 
         asr_approvals=server._production_asr_approvals,
         luna_approvals=server._production_luna_approvals,
         on=date(2026, 10, 2),
+        timing_client=sender.client(),
     )
 
     # 확인란 없이는 시작하지 않는다.
@@ -588,7 +581,7 @@ def test_browser_production_refusals_are_zero_send(tmp_path: Path, monkeypatch) 
     assert sender.calls == []
     monkeypatch.setattr("vlogsrt.env.is_offline", lambda: False)
 
-    # 종료 예정일 이후 — 수명주기 문이 먼저 닫힌다(§11.10).
+    # 시간 엔진(Gemini)의 단가 재확인 기한 이후 — 수명주기 문이 먼저 닫힌다(§11.10·D84·D163).
     stale_transport = server._live_transport
     server._live_transport = LiveAnalysisTransport(
         sender=sender,
@@ -598,7 +591,7 @@ def test_browser_production_refusals_are_zero_send(tmp_path: Path, monkeypatch) 
         luna_approvals=server._production_luna_approvals,
         on=date(2027, 3, 1),
     )
-    with pytest.raises(gr.Error, match="종료 예정일"):
+    with pytest.raises(gr.Error, match="단가 재확인 기한"):
         server.analysis_live_asr_view(signature, None, True)
     assert sender.calls == []
     server._live_transport = stale_transport

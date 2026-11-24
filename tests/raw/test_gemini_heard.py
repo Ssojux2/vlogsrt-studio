@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 
-from tests.raw.test_cross_check_ui import _NODE_HARNESS
+from tests.raw.test_visual_workbench_ui import _NODE_HARNESS
 from ui import ui_facade
 from vlogsrt.project.raw import subtitle_suspects as ss
 from vlogsrt.project.raw.service import RawWorkspaceService
@@ -209,9 +209,7 @@ def test_the_editor_shows_what_gemini_heard_and_take_only_fills_the_text_box(
     )
     payload = tmp_path / "payload.json"
     payload.write_text(
-        json.dumps(
-            {"visual": ui_facade.VISUAL_BOOTSTRAP_JS, "caption": ui_facade.CAPTION_BOOTSTRAP_JS}
-        ),
+        json.dumps({"visual": ui_facade.VISUAL_BOOTSTRAP_JS}),
         encoding="utf-8",
     )
     completed = subprocess.run(

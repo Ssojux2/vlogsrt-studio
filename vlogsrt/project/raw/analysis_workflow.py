@@ -24,17 +24,19 @@ Luna 판정 → **비디오 격자 조정** → 불변 문서 기록.
 
 from __future__ import annotations
 
+import contextvars
+import functools
 import hashlib
-import inspect
 import json
 import math
-from collections.abc import Mapping, Sequence
+import threading
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from datetime import date as date_type
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, ClassVar, ParamSpec, Protocol, TypeVar
 
 from vlogsrt import log, oscompat, preprocess
 from vlogsrt.project.raw import asr_epoch as asr_epoch_store
@@ -42,6 +44,7 @@ from vlogsrt.project.raw import (
     cross_check,
     gemini_text,
     glossary,
+    hydrogen_text_pass,
     media_refs,
     request_usage,
     source_text,
@@ -68,17 +71,15 @@ from vlogsrt.project.raw.analysis_store import (
     new_analysis_revision_id,
 )
 from vlogsrt.project.raw.caption_provider import (
-    RescueTimingProvider,
     TimingProvider,
-    TransportTextProvider,
     gemini_timed_transcript,
     parse_timing_response,
     timing_provider_for,
-    words_provider_for,
 )
 from vlogsrt.project.raw.config import (
     ANALYSIS_PROVIDER_GOOGLE,
     GEMINI_TEXT_SETTINGS,
+    HYDROGEN_TEXT,
     SOURCE_TEXT_SETTINGS,
     TIMING_ENGINE_GEMINI,
     RawWorkflowConfig,
@@ -181,10 +182,6 @@ class ReplayFixtures:
     sources: Mapping[str, tuple[tuple[float, float, str], ...]] = field(default_factory=dict)
     chunks: Mapping[str, tuple[tuple[float, float, str], ...]] = field(default_factory=dict)
     windows: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
-    # 1단계 글자 경로(D59 19c)의 선언 — `text-fixtures.json`이 없으면 None(글자 경로는 묻지 않는다).
-    # `text_chunks`는 WAV sha → 글자, `text_sources`는 원본 sha → {청크 번호: 글자}다.
-    text_chunks: Mapping[str, str] | None = None
-    text_sources: Mapping[str, Mapping[int, str]] = field(default_factory=dict)
     # Gemini 글자 경로(W-35b)의 선언 — `word-text-fixtures.json`이 없으면 None(묻지 않는다).
     # `word_chunks`는 WAV sha → Gemini 응답, `word_sources`는 원본 sha → {청크 번호: 응답}이다.
     word_chunks: Mapping[str, Mapping[str, Any]] | None = None
@@ -210,25 +207,6 @@ class ReplayFixtures:
             exact=self.chunks,
             gemini_exact=self.word_chunks or {},
             gemini_declared=self.word_sources.get(source_sha256),
-        )
-
-    def text_for(self, source_sha256: str) -> source_text.ReplayTextProvider | None:
-        """원본 하나의 글자 재생자 — 글자 픽스처 파일이 없으면 None(글자 경로는 묻지 않는다).
-
-        파일이 있는데 그 청크의 선언이 없으면 그 청크는 글자 경로 실패로 남는다(지어내지 않는다).
-        """
-        if self.text_chunks is None:
-            return None
-        return source_text.ReplayTextProvider(
-            exact=self.text_chunks, declared=self.text_sources.get(source_sha256)
-        )
-
-    def words_for(self, source_sha256: str) -> gemini_text.ReplayWordProvider | None:
-        """원본 하나의 Gemini 글자 재생자 — 선언 파일이 없으면 None(묻지 않는다)."""
-        if self.word_chunks is None:
-            return None
-        return gemini_text.ReplayWordProvider(
-            exact=self.word_chunks, declared=self.word_sources.get(source_sha256)
         )
 
 
@@ -260,14 +238,11 @@ def load_replay_fixtures(directory: Path) -> ReplayFixtures:
         windows = {
             str(key): value for key, value in _mapping_field(payload, "windows", luna_path).items()
         }
-    text_chunks, text_sources = _load_text_fixtures(directory / "text-fixtures.json")
     word_chunks, word_sources = _load_word_fixtures(directory / "word-text-fixtures.json")
     return ReplayFixtures(
         sources=sources,
         chunks=chunks,
         windows=windows,
-        text_chunks=text_chunks,
-        text_sources=text_sources,
         word_chunks=word_chunks,
         word_sources=word_sources,
     )
@@ -299,34 +274,6 @@ def _fixture_response(value: object, path: Path) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise ReplayFixtureError(f"Gemini 응답 선언은 객체여야 한다: {path} ({value!r})")
     return dict(value)
-
-
-def _load_text_fixtures(
-    path: Path,
-) -> tuple[Mapping[str, str] | None, Mapping[str, Mapping[int, str]]]:
-    """1단계 글자 경로 재생 선언(D59 19c) — `{"chunks": {WAV sha: 글자}, "sources": {원본 sha:
-    {청크 번호: 글자}}}`. 파일이 없으면 (None, {}) — 재생 글자 경로는 묻지 않는다."""
-    if not path.is_file():
-        return None, {}
-    payload = _read_json(path)
-    chunks = {
-        str(sha): _fixture_text(value, path)
-        for sha, value in _mapping_field(payload, "chunks", path).items()
-    }
-    sources: dict[str, Mapping[int, str]] = {}
-    for sha, declared in _mapping_field(payload, "sources", path).items():
-        if not isinstance(declared, Mapping):
-            raise ReplayFixtureError(f"글자 선언이 객체가 아니다: {path} ({sha})")
-        sources[str(sha)] = {
-            int(index): _fixture_text(text, path) for index, text in declared.items()
-        }
-    return chunks, sources
-
-
-def _fixture_text(value: object, path: Path) -> str:
-    if not isinstance(value, str):
-        raise ReplayFixtureError(f"글자 선언은 문자열이어야 한다: {path} ({value!r})")
-    return value
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -372,6 +319,10 @@ class ReplayAsrProvider:
     3.5 Transcribe 응답 선언(`word-text-fixtures.json`: 글자 경로와 같은 요청이라 같은 응답이다)만
     Gemini 해석기로 재생하고, 없으면 보이는 실패다(W-52b1).
     """
+
+    CACHE_ORIGIN: ClassVar[str] = "ReplayAsrProvider"
+    """청크 캐시 열쇠의 제공자 칸(P-6, D160) — 클래스 이름이 아니라 이 고정 값이다. 지금 이름과
+    같아 열쇠 바이트가 그대로다 — 클래스 이름을 바꿔도 이 값은 그대로 둔다."""
 
     declared: Sequence[tuple[float, float, str]] | None
     exact: Mapping[str, tuple[tuple[float, float, str], ...]] = field(default_factory=dict)
@@ -470,6 +421,8 @@ class CountingAsrGate:
     limit: int
     remaining: int = 0
     reserved: int = 0
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+    """청크를 함께 보내는 일꾼들(P-5, D159)이 함께 예약한다 — 세고 빼는 사이에 끼어들지 못한다."""
 
     def __post_init__(self) -> None:
         self.remaining = self.limit
@@ -478,12 +431,13 @@ class CountingAsrGate:
         _ = key  # 재시도를 구분하지 않는다 — 호출 수가 곧 예산이다
         if isinstance(count, bool) or not isinstance(count, int) or count < 1:
             raise ValueError(f"예약 수는 1 이상 정수다: {count!r}")
-        if count > self.remaining:
-            raise AsrBudgetExhausted(
-                f"내부 ASR 청크 예약 한도를 넘었다 — 남음 {self.remaining}, 요청 {count}"
-            )
-        self.remaining -= count
-        self.reserved += count
+        with self._lock:
+            if count > self.remaining:
+                raise AsrBudgetExhausted(
+                    f"내부 ASR 청크 예약 한도를 넘었다 — 남음 {self.remaining}, 요청 {count}"
+                )
+            self.remaining -= count
+            self.reserved += count
 
 
 @dataclass(frozen=True, slots=True)
@@ -495,6 +449,10 @@ class ApprovedTimingProvider:
     **전송 직전에** 다시 본다(§14.3). 통과하면 예약 문을 지나 실제 전송 경계
     (`inner`)로 간다 — 그 안에서 오늘 날짜의 수명주기 검사가 먼저 돈다.
     """
+
+    CACHE_ORIGIN: ClassVar[str] = "ApprovedTimingProvider"
+    """청크 캐시 열쇠의 제공자 칸(P-6, D160) — 클래스 이름이 아니라 이 고정 값이다. 지금 이름과
+    같아 열쇠 바이트가 그대로다 — 클래스 이름을 바꿔도 이 값은 그대로 둔다."""
 
     inner: TimingProvider
     workflow: RawWorkflowConfig
@@ -549,15 +507,16 @@ class ApprovedPhaseAsrProvider:
     전송 경계가 맨 먼저 돈다(§11.10·§14.3).
     """
 
+    CACHE_ORIGIN: ClassVar[str] = "ApprovedPhaseAsrProvider"
+    """청크 캐시 열쇠의 제공자 칸(P-6, D160) — 클래스 이름이 아니라 이 고정 값이다. 지금 이름과
+    같아 열쇠 바이트가 그대로다 — 클래스 이름을 바꿔도 이 값은 그대로 둔다."""
+
     inner: TimingProvider
     workflow: RawWorkflowConfig
     understanding: RawUnderstandingSettings
     audio: SelectedAudio
     approval: AsrPhaseApproval
     gate: AsrReservationGate
-    rescue_gate: AsrReservationGate | None = None
-    """「다른 귀 기준 재전사」(D78) 예산 문 — 승인이 다시 묻기를 묶었을 때만. 없으면 온도를 단
-    요청(다시 묻기)은 보내지 않는다."""
 
     def timed_transcript(
         self,
@@ -568,7 +527,6 @@ class ApprovedPhaseAsrProvider:
         on: date_type,
         stem: str = "",
         source: str = "",
-        temperature: float | None = None,
     ) -> Any:
         require_live_asr_approval(
             self.approval,
@@ -588,8 +546,6 @@ class ApprovedPhaseAsrProvider:
                 f"청크 범위가 선택 오디오 밖이다: [{binding.sample_start}, {binding.sample_end})"
                 f" / {self.audio.sample_count} 샘플"
             )
-        if temperature is not None:
-            return self._rescue(binding, chunk, settings, on, stem, source, temperature)
         self.gate.reserve(count=1, key=str(binding.request_id))
         return self.inner.timed_transcript(
             binding=binding, chunk=chunk, settings=settings, on=on, stem=stem, source=source
@@ -598,39 +554,6 @@ class ApprovedPhaseAsrProvider:
     # ─────────────────────────────────────────────────────────────
     #  원본별 입력 지문 — 캐시 무효화의 열쇠(§14.2)
     # ─────────────────────────────────────────────────────────────
-
-    def _rescue(
-        self,
-        binding: Any,
-        chunk: Any,
-        settings: RawWorkflowConfig,
-        on: date_type,
-        stem: str,
-        source: str,
-        temperature: float,
-    ) -> Any:
-        """다시 묻기 한 번 — 승인의 다시 묻기 예산에서 센다(1차 예산과 따로). 문은 위에서 이미
-        지났다."""
-        if self.rescue_gate is None:
-            raise AnalysisApprovalError(
-                "승인이 다시 묻기를 묶지 않았다 — 다른 귀와 어긋난 조각을 다시 묻지 않는다"
-            )
-        if "temperature" not in inspect.signature(self.inner.timed_transcript).parameters:
-            raise AnalysisApprovalError(
-                "이 시간 엔진은 다시 묻기(온도)를 받지 않는다 — D78 다시 묻기는 whisper 원본에만"
-                " 있다(D92). 기본 온도로 몰래 다시 묻지 않는다(D28)"
-            )
-        self.rescue_gate.reserve(count=1, key=str(binding.request_id))
-        tempered = cast(RescueTimingProvider, self.inner)  # 온도 손잡이를 확인했다
-        return tempered.timed_transcript(
-            binding=binding,
-            chunk=chunk,
-            settings=settings,
-            on=on,
-            stem=stem,
-            source=source,
-            temperature=temperature,
-        )
 
 
 def source_input_fingerprint(
@@ -975,6 +898,9 @@ class AnalysisProviders:
     asr_approvals: Mapping[str, AsrPhaseApproval] | None = None
     luna_approvals: Mapping[str, object] | None = None
     on: date_type | None = None
+    preencode_clips: bool = False
+    """1단계 동안 Gemini 창 클립을 미리 자른다(P-4, D158) — 전체 승인(전사 + 영상 분석)일 때만
+    참이다. 「전사만」 승인은 그 클립을 쓰지 않으니 거짓이다."""
 
     def is_live(self) -> bool:
         return self.origin == luna.ORIGIN_LIVE
@@ -1005,11 +931,14 @@ def run_analysis(
     store.update_revision(revision.revision_id, status="analyzing", error=None)
     done = 0
     try:
+        context.check_cancel()
+        # 선택 밖 원본은 보존만 표시한다 — 트랜잭션 하나 · 원본 목록 읽기 하나로(D156).
+        unselected = [entry for entry in ordered if entry.asset_id not in assets]
+        _record_unanalyzed_rows(store, revision, _unanalyzed_rows(workspace, unselected))
         for entry in ordered:
             context.check_cancel()
             asset = assets.get(entry.asset_id)
             if asset is None:
-                _record_unanalyzed(store, revision, workspace, entry.asset_id, entry.ordinal)
                 context.advance()
                 continue
             _analyze_one(
@@ -1053,22 +982,49 @@ def run_analysis(
     )
 
 
-def _record_unanalyzed(
-    store: AnalysisStore,
-    revision: AnalysisRevision,
-    workspace: RawWorkspace,
-    asset_id: str,
-    source_order: int,
+def _unanalyzed_rows(workspace: RawWorkspace, entries: Sequence[Any]) -> list[tuple[str, int, str]]:
+    """선택 밖 원본의 (아이디, 순번, 이름) — 이름은 원본 목록 한 번에서 찾는다. 목록에 없으면
+    예전처럼 원본 하나를 물어 「없는 자산 ID」로 실패한다."""
+    if not entries:
+        return []
+    by_id = {asset.asset_id: asset for asset in workspace.list_source_assets()}
+    rows = []
+    for entry in entries:
+        asset = by_id.get(entry.asset_id) or workspace.source_asset(entry.asset_id)
+        rows.append((entry.asset_id, entry.ordinal, asset.source_name))
+    return rows
+
+
+def _record_unanalyzed_rows(
+    store: AnalysisStore, revision: AnalysisRevision, rows: Sequence[tuple[str, int, str]]
 ) -> None:
-    """선택에 들지 않은 원본 — 분석 없이 보존만 표시한다(순서는 항상 전부 산다)."""
-    _upsert(
-        store,
-        revision,
-        asset_id=asset_id,
-        source_order=source_order,
-        source_name=workspace.source_asset(asset_id).source_name,
-        fingerprint="-",
-        status="unanalyzed",
+    """선택에 들지 않은 원본 — 분석 없이 보존만 표시한다(순서는 항상 전부 산다).
+
+    한 트랜잭션으로 쓴다 — 예전에는 원본마다 연결 · 트랜잭션 · 다시 읽기였다(일괄 승인이면
+    라이브러리 크기의 제곱, D156)."""
+    now = _now()
+    store.upsert_source_results(
+        [
+            AnalysisSourceResult(
+                revision_id=revision.revision_id,
+                asset_id=asset_id,
+                source_order=source_order,
+                source_name=source_name,
+                fingerprint="-",
+                status="unanalyzed",
+                speech_status=None,
+                execution_mode=None,
+                document_path=None,
+                record_path=None,
+                window_count=0,
+                segment_count=0,
+                cached_from=None,
+                error=None,
+                created_at=now,
+                updated_at=now,
+            )
+            for asset_id, source_order, source_name in rows
+        ]
     )
 
 
@@ -1428,6 +1384,10 @@ def _transcribe_source(
     # 글자 귀는 소리가 없는 원본도 이 차례에 고정한다(W-35b) — 고정이 없으면 자막 문서가 생긴 뒤
     # 「이미 들은 영상」으로 읽혀 결속 꼬리표가 바뀐다(재개 지문이 어긋난다).
     text_ear.pin(workspace, asset.asset_id, asr_epoch, text_ear.resolve(workspace, asset.asset_id))
+    # 시간 엔진도 같다(D163) — 무성 원본이 고정 없이 자막 문서를 얻으면 2단계에서 「이미 들은 영상」
+    # (whisper)으로 읽혀 입력 지문이 어긋난다.
+    engine = timing_engine_for_model(workflow.models.timing_model)
+    timing_engine.pin(workspace, asset.asset_id, asr_epoch, engine.key)
     if audio is not None:
         context.check_cancel()
         asr_evidence, utterances, text_record = _hear_source(
@@ -1461,16 +1421,17 @@ def _hear_source(
     ear = text_ear.resolve(workspace, asset.asset_id)  # `_transcribe_source`가 이미 고정했다
     asr_provider = _asr_provider_for(providers, workflow, settings, audio, asset.asset_id)
     hearing = _Hearing(
-        asr_provider,
-        workspace.root / "cache" / "source-asr" / asset.asset_id,
-        asr_epoch,
-        _may_rescue(asr_provider),
+        asr_provider, workspace.root / "cache" / "source-asr" / asset.asset_id, asr_epoch
     )
     evidence = _first_hearing(
         revision, asset, settings, workflow, providers, audio, source_dir, hearing
     )
-    if ear == text_ear.EAR_NONE:  # Gemini 시간 엔진 — 다른 귀가 없다(D104)
+    if ear == text_ear.EAR_NONE:  # 이미 들은 Gemini 시간 엔진 원본 — 다른 귀가 없다(D104)
         return evidence, stage1.utterance_evidence(audio, evidence), None
+    if ear == text_ear.EAR_HYDROGEN:  # Gemini 원본의 줄 글자를 Hydrogen이 다시 듣는다(D187)
+        return _hydrogen_text(
+            workspace, revision, asset, workflow, providers, audio, evidence, source_dir
+        )
     if ear == text_ear.EAR_GEMINI:
         return _gemini_text(
             workspace, revision, asset, settings, workflow, providers, audio, evidence, source_dir
@@ -1485,7 +1446,6 @@ def _hear_source(
         audio,
         evidence,
         source_dir,
-        hearing if engine.rescue else None,
     )
 
 
@@ -1524,14 +1484,6 @@ def _first_hearing(
     )
 
 
-def _may_rescue(provider: TimingProvider) -> bool:
-    """새로 다시 물어도 되는가(D78) — 승인된 실제 호출은 승인이 다시 묻기 예산을 묶었을 때만이다.
-    묶지 않았으면 전에 채택한 답만 캐시에서 이어 쓴다(거절 기록을 남기며 두드리지 않는다)."""
-    if isinstance(provider, ApprovedPhaseAsrProvider):
-        return provider.rescue_gate is not None
-    return True
-
-
 def _cross_check_text(
     workspace: RawWorkspace,
     revision: AnalysisRevision,
@@ -1542,7 +1494,6 @@ def _cross_check_text(
     audio: SelectedAudio,
     evidence: AsrEvidence,
     source_dir: Path,
-    hearing: _Hearing | None = None,
 ) -> tuple[AsrEvidence, tuple[UtteranceEvidence, ...], dict[str, object]]:
     """1단계 글자 경로(D59 19c) — whisper가 들은 같은 WAV를 두 번째 귀에 묻고 게이트로 얹는다.
 
@@ -1564,8 +1515,6 @@ def _cross_check_text(
     )
     provider = _text_provider_for(providers, workflow, settings, audio, asset.asset_id, request)
     outcomes = source_text.run_text_pass(audio, evidence, request, provider)
-    if hearing is not None:
-        evidence = _rescue_evidence(audio, evidence, outcomes, workflow, hearing, request)
     utterances = stage1.utterance_evidence(audio, evidence)
     result = source_text.apply_text_pass(
         utterances, outcomes, request, audio.sample_rate, _seeded_rows(workspace, asset)
@@ -1605,6 +1554,75 @@ def _gemini_text(
     return evidence, result.utterances, result.record
 
 
+def _hydrogen_text(
+    workspace: RawWorkspace,
+    revision: AnalysisRevision,
+    asset: SourceAsset,
+    workflow: RawWorkflowConfig,
+    providers: AnalysisProviders,
+    audio: SelectedAudio,
+    evidence: AsrEvidence,
+    source_dir: Path,
+) -> tuple[AsrEvidence, tuple[UtteranceEvidence, ...], dict[str, object]]:
+    """Hydrogen 글자 귀(W-114c, D187) — Transcribe가 들은 같은 WAV를 Hydrogen에 묻고 줄 아이디로
+    글자를 얹는다. 시각·줄은 Transcribe 그대로다. 제공자가 없으면(승인이 글자를 묶지 않았다·재생)
+    아무것도 보내지 않고 캐시에 있는 답만 쓴다."""
+    request = hydrogen_text_pass.HydrogenPassRequest(
+        settings=HYDROGEN_TEXT,
+        on=providers.on or datetime.now(UTC).date(),
+        request_id=f"{revision.revision_id}:{asset.asset_id}",
+        workdir=source_dir,
+        cache_dir=workspace.root / "cache" / hydrogen_text_pass.TEXT_CACHE_DIRNAME / asset.asset_id,
+        origin=providers.origin,
+    )
+    utterances = stage1.utterance_evidence(audio, evidence)
+    provider = _hydrogen_provider_for(providers, workflow, asset.asset_id, request)
+    outcomes = hydrogen_text_pass.run_pass(audio, evidence, utterances, request, provider)
+    result = hydrogen_text_pass.apply_pass(
+        utterances, outcomes, request, _seeded_rows(workspace, asset)
+    )
+    return evidence, result.utterances, result.record
+
+
+def _hydrogen_provider_for(
+    providers: AnalysisProviders,
+    workflow: RawWorkflowConfig,
+    asset_id: str,
+    request: hydrogen_text_pass.HydrogenPassRequest,
+) -> hydrogen_text_pass.LiveHydrogenProvider | None:
+    """Hydrogen 글자 귀의 실제 제공자 — 1단계 승인이 글자 모델·신원·상한을 묶었을 때만(D110).
+
+    재생·승인이 글자를 묶지 않음은 조용히 None(캐시만)이다. 묶었는데 문이 닫히면(모델·신원
+    어긋남·단가 만료·키 없음) WARN하고 None이다 — 글자 실패는 전사를 막지 않는다(Transcribe
+    글자 그대로)."""
+    if not providers.is_live():
+        return None
+    approval = (providers.asr_approvals or {}).get(asset_id)
+    if approval is None or approval.text_model is None:
+        return None
+    try:
+        require_text_approval(
+            approval,
+            workflow=workflow,
+            identity=hydrogen_text_pass.text_identity(request.settings),
+            on=request.on,
+            model=request.settings.model,
+        )
+    except AnalysisApprovalError as error:
+        log.warn(f"Hydrogen 글자 귀를 묻지 않습니다 — Transcribe 글자 그대로: {error}")
+        return None
+    if providers.timing_client is None:
+        log.warn(
+            "Hydrogen 글자 귀를 묻지 않습니다 — Gemini 클라이언트가 없다(Transcribe 글자 그대로)"
+        )
+        return None
+    return hydrogen_text_pass.LiveHydrogenProvider(
+        client=providers.timing_client,
+        model=request.settings.model,
+        budget=approval.text_chunk_budget,
+    )
+
+
 def _word_provider_for(
     providers: AnalysisProviders,
     workflow: RawWorkflowConfig,
@@ -1613,80 +1631,18 @@ def _word_provider_for(
     asset_id: str,
     request: gemini_text.WordPassRequest,
 ) -> gemini_text.GeminiWordsProvider | None:
-    """Gemini 글자 경로의 제공자 — 재생 선언이거나, 승인이 이 경로의 글자를 묶은 실제 전송(W-35b).
-
-    글자 모델이 빠진 승인은 캐시만 쓴다. 글자 문이 닫히면 WARN하고 묻지 않는다(D39)."""
-    if not providers.is_live():
-        return None if providers.replay is None else providers.replay.words_for(audio.source_sha256)
-    approval = (providers.asr_approvals or {}).get(asset_id)
-    if approval is None or _approved_text_model(approval) is None:
-        return None
-    identity = gemini_text.text_identity(request.settings)
-    try:
-        require_text_approval(
-            approval,
-            workflow=workflow,
-            identity=identity,
-            on=request.on,
-            model=request.settings.model,
-        )
-    except AnalysisApprovalError as error:
-        log.warn(
-            "1단계 Gemini 글자 경로: 글자 요청을 보내지 않습니다 — whisper 글자 그대로 둡니다:"
-            f" {error}"
-        )
-        return None
-    return gemini_text.ApprovedPhaseWordProvider(
-        inner=words_provider_for(
-            sender=providers.live_sender, gemini_client=providers.timing_client
-        ),
-        workflow=workflow,
-        understanding=settings,
-        audio=audio,
-        approval=approval,
-        settings=request.settings,
-        approved_identity=identity,
-        gate=CountingAsrGate(limit=approval.text_chunk_budget),
-        approved_keys=None
-        if approval.text_chunk_keys is None
-        else frozenset(approval.text_chunk_keys),
-    )
-
-
-def _rescue_evidence(
-    audio: SelectedAudio,
-    evidence: AsrEvidence,
-    outcomes: Sequence[source_text.TextChunkOutcome],
-    workflow: RawWorkflowConfig,
-    hearing: _Hearing,
-    request: source_text.TextPassRequest,
-) -> AsrEvidence:
-    """다른 귀 답을 받은 청크만 넘긴다 — 빈 답은 「아무것도 못 들음」, 없는 청크는 「이번엔 답
-    없음」."""
-    received = {o.chunk_index: o.text for o in outcomes if o.status == source_text.STATUS_RECEIVED}
-    return stage1.rescue_disagreeing_chunks(
-        audio,
-        evidence,
-        received,
-        settings=workflow,
-        provider=hearing.provider,
-        on=request.on,
-        workdir=request.workdir,
-        cache_dir=hearing.cache_dir,
-        asr_epoch=hearing.asr_epoch,
-        may_ask=hearing.may_ask,
-    )
+    """Gemini 글자 경로(W-35b)의 제공자 — 새로 묻지 않는다(D163). 전에 산 답은 캐시에서 쓴다."""
+    del providers, workflow, settings, audio, asset_id, request
+    return None  # Gemini 글자 경로(D95)는 whisper와 함께 지웠다(D163) — 캐시만 쓴다
 
 
 @dataclass(frozen=True, slots=True)
 class _Hearing:
-    """1차 whisper를 들은 그 제공자·캐시·차례 — 다시 묻기(D78)가 같은 열쇠 계열을 쓴다. `may_ask`가
-    거짓이면 새로 묻지 않고 전에 채택한 답만 잇는다."""
+    """1차로 들은 그 제공자·캐시·차례 — 다시 묻기(D78)는 whisper와 함께 지웠다(D163)."""
 
     provider: TimingProvider
     cache_dir: Path
     asr_epoch: int
-    may_ask: bool = True
 
 
 def _seeded_rows(workspace: RawWorkspace, asset: SourceAsset) -> list[dict]:
@@ -1802,19 +1758,37 @@ def _asr_phase_source(
             document_path=str(artifact_path.relative_to(workspace.root)),
             window_count=int(artifact.get("window_count") or 0),
         )
-    asr_evidence, utterances, text_record = _transcribe_source(
-        context,
+    preencode = _start_clip_preencode(
         workspace,
-        revision,
         asset,
-        settings,
         workflow,
         providers,
-        audio=audio,
+        settings=settings,
         grid=grid,
-        source_dir=source_dir,
-        asr_epoch=asr_epoch,
+        audio=audio,
+        timeline=timeline,
     )
+    try:
+        asr_evidence, utterances, text_record = _transcribe_source(
+            context,
+            workspace,
+            revision,
+            asset,
+            settings,
+            workflow,
+            providers,
+            audio=audio,
+            grid=grid,
+            source_dir=source_dir,
+            asr_epoch=asr_epoch,
+        )
+    except BaseException:
+        if preencode is not None:
+            preencode.stop()
+        raise
+    finally:
+        if preencode is not None:
+            preencode.join()
     utterances, input_fp = _seed_stage1(
         workspace, asset, timeline, utterances, settings, workflow, input_fp, asr_epoch
     )
@@ -1968,6 +1942,106 @@ def _semantic_phase_source(
     )
 
 
+class _ClipPreencode:
+    """1단계(전사 API를 기다리는 동안) 창 클립을 미리 자르는 일꾼 하나(P-4, D158).
+
+    클립은 2단계가 쓰는 같은 캐시(`media_refs.clip_sampler` — 원본 sha · 소리 트랙 · 구간)에
+    들어가므로 2단계는 자르지 않고 원장 확인만 한다. 미리 자르기는 **덤**이다 — 실패는 경고만
+    남기고 2단계가 예전처럼 다시 자르거나 클립 없이 묻는다. 전사가 실패·취소되면 지금 클립
+    뒤에 멈춘다.
+    """
+
+    def __init__(self, run: Callable[[threading.Event], None]) -> None:
+        self._halt = threading.Event()
+        self._thread = threading.Thread(
+            target=contextvars.copy_context().run,
+            args=(run, self._halt),
+            name="vlogsrt-clip-preencode",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._halt.set()
+
+    def join(self) -> None:
+        self._thread.join()
+
+
+def _start_clip_preencode(
+    workspace: RawWorkspace,
+    asset: SourceAsset,
+    workflow: RawWorkflowConfig,
+    providers: AnalysisProviders,
+    *,
+    settings: RawUnderstandingSettings,
+    grid: VideoGrid,
+    audio: SelectedAudio | None,
+    timeline: CommonFileTimeline,
+) -> _ClipPreencode | None:
+    """전체 승인 · Gemini 분석이면 창 클립을 미리 자르기 시작한다 — 그 밖은 None(예전 그대로).
+
+    창의 문맥 구간은 길이 · 설정만으로 정해진다(발화는 창에 배정될 뿐 구간을 바꾸지 않는다) — 그래서
+    발화 없이 세운 창 계획이 2단계의 구간과 같다(시험이 잠근다)."""
+    if not providers.preencode_clips:
+        return None
+    if analysis_provider(workflow.models.luna_model) != ANALYSIS_PROVIDER_GOOGLE:
+        return None
+    windows = plan_common_windows(timeline, (), settings).windows
+    track = None if audio is None else audio.audio_stream_index
+    sampler = media_refs.clip_sampler(workspace, asset, audio_stream_index=track)
+
+    def run(halt: threading.Event) -> None:
+        made = 0
+        for window in windows:
+            seconds = window.context_end - window.context_start
+            if halt.is_set():
+                break
+            if seconds <= 0:
+                continue
+            try:
+                sampler.clip(start=window.context_start + grid.presentation_origin, seconds=seconds)
+                made += 1
+            except (RuntimeError, OSError) as error:
+                log.warn(
+                    f"분석 클립 미리 자르기 실패(2단계가 다시 한다) {asset.source_name}: {error}"
+                )
+        log.out(f"분석 클립 미리 자름: {asset.source_name} {made}/{len(windows)}")
+
+    return _ClipPreencode(run)
+
+
+def _window_cache_dirs(
+    workspace: RawWorkspace,
+    asset: SourceAsset,
+    settings: RawUnderstandingSettings,
+    workflow: RawWorkflowConfig,
+) -> tuple[Path, Path]:
+    """의미 판정 캐시 폴더 — (지금 쓰는 곳, 읽기만 하는 옛 곳)(P-6, D160).
+
+    판정 파일 이름은 요청 신원 sha이고 그 신원이 모델 · 증거(발화 글 포함)를 묶는다 — 그래서
+    폴더 열쇠에는 의미 분석 모델만 둔다. 예전 열쇠는 시간 · 글자 모델까지 묶어 시간 엔진만 바꿔도
+    같은 판정을 다른 폴더에서 찾지 못했다. 옛 폴더는 읽기만 한다 — 이미 산 판정을 다시 사지
+    않는다."""
+
+    def folder(models: object) -> Path:
+        key = hashlib.sha256(
+            json.dumps(
+                {
+                    "settings": asdict(settings),
+                    "models": models,
+                    "media": media_refs.fingerprint(workspace, asset.asset_id),
+                    "source": asset.content_sha256,
+                },
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        return workspace.root / "cache" / "source-luna" / asset.asset_id / key
+
+    current = folder({"luna_model": workflow.models.luna_model})
+    return current, folder(asdict(workflow.models))
+
+
 def _window_clips(
     context: JobContext,
     workspace: RawWorkspace,
@@ -2012,6 +2086,23 @@ def _window_clips(
     return clips
 
 
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _identity_scoped(run: Callable[_P, _R]) -> Callable[_P, _R]:
+    """한 원본의 분석 꼬리 동안 창 요청 신원을 한 번 잰다(D155) — 판정 캐시 찾기 · 응답자 공장 ·
+    문맥 · 판정 단계가 같은 창의 본문을 다시 짓지 않는다. 기억은 이 호출이 끝나면 사라진다."""
+
+    @functools.wraps(run)
+    def scoped(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        with luna.request_identity_scope():
+            return run(*args, **kwargs)
+
+    return scoped
+
+
+@_identity_scoped
 def _finish_source(
     context: JobContext,
     workspace: RawWorkspace,
@@ -2060,24 +2151,15 @@ def _finish_source(
             },
         )
 
-    cache_settings = hashlib.sha256(
-        json.dumps(
-            {
-                "settings": asdict(settings),
-                "models": asdict(workflow.models),
-                "media": media_refs.fingerprint(workspace, asset.asset_id),
-                "source": asset.content_sha256,
-            },
-            sort_keys=True,
-        ).encode()
-    ).hexdigest()
-    cache_dir = workspace.root / "cache" / "source-luna" / asset.asset_id / cache_settings
+    cache_dir, legacy_dir = _window_cache_dirs(workspace, asset, settings, workflow)
     cache_dir.mkdir(parents=True, exist_ok=True)
     cached_annotations = {}
     for evidence in evidence_windows:
-        payload = luna.build_semantic_payload(evidence, settings, workflow.models.luna_model)
-        digest = luna.luna_request_sha256(workflow.models.luna_model, payload)
+        digest = luna.semantic_request_sha256(evidence, settings, workflow.models.luna_model)
         candidate = cache_dir / (digest + ".json")
+        if not candidate.is_file():
+            # 옛 폴더(D160 이전)도 읽는다 — 이미 산 판정을 다시 사지 않는다.
+            candidate = legacy_dir / (digest + ".json")
         if candidate.is_file():
             try:
                 annotation = SemanticAnnotation(**json.loads(candidate.read_text(encoding="utf-8")))
@@ -2293,8 +2375,7 @@ def _approved_phase_provider(
     audio: SelectedAudio,
     approval: AsrPhaseApproval,
 ) -> ApprovedPhaseAsrProvider:
-    """승인의 두 예산 문 — 1차 청크 예산과, 승인이 묶었을 때만 다시 묻기 예산(D78)."""
-    rescue = approval.rescue_chunk_budget
+    """승인의 청크 예산 문 — 다시 묻기(D78)는 whisper와 함께 지웠다(D163)."""
     return ApprovedPhaseAsrProvider(
         inner=inner,
         workflow=workflow,
@@ -2302,7 +2383,6 @@ def _approved_phase_provider(
         audio=audio,
         approval=approval,
         gate=CountingAsrGate(limit=approval.chunk_budget),
-        rescue_gate=CountingAsrGate(limit=rescue) if rescue else None,
     )
 
 
@@ -2314,52 +2394,9 @@ def _text_provider_for(
     asset_id: str,
     request: source_text.TextPassRequest,
 ) -> source_text.SourceTextProvider | None:
-    """1단계 글자 경로의 제공자 — 재생 선언이거나, 승인(v2)이 글자를 묶은 실제 전송(D59 19d).
-
-    글자 모델이 빠진 승인은 캐시만 쓴다. 글자 문이 닫히면 WARN하고 묻지 않는다(D39)."""
-    if not providers.is_live():
-        return None if providers.replay is None else providers.replay.text_for(audio.source_sha256)
-    approval = (providers.asr_approvals or {}).get(asset_id)
-    model = _approved_text_model(approval)
-    if approval is None or model is None:
-        return None
-    identity = source_text.text_identity(request.settings, request.glossary_sha)
-    try:
-        require_text_approval(approval, workflow=workflow, identity=identity, on=request.on)
-    except AnalysisApprovalError as error:
-        log.warn(
-            f"1단계 글자 경로: 글자 요청을 보내지 않습니다 — whisper 글자 그대로 둡니다: {error}"
-        )
-        return None
-    return _approved_text_provider(providers, workflow, settings, audio, approval, identity)
-
-
-def _approved_text_provider(
-    providers: AnalysisProviders,
-    workflow: RawWorkflowConfig,
-    settings: RawUnderstandingSettings,
-    audio: SelectedAudio,
-    approval: AsrPhaseApproval,
-    identity: str,
-) -> source_text.ApprovedPhaseTextProvider:
-    """글자 문을 지난 승인의 전송 경계 — 상한·청크 집합은 승인(견적)이 묶은 그대로다."""
-    sender, cfg = providers.live_sender, providers.live_cfg
-    if sender is None or cfg is None:
-        raise AnalysisApprovalError(
-            "실제 호출에는 전송 경계(sender)와 엔진 설정(cfg)이 필요하다 — 사람이 공급한다"
-        )
-    keys = approval.text_chunk_keys
-    return source_text.ApprovedPhaseTextProvider(
-        inner=TransportTextProvider(sender=sender, cfg=cfg),  # type: ignore[arg-type]
-        workflow=workflow,
-        understanding=settings,
-        audio=audio,
-        approval=approval,
-        approved_model=str(approval.text_model),
-        approved_identity=identity,
-        gate=CountingAsrGate(limit=approval.text_chunk_budget),
-        approved_keys=None if keys is None else frozenset(keys),
-    )
+    """1단계 글자 경로(D59 19c)의 제공자 — 새로 묻지 않는다(D163). 전에 산 답은 캐시에서 쓴다."""
+    del providers, workflow, settings, audio, asset_id, request
+    return None  # gpt 다른 귀는 whisper와 함께 지웠다(D163) — 캐시만 쓴다
 
 
 def _reusable_phase(
@@ -2367,40 +2404,18 @@ def _reusable_phase(
 ) -> dict[str, Any] | None:
     """같은 리비전의 1단계 기록을 그대로 쓸 수 있으면 그 기록, 아니면 None(1단계를 다시 듣는다).
 
-    whisper 실패가 남았거나(`_phase_reusable`), 승인이 글자를 묶었거나(`_text_due`), 기록의 입력
+    전사 실패가 남았거나(`_phase_reusable`), 기록의 입력
     지문이 지금과 다르면 다시 듣는다. 입력이 다른 기록은 교차 확인이 켜진 리비전에서 생긴다(D59
     19d): 결속은 두 번째 귀 글자를 빼므로 용어집을 되돌리면 옛 리비전에 다시 붙는데, 그 기록은 다른
     글자로 심은 것이다. 다시 들어도 whisper·글자는 캐시에서 오고 새로 사는 것은 승인이 묶은
     만큼뿐이다."""
-    if not _phase_reusable(artifact_path) or _text_due(providers, asset.asset_id):
+    if not _phase_reusable(artifact_path):
         return None
     artifact = _read_asr_phase_artifact(artifact_path)
     if str(artifact.get("input_fingerprint")) == input_fp:
         return artifact
     log.warn(f"1단계 기록이 지금 입력과 달라 다시 듣습니다: {asset.source_name} (캐시 우선)")
     return None
-
-
-def _text_due(providers: AnalysisProviders, asset_id: str) -> bool:
-    """승인이 이 원본의 글자 요청을 묶었는가(D59 19d) — 그러면 1단계 기록을 다시 쓰지 않는다.
-
-    견적은 답이 캐시에 없는 청크가 있을 때만 글자 분량을 세고, 승인은 그때만 글자를 묶는다. 그
-    청크를 묻는 것이 이 승인의 일이므로 같은 리비전의 1단계 기록(글자 실패가 남은 「전사만」)을
-    그대로 쓰지 않고 다시 듣는다 — whisper는 청크 캐시에서 오고 글자는 답이 없는 청크만 묻는다."""
-    if not providers.is_live():
-        return False
-    return _approved_text_model((providers.asr_approvals or {}).get(asset_id)) is not None
-
-
-def _approved_text_model(approval: AsrPhaseApproval | None) -> str | None:
-    """1단계 승인이 묶은 글자 모델(D59 19d) — 승인이 없거나 글자 칸이 비었으면 None(요청 0회).
-
-    글자 칸은 「다른 귀로 교차 확인」이 켜져 있고 견적이 물을 청크를 셌을 때만 채워진다
-    (`browser_runtime.mint_asr_approvals`) — 사람이 본 견적 없이 유료 글자 요청이 나가는 길이
-    없다."""
-    if approval is None or not approval.text_model:
-        return None
-    return approval.text_model
 
 
 def _luna_responder_for(

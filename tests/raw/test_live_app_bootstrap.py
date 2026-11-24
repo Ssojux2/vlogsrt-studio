@@ -10,9 +10,6 @@ from tests.raw.test_browser_runtime import _make_media
 from tests.raw.test_selection_analysis import make_server, wait_until
 from vlogsrt.project.raw import analysis_workflow, browser_runtime
 
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
-
 
 def test_browser_loads_dotenv_opaquely_and_keeps_explicit_offline(monkeypatch):
     from vlogsrt import env

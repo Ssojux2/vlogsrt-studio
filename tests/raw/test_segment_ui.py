@@ -179,4 +179,4 @@ def test_browser_flow_plan_extract_refresh_and_playback(
     resolved = server.raw.resolve_media(root, file_id)
     assert resolved.kind == "artifact"
     assert resolved.path.is_file()
-    assert server._latest_package_path(root).endswith("clips/package_000001")
+    assert server._latest_package_path(root).endswith(str(Path("clips", "package_000001")))

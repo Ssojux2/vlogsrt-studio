@@ -1,9 +1,7 @@
 """W-31e(D92) — 화면: 「새로 듣는 전사 엔진」 칸·견적 문장·다시 듣기 문구·편집기 후보·키 경고.
 
-- 칸은 설정 서랍 「분석 모델」의 영상 분석 모델 옆이다. 새 엔진이 앞, whisper는 종료일을 단
-  「이전 엔진」이다.
-  칸과 상태 줄에는 금액이 없다(D57 결정 7) — 금액은 견적 문장만 말한다.
-- 바꾸면 작업공간 표지만 바뀐다(이미 들은 영상은 고정). 분석·승인 확인이 도는 동안은 바꾸지 않는다.
+- 고르는 칸은 없다 — whisper는 은퇴했고(D163) 새로 듣는 엔진은 Gemini 하나다. 설정 서랍
+  「분석 모델」의 상태 줄이 엔진·키를 말하고, 금액은 없다(D57 결정 7).
 - 견적 문장은 Gemini로 들을 영상이 있을 때만 엔진·분·공식 단가·금액을 말한다(whisper 견적은 그대로).
 - 승인 문: Gemini로 들을 영상이 있는데 키가 없거나 가격 미정이면 두 범위 모두 접수 전에 닫는다.
 - 다시 듣기 칸은 어느 엔진으로 들었고 다시 들으면 어느 엔진인지 말한다.
@@ -29,7 +27,6 @@ pytest.importorskip(
     exc_type=ImportError,
 )
 
-import gradio as gr  # noqa: E402
 
 from tests.raw.test_analysis_model_ui import PRICE_WORDS  # noqa: E402
 from tests.raw.test_browser_runtime import _estimates  # noqa: E402
@@ -58,24 +55,20 @@ def _engine_of(server: RawWorkspaceUi) -> str:
 # ── 칸 ───────────────────────────────────────────────────────────────────
 
 
-def test_the_dropdown_lists_the_new_engine_first_and_whisper_with_its_end_date(
-    tmp_path: Path,
-) -> None:
+def test_new_videos_hear_with_gemini_and_there_is_no_engine_choice(tmp_path: Path) -> None:
+    """whisper는 은퇴했다(D163) — 고르는 칸이 없고, 표지에 남은 「whisper」는 무시한다."""
     server = _server(tmp_path)
-    assert server.timing_engine_choices() == [
-        ("Gemini 3.5 Transcribe", GEMINI),
-        ("whisper-1 · 이전 엔진(2027-02-26 종료)", WHISPER),
-    ]
-    dropdown, status = server.timing_engine_controls()
-    assert dropdown.value == GEMINI  # D104 — 새로 듣는 영상의 기본은 Gemini다
+    root = server.workspace_root()
+    assert raw_service.TIMING_ENGINE_CHOICES == (GEMINI,)
+    assert not hasattr(server, "settings_timing_engine_view")
+    status = server.timing_engine_status()
     assert "새로 듣는 영상은 **Gemini 3.5 Transcribe**로 듣습니다" in status
     # 실응답 계약을 확인했다(W-52b2, D104) — 「H1 미확인」 줄은 더 뜨지 않는다
     assert ws.GEMINI_CONTRACT_UNCONFIRMED_NOTE not in status
-    server.settings_timing_engine_view(server.current_signature(), WHISPER)
-    _, status = server.timing_engine_controls()
-    assert "새로 듣는 영상은 **whisper-1**로 듣습니다" in status
-    assert "2027-02-26에 종료됩니다" in status
-    assert ws.GEMINI_CONTRACT_UNCONFIRMED_NOTE not in status
+    with pytest.raises(raw_service.RawWorkspaceError, match="은퇴"):
+        server.raw.set_new_hearing_engine(root, WHISPER)
+    server.raw._workspace(root).set_meta_value("stage1_timing_engine", WHISPER)  # 옛 작업공간
+    assert _engine_of(server) == GEMINI
 
 
 def test_an_unconfirmed_gemini_contract_still_gets_the_h1_line(
@@ -87,56 +80,23 @@ def test_an_unconfirmed_gemini_contract_still_gets_the_h1_line(
     profiles = dict(timing_engine.GEMINI_TRANSCRIBE_PROFILES)
     profiles[GEMINI_MODEL] = replace(profiles[GEMINI_MODEL], integration_test_status="not_run")
     monkeypatch.setattr(timing_engine, "GEMINI_TRANSCRIBE_PROFILES", profiles)
-    _, status = _server(tmp_path).timing_engine_controls()
+    status = _server(tmp_path).timing_engine_status()
     assert ws.GEMINI_CONTRACT_UNCONFIRMED_NOTE in status
-
-
-def test_switching_saves_the_workspace_marker_and_says_heard_videos_stay(tmp_path: Path) -> None:
-    server = _server(tmp_path)
-    status, dropdown = server.settings_timing_engine_view(server.current_signature(), GEMINI)
-    assert _engine_of(server) == GEMINI and dropdown.value == GEMINI
-    assert "**Gemini 3.5 Transcribe**로 듣습니다" in status
-    assert "이미 들은 영상은 그대로" in status and "「다시 듣기」" in status
-    assert "공식 단가 확인됨(2026-10-26 확인, 2027-01-26까지 다시 확인)" in status
-    # 칸·상태 줄에는 금액이 없다 — 금액은 견적만 말한다(D57 결정 7)
-    assert not any(word in status for word in PRICE_WORDS), status
-    assert not any("$" in label for label, _ in server.timing_engine_choices())
-    status, dropdown = server.settings_timing_engine_view(server.current_signature(), WHISPER)
-    assert _engine_of(server) == WHISPER and dropdown.value == WHISPER
 
 
 def test_the_status_names_the_key_and_warns_to_use_a_paid_key(tmp_path: Path) -> None:
     server = _server(tmp_path)
-    server.settings_timing_engine_view(server.current_signature(), GEMINI)
     missing = server.timing_engine_status()
+    assert "이미 들은 영상은 그대로" in missing and "「다시 듣기」" in missing
+    assert "공식 단가 확인됨(2026-10-26 확인, 2027-01-26까지 다시 확인)" in missing
+    # 상태 줄에는 금액이 없다 — 금액은 견적만 말한다(D57 결정 7)
+    assert not any(word in missing for word in PRICE_WORDS), missing
     assert "Gemini 키(`GEMINI_API_KEY`) 없음" in missing
     assert ws.GEMINI_TRANSCRIBE_PAID_KEY_NOTE in missing
     server._startup_gemini = object()
     present = server.timing_engine_status()
     assert "Gemini 키(`GEMINI_API_KEY`) 확인됨 — 값은 표시하지 않습니다" in present
     assert ws.GEMINI_TRANSCRIBE_PAID_KEY_NOTE in present
-
-
-def test_an_unknown_engine_is_refused_and_a_busy_workspace_is_left_alone(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    server = _server(tmp_path)
-    with pytest.raises(gr.Error):
-        server.settings_timing_engine_view(server.current_signature(), "whisper-2")
-    monkeypatch.setattr(server, "_analysis_busy", lambda root: True)
-    status, dropdown = server.settings_timing_engine_view(server.current_signature(), WHISPER)
-    assert status.startswith(ws.TIMING_ENGINE_BUSY_TEXT)
-    assert _engine_of(server) == GEMINI and dropdown.value == GEMINI  # 기본 그대로(D104)
-
-
-def test_a_switch_requotes_the_library(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    server = _server(tmp_path)
-    requoted: list[Path] = []
-    monkeypatch.setattr(server, "_after_model_change", requoted.append)
-    server.settings_timing_engine_view(server.current_signature(), WHISPER)  # 기본(Gemini)에서
-    assert requoted == [server.workspace_root()]
-    server.settings_timing_engine_view(server.current_signature(), WHISPER)  # 같은 값은 그대로
-    assert len(requoted) == 1
 
 
 # ── 견적 문장 · 승인 문 ────────────────────────────────────────────────────
@@ -195,15 +155,10 @@ def test_the_relisten_panel_names_the_engine_it_heard_with_and_will_hear_with(
     root = server.workspace_root()
     whisper_view = raw_service.RawWorkflowConfig()
     monkeypatch.setattr(server.raw, "source_settings", lambda root, sid: whisper_view)
-    server.raw.set_new_hearing_engine(root, WHISPER)  # 이전 엔진을 고른 작업공간(D104)
-    # whisper뿐이면 줄이 없다 — 작업대 바이트가 W-31e 이전 그대로다
-    assert server._relisten_engine_text(root, "a1", pending=False) is None
-    assert server._relisten_engine_text(root, "a1", pending=True) is None
-    server.raw.set_new_hearing_engine(root, GEMINI)
     change = server._relisten_engine_text(root, "a1", pending=False)
     assert change == (
         "이 영상의 원본 자막은 whisper-1로 들었습니다. 다시 들으면 Gemini 3.5 Transcribe로"
-        " 듣습니다 (「새로 듣는 전사 엔진」 설정)."
+        " 듣습니다 (whisper는 은퇴했습니다)."
     )
     gemini_view = replace(
         whisper_view, models=replace(whisper_view.models, timing_model=GEMINI_MODEL)

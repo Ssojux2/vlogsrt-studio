@@ -27,21 +27,18 @@ import pytest
 
 from tests.raw.test_review_workspace import _wait_terminal, _write_replay_fixtures
 from vlogsrt import preprocess
-from vlogsrt.project.raw import render_export, render_plan, timeline_srt, timing_engine
-from vlogsrt.project.raw import service as raw_service
-from vlogsrt.project.raw.config import RENDER_SETTINGS, TIMING_ENGINE_WHISPER
+from vlogsrt.project.raw import render_export, render_plan, timeline_srt
+from vlogsrt.project.raw.config import RENDER_SETTINGS
 from vlogsrt.project.raw.jobs import JobCancelledError
 from vlogsrt.project.raw.service import ANALYSIS_PROXY_JOB_KIND, RawWorkspaceService
 from vlogsrt.project.timebase import milliseconds_half_up
 from vlogsrt.task_runtime import cancellation_scope
 
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
 pytestmark = [
     pytest.mark.skipif(
         shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
         reason="ffmpeg/ffprobe가 없는 환경",
     ),
-    pytest.mark.usefixtures("whisper_for_new_hearings"),
 ]
 
 F = Fraction
@@ -356,10 +353,7 @@ def trip(tmp_path_factory: pytest.TempPathFactory) -> Folder:
     _encode(folder / "B_hd.mp4", "1920x1080", 30, 9, created="2026-09-01T10:00:00Z")
     _encode(folder / "C_tall.mp4", "1080x1920", 24, 2, created="2026-09-01T09:55:00Z")
     originals = {name: _identity(folder / name) for name in UTTERANCES}
-    with pytest.MonkeyPatch.context() as patch:  # D104 — 모듈 범위라 파일 머리 표시보다 먼저 돈다
-        patch.setattr(timing_engine, "DEFAULT_NEW_HEARING_ENGINE", TIMING_ENGINE_WHISPER)
-        patch.setattr(raw_service, "DEFAULT_NEW_HEARING_ENGINE", TIMING_ENGINE_WHISPER)
-        return _trip(folder, originals)
+    return _trip(folder, originals)
 
 
 def _trip(folder: Path, originals: dict[str, tuple[str, int]]) -> Folder:
@@ -607,7 +601,7 @@ def test_a_source_the_renderer_refuses_is_left_out_and_named_not_blocking(
 def test_nothing_to_keep_is_refused_before_any_folder(trip: Folder) -> None:
     before = sorted(p.name for p in (trip.root / "export").iterdir())
     strict = dataclasses.replace(RENDER_SETTINGS, min_part_seconds=F(100))
-    with pytest.raises(render_export.RenderExportError, match="남길 추천 구간이 없어"):
+    with pytest.raises(render_export.RenderExportError, match="남길 보통·추천 구간이 없어"):
         render_export.export_draft(trip.service, trip.root, settings=strict)
     assert sorted(p.name for p in (trip.root / "export").iterdir()) == before
 
@@ -621,7 +615,7 @@ def test_the_service_job_renders_and_the_activity_label_names_it(trip: Folder) -
     assert record.kind == "render_export"
     latest = trip.service.latest_render_export(trip.root)
     assert latest is not None and Path(latest["video"]).is_file()
-    assert workspace_service.ACTIVITY_JOB_LABELS["render_export"] == "추천만 이어붙이기"
+    assert workspace_service.ACTIVITY_JOB_LABELS["render_export"] == "최종출력"
     assert "render_export" in workspace_service.CLOSE_CANCELS_JOB_KINDS
 
 

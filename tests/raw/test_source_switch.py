@@ -113,9 +113,7 @@ def _run(tmp_path: Path, case: str) -> dict[str, Any]:
     )
     payload = tmp_path / "payload.json"
     payload.write_text(
-        json.dumps(
-            {"visual": ui_facade.VISUAL_BOOTSTRAP_JS, "caption": ui_facade.CAPTION_BOOTSTRAP_JS}
-        ),
+        json.dumps({"visual": ui_facade.VISUAL_BOOTSTRAP_JS}),
         encoding="utf-8",
     )
     completed = subprocess.run(
@@ -159,11 +157,8 @@ def test_failure_of_the_earlier_video_does_not_overwrite_the_footnote(tmp_path: 
 
 # ── 서버 — 보는 영상은 마지막에 누른 영상이다 ─────────────────────────────────
 
-pytestmark_whisper = pytest.mark.usefixtures("whisper_for_new_hearings")
-
 
 @needs_ffmpeg
-@pytestmark_whisper
 def test_library_approval_keeps_the_video_clicked_while_it_fans_out(tmp_path, monkeypatch):
     ui, _sender, client, root, ids = setup_library(tmp_path, monkeypatch)
     client.resume.set()
@@ -218,7 +213,6 @@ def _active_preview(ui, root, source_id: str):
 
 
 @needs_ffmpeg
-@pytestmark_whisper
 def test_switching_video_stops_the_previous_preview_and_restarts_on_return(tmp_path, monkeypatch):
     ui, _sender, client, root, ids = setup_library(tmp_path, monkeypatch)
     client.resume.set()
@@ -256,7 +250,6 @@ def test_switching_video_stops_the_previous_preview_and_restarts_on_return(tmp_p
 
 
 @needs_ffmpeg
-@pytestmark_whisper
 def test_concurrent_clicks_leave_the_last_clicked_video(tmp_path, monkeypatch):
     ui, _sender, client, root, ids = setup_library(tmp_path, monkeypatch)
     client.resume.set()

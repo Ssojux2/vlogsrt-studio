@@ -52,17 +52,20 @@ def test_closing_releases_and_file_objects_are_accepted(tmp_path: Path) -> None:
 
 
 def test_a_posix_directory_lock_is_the_folder_itself(tmp_path: Path) -> None:
+    """POSIX는 폴더 자체, Windows는 폴더 안의 숨은 잠금 파일 — 어느 쪽이든 둘째 쪽은 막힌다."""
+    windows = sys.platform == "win32"
     first = filelock.open_directory_lock(tmp_path)
     second = filelock.open_directory_lock(tmp_path)
     try:
-        assert os.path.samestat(os.fstat(first), os.stat(tmp_path))
+        locked = tmp_path / DIRECTORY_LOCK_NAME if windows else tmp_path
+        assert os.path.samestat(os.fstat(first), os.stat(locked))
         filelock.lock_exclusive(first, blocking=False)
         with pytest.raises(BlockingIOError):
             filelock.lock_exclusive(second, blocking=False)
     finally:
         os.close(first)
         os.close(second)
-    assert not (tmp_path / DIRECTORY_LOCK_NAME).exists()  # POSIX는 파일을 만들지 않는다
+    assert (tmp_path / DIRECTORY_LOCK_NAME).exists() is windows  # POSIX는 파일을 만들지 않는다
 
 
 def test_no_platform_lock_module_is_imported_at_the_top() -> None:

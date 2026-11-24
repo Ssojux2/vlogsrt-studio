@@ -21,16 +21,14 @@ from dataclasses import dataclass
 from datetime import date
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Protocol, TypeGuard
+from typing import Any, ClassVar, Protocol, TypeGuard
 
 from vlogsrt import log
-from vlogsrt.config import Config
 from vlogsrt.env import ANALYSIS_GEMINI_KEY_ENV
 from vlogsrt.models import Chunk
 from vlogsrt.project.raw import capabilities, word_cues
 from vlogsrt.project.raw.config import (
     GEMINI_TRANSCRIBE_PROFILES,
-    TIMESTAMP_GRANULARITIES_ALLOWED,
     TIMING_RESPONSE_TOLERANCE,
     WORD_CUE_SETTINGS,
     RawWorkflowConfig,
@@ -43,11 +41,7 @@ from vlogsrt.project.raw.gemini_transcribe_parse import (
     parse_transcription,
 )
 from vlogsrt.transcribe import (
-    CAPTION_TEXT_KIND,
-    CAPTION_TIMING_KIND,
-    AudioTranscriptionRequest,
     GeminiTranscriptionRequest,
-    TranscriptionSender,
     request_gemini_transcription,
 )
 
@@ -247,75 +241,6 @@ def _finite_number(value: object) -> TypeGuard[float]:
     return math.isfinite(float(value))
 
 
-def parse_text_response(
-    payload: object, *, binding: AudioChunkBinding, model: str
-) -> TextTranscript:
-    """문구 응답을 `TextTranscript`로 — 꼴이 어긋나면 지어내지 않고 실패한다.
-
-    `text`가 빈 문자열인 것은 위반이 아니다(§11.11) — 빈 문자열 하나만으로
-    무발화를 확정하지도 않는다. 판정은 소비 계층의 몫이다. 복수형 `languages`
-    배열은 코드 원터플로 정규화하고 원 배열은 `response`에 그대로 남긴다(루트
-    재검).
-    """
-    if not isinstance(payload, Mapping):
-        raise MalformedCaptionResponse(f"문구 응답이 JSON 객체가 아니다: {type(payload).__name__}")
-    if "text" not in payload or not isinstance(payload["text"], str):
-        raise MalformedCaptionResponse("문구 응답에 문자열 text가 없다")
-    language = payload.get("language")
-    if language is not None and not isinstance(language, str):
-        raise MalformedCaptionResponse(f"감지 언어가 문자열이 아니다: {language!r}")
-    usage = payload.get("usage")
-    if usage is not None and not isinstance(usage, Mapping):
-        raise MalformedCaptionResponse(f"사용량이 JSON 객체가 아니다: {usage!r}")
-    return TextTranscript(
-        binding=binding,
-        model=model,
-        text=payload["text"],
-        detected_language=language,
-        usage=usage,
-        response=payload,
-        languages=_response_languages(payload),
-    )
-
-
-def _response_languages(payload: Mapping[object, object]) -> tuple[str, ...]:
-    """복수형 languages 배열을 코드 원터플로 정규화한다(루트 재검).
-
-    SDK 3.8.0의 문서화된 모양은 객체 배열이다 — `Transcription.languages`가
-    `Optional[List[TranscriptionLanguage]]`이고 `TranscriptionLanguage.code`가
-    문자열이다. `model_dump()`를 거치면 `[{"code": "ko"}, ...]`로 온다. 문자열
-    배열은 합성 픽스처·낡은 기록을 위한 **명시적 관용**일 뿐 문서화된 모양이
-    아니다. 둘을 섞은 배열·`code`가 없거나 문자열이 아닌 객체는 거짓말의 길이므로
-    거부한다. 없거나 빈 배열은 언어를 확정 못 했다는 뜻일 뿐 무발화가 아니다.
-    """
-    raw = payload.get("languages")
-    if raw is None:
-        return ()
-    if not isinstance(raw, list):
-        raise MalformedCaptionResponse(f"languages가 배열이 아니다: {raw!r}")
-    codes: list[str] = []
-    kinds: set[str] = set()
-    for item in raw:
-        if isinstance(item, Mapping):
-            code = item.get("code")
-            if not isinstance(code, str) or not code.strip():
-                raise MalformedCaptionResponse(f"languages 항목에 문자열 code가 없다: {item!r}")
-            kinds.add("object")
-            codes.append(code)
-        elif isinstance(item, str):
-            if not item.strip():
-                raise MalformedCaptionResponse("languages에 빈 문자열이 있다")
-            kinds.add("string")
-            codes.append(item)
-        else:
-            raise MalformedCaptionResponse(f"languages 항목을 이해할 수 없다: {item!r}")
-    if len(kinds) > 1:
-        raise MalformedCaptionResponse(
-            f"languages가 두 모양을 섞었다 — 어느 쪽 해석도 확정할 수 없다: {raw!r}"
-        )
-    return tuple(codes)
-
-
 def parse_timing_response(
     payload: object,
     *,
@@ -493,103 +418,6 @@ def _close_at_chunk_end(
     return min(start, chunk_duration), chunk_duration
 
 
-def _text_features(
-    prompt: str, languages: tuple[str, ...], keywords: tuple[str, ...]
-) -> tuple[str, ...]:
-    """요청에 실제로 실리는 힌트만 확인 받는다 — 빈 힌트는 필드째 빠진다(§11.4)."""
-    features = [capabilities.FEATURE_JSON]
-    if languages:
-        features.append(capabilities.FEATURE_LANGUAGES)
-    if keywords:
-        features.append(capabilities.FEATURE_KEYWORDS)
-    if prompt:
-        features.append(capabilities.FEATURE_PROMPT)
-    return tuple(features)
-
-
-def text_transcription_request(
-    chunk: Chunk,
-    *,
-    settings: RawWorkflowConfig,
-    prompt: str = "",
-    keywords: tuple[str, ...] | None = None,
-    languages: tuple[str, ...] | None = None,
-) -> AudioTranscriptionRequest:
-    """문구 경로 요청 — 확인된 힌트는 languages·keywords·prompt 뿐이다(§11.4).
-
-    `prompt`는 사용자가 승인한 문맥만 받는다 — 장면 요약의 자동 주입은 이
-    인자로 들어오지 않는다. srt·vtt·verbose_json·timestamp_granularities·
-    logprobs는 이 요청에 칸 자체가 없다. 입자 칸(timestamp_granularities)은
-    시간 계약의 것이므로 여기서 읽지도 않는다 — 문구 요청에 입자를 얹는
-    무단 조합은 전송 경계(입자는 verbose_json과만 짝한다)와 등록표가 닫는다.
-
-    `keywords`·`languages`는 **이 요청 하나에만** 실리는 힌트다(D59 19c — 1단계 글자 경로의
-    용어집·언어). `None`이면 지금처럼 자막 계약의 값을 쓴다 — 최종 자막 요청은 바이트까지
-    그대로다. 시간 요청에는 이 인자가 없다(규칙 6).
-    """
-    contract, models = settings.caption, settings.models
-    sent_languages = contract.languages if languages is None else languages
-    sent_keywords = contract.keywords if keywords is None else keywords
-    capabilities.confirm_request_combo(
-        role=capabilities.ROLE_TEXT,
-        model=models.text_model,
-        response_format=contract.text_response_format,
-        features=_text_features(prompt, sent_languages, sent_keywords),
-    )
-    return AudioTranscriptionRequest(
-        chunk=chunk,
-        model=models.text_model,
-        response_format=contract.text_response_format,
-        languages=sent_languages,
-        keywords=sent_keywords,
-        prompt=prompt,
-    )
-
-
-def timing_transcription_request(
-    chunk: Chunk, *, settings: RawWorkflowConfig, temperature: float | None = None
-) -> AudioTranscriptionRequest:
-    """시간 경로 요청 — 문구 힌트가 **실리지 않는다**(규칙 6, §11.4).
-
-    힌트 인자가 아예 없으므로 문구 설정의 languages·keywords가 넘어올 길이
-    없다. `temperature`는 되풀이 대응의 손잡이(D28)로 호출자가 값을 정한다 —
-    `None`이면 필드가 빠진다. 실전송 어댑터는 `None`을 받지 않고 엔진 1차 온도를
-    채워 부른다(D55).
-
-    단수 `language`는 계약의 예상 언어 첫째다(D77) — 힌트가 아니라 디코더 언어 고정이라 whisper가
-    소음 위에서 일본어·영어 끝인사를 지어내는 길을 막는다. 레거시 CLI(`transcribe._extras`)도
-    보낸다. 예상 언어가 비었으면 칸째 빠진다.
-    """
-    contract, models = settings.caption, settings.models
-    language = contract.languages[0] if contract.languages else ""
-    features = _granularity_features(contract.timestamp_granularities)
-    capabilities.confirm_request_combo(
-        role=capabilities.ROLE_TIMING,
-        model=models.timing_model,
-        response_format=contract.timing_response_format,
-        features=features + ((capabilities.FEATURE_LANGUAGE,) if language else ()),
-    )
-    return AudioTranscriptionRequest(
-        chunk=chunk,
-        model=models.timing_model,
-        response_format=contract.timing_response_format,
-        timestamp_granularities=contract.timestamp_granularities,
-        temperature=temperature,
-        language=language,
-    )
-
-
-def _granularity_features(granularities: tuple[str, ...]) -> tuple[str, ...]:
-    """계약의 입자를 확인받는다 — 세그먼트만, 또는 세그먼트와 단어뿐이다(§11.3, D73).
-
-    단어만은 등록표가 아는 기능이라도 골격(세그먼트)이 없는 요청이라 전송 전에 닫는다."""
-    if granularities not in TIMESTAMP_GRANULARITIES_ALLOWED:
-        raise capabilities.UnverifiedModelCapability(
-            f"시간 입자 {granularities!r}는 계약 밖이다 — 세그먼트 없이는 시각 골격이 없다"
-        )
-    return tuple(f"timestamp_granularities:{granularity}" for granularity in granularities)
-
-
 class TimingProvider(Protocol):
     """시간 골격 제공자의 교체 경계(§11.10) — 직접 SDK 호출은 금지다.
 
@@ -608,91 +436,6 @@ class TimingProvider(Protocol):
         stem: str = "",
         source: str = "",
     ) -> TimedTranscript: ...
-
-
-class RescueTimingProvider(Protocol):
-    """회복 재전사를 **뜨겁게** 묻는 제공자의 선택 계약(D28).
-
-    기본 `TimingProvider` 계약은 그대로다(A4·가짜 구현은 변하지 않는다). 이
-    계약은 온도 손잡이를 받는 구현(`TransportTimingProvider`·오프라인 가짜)만
-    위한 추가 능력이다 — 되풀이 재전사는 1차보다 뜨거운 온도로 다시 묻는데,
-    못 받는 제공자가 조용히 기본 온도로 회복 요청을 보내면 D28의 통로가 열린다.
-    재전사 어댑터는 이 계약이 확인된 제공자로만 회복을 묻는다.
-    """
-
-    def timed_transcript(
-        self,
-        *,
-        binding: AudioChunkBinding,
-        chunk: Chunk,
-        settings: RawWorkflowConfig,
-        on: date,
-        stem: str = "",
-        source: str = "",
-        temperature: float | None = None,
-    ) -> TimedTranscript: ...
-
-
-class TextTranscriptProvider(Protocol):
-    """문구 경로의 주입 경계 — `TimingProvider`와 대칭이다."""
-
-    def text_transcript(
-        self,
-        *,
-        binding: AudioChunkBinding,
-        chunk: Chunk,
-        settings: RawWorkflowConfig,
-        on: date,
-        prompt: str = "",
-        stem: str = "",
-        source: str = "",
-    ) -> TextTranscript: ...
-
-
-@dataclass(frozen=True, slots=True)
-class TransportTimingProvider:
-    """확인된 verbose_json 어댑터 — 공개 전송 경계를 통해서만 부른다.
-
-    수명주기 검사가 끝난 뒤에야 전송이 일어난다. 실패는 여기서 감추지 않고
-    그대로 올라간다 — 바운드된 재시도는 전송 경계의 `_retry`가 정한다.
-
-    `temperature`는 **되풀이 대응의 손잡이다**(D28). 없으면 엔진 설정의 1차 온도
-    (`cfg.transcribe_temperature`, 0.6)를 보낸다 — 예전엔 필드를 빼서 API 기본 0으로
-    들렸고, 그 온도에서 whisper의 창 간 조건이 끊기지 않는다(D55 버그 1). 회복 시도는
-    엔진이 정한 더 뜨거운 값으로 이 인자를 받는다. 온도를 못 받는 제공자가 회복 요청을
-    조용히 기본 온도로 보내는 길은 어댑터 계층에서 막는다 — 이 클래스는 그 손잡이를
-    확인받은 유일한 실전송 구현이다.
-    """
-
-    sender: TranscriptionSender
-    cfg: Config
-
-    def timed_transcript(
-        self,
-        *,
-        binding: AudioChunkBinding,
-        chunk: Chunk,
-        settings: RawWorkflowConfig,
-        on: date,
-        stem: str = "",
-        source: str = "",
-        temperature: float | None = None,
-    ) -> TimedTranscript:
-        capabilities.preflight_online_transcription(settings, on, roles=(capabilities.ROLE_TIMING,))
-        sent = self.cfg.transcribe_temperature if temperature is None else temperature
-        request = timing_transcription_request(chunk, settings=settings, temperature=sent)
-        verify_chunk_binding(binding, chunk)
-        payload = self.sender.send_request(
-            request, self.cfg, kind=CAPTION_TIMING_KIND, stem=stem, source=source
-        )
-        return parse_timing_response(
-            payload,
-            binding=binding,
-            model=request.model,
-            provider=settings.caption.timing_provider,
-            chunk_duration=chunk.duration,
-            chunk_offset=chunk.offset,
-        )
 
 
 def gemini_timing_request(
@@ -806,6 +549,10 @@ class GeminiTranscribeTimingProvider:
     것을 받는다(`timing_provider_for`가 그 전송에서 옮겨 준다).
     """
 
+    CACHE_ORIGIN: ClassVar[str] = "GeminiTranscribeTimingProvider"
+    """청크 캐시 열쇠의 제공자 칸(P-6, D160) — 클래스 이름이 아니라 이 고정 값이다. 지금 이름과
+    같아 열쇠 바이트가 그대로다 — 클래스 이름을 바꿔도 이 값은 그대로 둔다."""
+
     client: Any
     observer: Any = None
     cancellation: Callable[[], None] | None = None
@@ -843,110 +590,33 @@ class GeminiTranscribeTimingProvider:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class GeminiTranscribeWordsProvider:
-    """Gemini 글자 경로(W-35b, D95)의 실제 어댑터 — 시간 엔진과 같은 문으로 묻고 응답을 그대로 준다.
-
-    `settings`는 Gemini 전사 엔진 보기다(`gemini_text.WordPassRequest.engine_workflow`) — 요청은
-    시간 엔진 요청(`gemini_timing_request`) 그대로라 힌트가 없다(규칙 6). 해석·배정은 부르는 쪽이
-    한다."""
-
-    client: Any
-    observer: Any = None
-    cancellation: Callable[[], None] | None = None
-
-    def transcription(
-        self,
-        *,
-        binding: AudioChunkBinding,
-        chunk: Chunk,
-        settings: RawWorkflowConfig,
-        on: date,
-        stem: str = "",
-        source: str = "",
-    ) -> Mapping[str, Any]:
-        capabilities.preflight_online_transcription(settings, on, roles=(capabilities.ROLE_TIMING,))
-        request = gemini_timing_request(chunk, settings=settings)
-        verify_chunk_binding(binding, chunk)
-        payload = request_gemini_transcription(
-            self.client,
-            request=request,
-            online=True,
-            observer=self.observer,
-            cancellation=self.cancellation,
-            stem=stem,
-            source=source,
-        )
-        if not isinstance(payload, Mapping):
-            raise MalformedCaptionResponse("Gemini 전사 응답이 JSON 객체가 아니다")
-        return payload
+WHISPER_RETIRED = (
+    "whisper-1·gpt-transcribe 전사는 은퇴했다(D163) — 이 원본은 「다시 듣기」로 Gemini 3.5"
+    " Transcribe에 다시 들으세요(이미 들은 자막은 그대로 읽고 고칠 수 있다)"
+)
 
 
-def words_provider_for(*, sender: Any, gemini_client: Any) -> GeminiTranscribeWordsProvider:
-    """Gemini 글자 경로의 실제 제공자 — 키가 없으면 유료 호출 전에 키 이름을 대고 닫는다."""
-    if gemini_client is None:
-        raise capabilities.TimingProviderUnavailable(
-            f"Gemini 글자 경로의 키가 없다 — .env에 {ANALYSIS_GEMINI_KEY_ENV}(결제 연결 키)를"
-            " 넣고 앱을 다시 켜세요"
-        )
-    return GeminiTranscribeWordsProvider(
-        client=gemini_client,
-        observer=getattr(sender, "observer", None),
-        cancellation=getattr(sender, "cancellation", None),
-    )
+class TranscriptionRetired(capabilities.TimingProviderUnavailable):
+    """whisper·gpt-transcribe에 새로 묻는 길 — 유료 호출 전에 닫는다(D163)."""
 
 
 def timing_provider_for(
     workflow: RawWorkflowConfig, *, sender: Any, cfg: Any, gemini_client: Any
 ) -> TimingProvider:
-    """설정의 시간 모델에 맞는 실제 제공자 — whisper는 전송 경계, Gemini는 Gemini 문(D92).
+    """설정의 시간 모델에 맞는 실제 제공자 — Gemini 문(D92)뿐이다. whisper는 은퇴했다(D163).
 
-    Gemini 클라이언트가 없으면 유료 호출 전에 키 이름을 대고 닫는다. 관찰자·취소는 whisper 전송이
-    가진 것을 그대로 옮긴다(영수증·취소가 한 길이다)."""
-    if workflow.models.timing_model in GEMINI_TRANSCRIBE_PROFILES:
-        if gemini_client is None:
-            raise capabilities.TimingProviderUnavailable(
-                f"Gemini 전사 엔진의 키가 없다 — .env에 {ANALYSIS_GEMINI_KEY_ENV}(결제 연결 키)를"
-                " 넣고 앱을 다시 켜세요"
-            )
-        return GeminiTranscribeTimingProvider(
-            client=gemini_client,
-            observer=getattr(sender, "observer", None),
-            cancellation=getattr(sender, "cancellation", None),
+    Gemini 클라이언트가 없으면 유료 호출 전에 키 이름을 대고 닫는다. 관찰자·취소는 실제 호출 운반자
+    (`sender`)가 가진 것을 그대로 옮긴다(영수증·취소가 한 길이다)."""
+    del cfg
+    if workflow.models.timing_model not in GEMINI_TRANSCRIBE_PROFILES:
+        raise TranscriptionRetired(WHISPER_RETIRED)
+    if gemini_client is None:
+        raise capabilities.TimingProviderUnavailable(
+            f"Gemini 전사 엔진의 키가 없다 — .env에 {ANALYSIS_GEMINI_KEY_ENV}(결제 연결 키)를"
+            " 넣고 앱을 다시 켜세요"
         )
-    return TransportTimingProvider(sender=sender, cfg=cfg)
-
-
-@dataclass(frozen=True, slots=True)
-class TransportTextProvider:
-    """확인된 문구 어댑터 — 공개 전송 경계를 통해서만 부른다.
-
-    `keywords`·`languages`는 요청 하나에만 실리는 힌트다(1단계 글자 경로, D59 19c). 주지 않으면
-    자막 계약의 값 그대로다 — 최종 자막 경로(`TextTranscriptProvider`)는 그 인자를 모른다.
-    """
-
-    sender: TranscriptionSender
-    cfg: Config
-
-    def text_transcript(
-        self,
-        *,
-        binding: AudioChunkBinding,
-        chunk: Chunk,
-        settings: RawWorkflowConfig,
-        on: date,
-        prompt: str = "",
-        stem: str = "",
-        source: str = "",
-        keywords: tuple[str, ...] | None = None,
-        languages: tuple[str, ...] | None = None,
-    ) -> TextTranscript:
-        capabilities.preflight_online_transcription(settings, on, roles=(capabilities.ROLE_TEXT,))
-        request = text_transcription_request(
-            chunk, settings=settings, prompt=prompt, keywords=keywords, languages=languages
-        )
-        verify_chunk_binding(binding, chunk)
-        payload = self.sender.send_request(
-            request, self.cfg, kind=CAPTION_TEXT_KIND, stem=stem, source=source
-        )
-        return parse_text_response(payload, binding=binding, model=request.model)
+    return GeminiTranscribeTimingProvider(
+        client=gemini_client,
+        observer=getattr(sender, "observer", None),
+        cancellation=getattr(sender, "cancellation", None),
+    )

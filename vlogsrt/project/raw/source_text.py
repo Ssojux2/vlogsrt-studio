@@ -37,14 +37,10 @@ from vlogsrt.config import Config
 from vlogsrt.hangul import strip_for_compare
 from vlogsrt.models import Chunk, RetextRecord, RetextRejection, RetextUnplaced, Segment
 from vlogsrt.project.raw import request_log, source_transcript
-from vlogsrt.project.raw.analysis_approval import AsrPhaseApproval, require_live_asr_approval
-from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
 from vlogsrt.project.raw.caption_provider import (
     AudioChunkBinding,
     TextTranscript,
     audio_chunk_binding,
-    parse_text_response,
-    text_transcription_request,
 )
 from vlogsrt.project.raw.config import (
     TEXT_PASS_CANDIDATE,
@@ -68,7 +64,6 @@ from vlogsrt.project.raw.understanding import (
 from vlogsrt.project.raw.understanding_luna import (
     ORIGIN_LIVE,
     ORIGIN_REPLAY,
-    AnalysisApprovalError,
 )
 from vlogsrt.task_runtime import check_cancel, provider_error
 
@@ -109,12 +104,6 @@ class SourceTextProvider(Protocol):
         keywords: tuple[str, ...] | None = None,
         languages: tuple[str, ...] | None = None,
     ) -> TextTranscript: ...
-
-
-class TextReservationGate(Protocol):
-    """글자 요청 예약 문 — whisper 예약과 따로 센다."""
-
-    def reserve(self, *, count: int, key: str) -> None: ...
 
 
 class ReplayTextMissing(RuntimeError):
@@ -761,133 +750,6 @@ def _report(record: Mapping[str, Any]) -> None:
 # ─────────────────────────────────────────────────────────────
 
 
-@dataclass(frozen=True, slots=True)
-class ApprovedPhaseTextProvider:
-    """1단계 글자 경로의 전송 경계 — 승인이 묶은 글자 모델과 1단계 승인을 청크마다 다시 지난다.
-
-    `analysis_workflow.ApprovedPhaseAsrProvider`와 같은 모양이다. 승인(`AsrPhaseApproval` v2,
-    D59 19d)이 글자 모델·요청 신원·요청 상한을 묶어야만 만들어진다. 전송 순간마다 1단계 승인·
-    모델·요청 신원(문맥·언어·용어집)·스트림·범위를 다시 보고, 예약 문(승인이 묶은 글자 요청
-    상한)은 whisper와 따로 센다.
-    """
-
-    inner: SourceTextProvider
-    workflow: RawWorkflowConfig
-    understanding: RawUnderstandingSettings
-    audio: SelectedAudio
-    approval: AsrPhaseApproval
-    approved_model: str
-    approved_identity: str
-    gate: TextReservationGate
-    approved_keys: frozenset[str] | None = None
-    """견적이 센 바로 그 청크들(글자 캐시 열쇠) — 있으면 그 밖의 청크는 보내지 않는다(D59 19d)."""
-
-    def text_transcript(
-        self,
-        *,
-        binding: AudioChunkBinding,
-        chunk: Chunk,
-        settings: RawWorkflowConfig,
-        on: date,
-        prompt: str = "",
-        stem: str = "",
-        source: str = "",
-        keywords: tuple[str, ...] | None = None,
-        languages: tuple[str, ...] | None = None,
-    ) -> TextTranscript:
-        self._require_open(binding, settings, on)
-        self._require_quoted(binding, settings.models.text_model, prompt, keywords, languages)
-        self.gate.reserve(count=1, key=str(binding.request_id))
-        return self.inner.text_transcript(
-            binding=binding,
-            chunk=chunk,
-            settings=settings,
-            on=on,
-            prompt=prompt,
-            stem=stem,
-            source=source,
-            keywords=keywords,
-            languages=languages,
-        )
-
-    def _require_quoted(
-        self,
-        binding: AudioChunkBinding,
-        model: str,
-        prompt: str,
-        keywords: tuple[str, ...] | None,
-        languages: tuple[str, ...] | None,
-    ) -> None:
-        """그 호출의 문맥·언어·용어집으로 다시 잰 신원과 청크가 승인이 본 것인가(아니면 0송신)."""
-        if call_identity(model, prompt, keywords, languages) != self.approved_identity:
-            raise AnalysisApprovalError(
-                "승인이 본 글자 요청(문맥·언어·용어집)과 지금의 요청이 다르다 — 보내지 않는다"
-            )
-        if self.approved_keys is not None and (
-            call_key(binding, model, prompt, keywords, languages) not in self.approved_keys
-        ):
-            raise AnalysisApprovalError("승인한 범위에 없던 청크다 — 승인 밖이라 보내지 않는다")
-
-    def _require_open(
-        self, binding: AudioChunkBinding, settings: RawWorkflowConfig, on: date
-    ) -> None:
-        require_live_asr_approval(
-            self.approval,
-            workflow=self.workflow,
-            understanding=self.understanding,
-            source_sha256=self.audio.source_sha256,
-            on=on,
-        )
-        if settings.network_mode != "online":
-            raise AnalysisApprovalError(
-                "네트워크 모드가 online이 아니다 — 글자 경로 전송 문이 닫혀 있다"
-            )
-        if self.approved_model != settings.models.text_model:
-            raise AnalysisApprovalError("승인이 본 글자 모델과 설정 모델이 다르다")
-        if self.audio.audio_stream_index != self.approval.audio_stream_index:
-            raise AnalysisApprovalError("승인이 본 오디오 스트림과 지금의 선택이 다르다")
-        if binding.sample_start < 0 or binding.sample_end > self.audio.sample_count:
-            raise AnalysisApprovalError(
-                f"청크 범위가 선택 오디오 밖이다: [{binding.sample_start}, {binding.sample_end})"
-                f" / {self.audio.sample_count} 샘플"
-            )
-
-
-@dataclass(frozen=True, slots=True)
-class ReplayTextProvider:
-    """재생 글자 제공자 — 선언된 글자만 돌려준다. 없으면 실패다(지어내지 않는다).
-
-    `exact`는 WAV sha로 찾는 정밀 선언이고 앞선다. `declared`는 이 원본의 청크 번호 → 글자다.
-    재생도 실제 요청과 같은 조합 확인(`text_transcription_request`)을 지난다.
-    """
-
-    exact: Mapping[str, str]
-    declared: Mapping[int, str] | None = None
-
-    def text_transcript(
-        self,
-        *,
-        binding: AudioChunkBinding,
-        chunk: Chunk,
-        settings: RawWorkflowConfig,
-        on: date,
-        prompt: str = "",
-        stem: str = "",
-        source: str = "",
-        keywords: tuple[str, ...] | None = None,
-        languages: tuple[str, ...] | None = None,
-    ) -> TextTranscript:
-        text = self.exact.get(binding.audio_sha256)
-        if text is None and self.declared is not None:
-            text = self.declared.get(binding.chunk_index)
-        if text is None:
-            raise ReplayTextMissing(f"재생할 글자 선언이 없다 — 청크 {binding.request_id}")
-        request = text_transcription_request(
-            chunk, settings=settings, prompt=prompt, keywords=keywords, languages=languages
-        )
-        return parse_text_response({"text": text}, binding=binding, model=request.model)
-
-
 __all__ = [
     "PASS_APPLIED",
     "PASS_PARTIAL",
@@ -902,9 +764,7 @@ __all__ = [
     "TEXT_ORIGINS",
     "TEXT_IDENTITY_SCHEMA",
     "TEXT_REQUEST_STAGE",
-    "ApprovedPhaseTextProvider",
     "ReplayTextMissing",
-    "ReplayTextProvider",
     "SourceTextProvider",
     "TextChunkOutcome",
     "TextPassRequest",

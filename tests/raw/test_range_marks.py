@@ -50,9 +50,6 @@ from vlogsrt.project.raw.segment_review import (
 )
 from vlogsrt.project.raw.visual_review import VisualReviewError
 
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
-
 needs_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
 
 FRAME = 3000

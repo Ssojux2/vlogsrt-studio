@@ -9,23 +9,17 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import json
 import xml.etree.ElementTree as ET
-from collections.abc import Mapping, Sequence, Set
+from collections.abc import Sequence
 from dataclasses import dataclass
 from fractions import Fraction
-from typing import Literal
 
-from vlogsrt.project.config import ProjectConfig
 from vlogsrt.project.fcpxml import element_tree
-from vlogsrt.project.models import AssetResource, ClipInstance, GapInstance, ProjectDocument
+from vlogsrt.project.models import ClipInstance, GapInstance, ProjectDocument
 from vlogsrt.project.timebase import (
-    FrameInterval,
     format_fcpx_time,
-    frame_ceil,
     parse_fcpx_time,
 )
-from vlogsrt.project.vad.guard import InstanceGuard
 from vlogsrt.project.workflow_protocol import (
     CutCandidate,
     EditPlan,
@@ -38,99 +32,10 @@ _CUT_MARKER_PREFIX = "VLOG_AI_CUT:"
 
 
 @dataclass(frozen=True, slots=True)
-class CandidateAnalysis:
-    """후보 삭제를 취소할 수 있는 전사·비전 증거."""
-
-    transcript_status: Literal["success", "error"]
-    vision_status: Literal["success", "error"]
-    unique_speech_frames: tuple[FrameInterval, ...]
-    motion_continuity_frames: tuple[FrameInterval, ...]
-    confidence: str
-
-
-@dataclass(frozen=True, slots=True)
-class SuppressedCandidate:
-    instance_id: str
-    source_frames: FrameInterval | None
-    reason: str
-
-
-@dataclass(frozen=True, slots=True)
-class CandidateBatch:
-    candidates: tuple[CutCandidate, ...]
-    suppressed: tuple[SuppressedCandidate, ...]
-
-
-@dataclass(frozen=True, slots=True)
 class RenderedRoughCut:
     xml_bytes: bytes
     project_name: str
     removed_candidate_ids: tuple[str, ...]
-
-
-def generate_silence_candidates(
-    document: ProjectDocument,
-    revision: ProjectRevision,
-    guards: Sequence[InstanceGuard],
-    *,
-    locked_instance_ids: Set[str],
-    analysis: Mapping[str, CandidateAnalysis],
-    config: ProjectConfig | None = None,
-) -> CandidateBatch:
-    """성공한 클립의 2초 이상 내부 무음에서 호흡 여유를 뺀 삭제 후보를 만든다."""
-    cfg = config or ProjectConfig()
-    _require_revision(document, revision)
-    guards_by_instance = _index_guards(document, guards)
-    resources = {resource.scoped_id: resource for resource in document.resources}
-    minimum_frames = frame_ceil(cfg.silence_min_seconds, document.frame_duration)
-    handle_frames = frame_ceil(cfg.silence_handle_seconds, document.frame_duration)
-    candidates: list[CutCandidate] = []
-    suppressed: list[SuppressedCandidate] = []
-    for item in document.storyline:
-        if not isinstance(item, ClipInstance):
-            continue
-        guard = guards_by_instance[item.instance_id]
-        if item.instance_id in locked_instance_ids or guard.status != "success":
-            continue
-        evidence = analysis.get(item.instance_id)
-        if evidence is None:
-            suppressed.append(SuppressedCandidate(item.instance_id, None, "analysis_missing"))
-            continue
-        if evidence.transcript_status != "success":
-            suppressed.append(
-                SuppressedCandidate(item.instance_id, None, "transcript_status_error")
-            )
-            continue
-        if evidence.vision_status != "success":
-            suppressed.append(SuppressedCandidate(item.instance_id, None, "vision_status_error"))
-            continue
-        resource = resources[item.resource_scoped_id]
-        clip_source = _clip_source_frames(item, resource.start, document.frame_duration)
-        timeline_delta = _timeline_delta_frames(item, resource, document)
-        for silence in _internal_gaps(clip_source, guard.protected_frames, minimum_frames):
-            deletion = FrameInterval(
-                silence.start_frame + handle_frames,
-                silence.end_frame - handle_frames,
-            )
-            if deletion.end_frame <= deletion.start_frame:
-                suppressed.append(SuppressedCandidate(item.instance_id, silence, "handles_consume"))
-                continue
-            if _overlaps_any(deletion, evidence.unique_speech_frames):
-                suppressed.append(SuppressedCandidate(item.instance_id, deletion, "unique_speech"))
-                continue
-            if _overlaps_any(deletion, evidence.motion_continuity_frames):
-                suppressed.append(
-                    SuppressedCandidate(item.instance_id, deletion, "motion_continuity")
-                )
-                continue
-            timeline = FrameInterval(
-                deletion.start_frame + timeline_delta,
-                deletion.end_frame + timeline_delta,
-            )
-            candidates.append(
-                _candidate(document, revision, item, resource.start, deletion, timeline, evidence)
-            )
-    return CandidateBatch(tuple(candidates), tuple(suppressed))
 
 
 def build_review_plan(
@@ -269,121 +174,6 @@ def _require_revision(document: ProjectDocument, revision: ProjectRevision) -> N
         raise ValueError("ProjectRevision의 입력 XML 해시가 문서와 다르다")
     if document.frame_duration != revision.frame_duration:
         raise ValueError("ProjectRevision의 프레임 길이가 문서와 다르다")
-
-
-def _index_guards(
-    document: ProjectDocument, guards: Sequence[InstanceGuard]
-) -> dict[str, InstanceGuard]:
-    indexed: dict[str, InstanceGuard] = {}
-    for guard in guards:
-        if guard.instance_id in indexed:
-            raise ValueError(f"인스턴스 guard가 중복이다: {guard.instance_id}")
-        indexed[guard.instance_id] = guard
-    expected = {item.instance_id for item in document.storyline if isinstance(item, ClipInstance)}
-    if set(indexed) != expected:
-        raise ValueError("문서의 모든 클립에 정확히 하나의 guard가 있어야 한다")
-    return indexed
-
-
-def _clip_source_frames(clip: ClipInstance, asset_start: Fraction, fd: Fraction) -> FrameInterval:
-    start = (clip.start - asset_start) / fd
-    duration = clip.duration / fd
-    if start.denominator != 1 or duration.denominator != 1:
-        raise ValueError(f"클립이 프레임 격자에 있지 않다: {clip.element_path}")
-    return FrameInterval(int(start), int(start + duration))
-
-
-def _timeline_delta_frames(
-    clip: ClipInstance, resource: AssetResource, document: ProjectDocument
-) -> int:
-    source_start = _clip_source_frames(clip, resource.start, document.frame_duration).start_frame
-    timeline_start = (clip.offset - document.sequence_tc_start) / document.frame_duration
-    if timeline_start.denominator != 1:
-        raise ValueError(f"클립 오프셋이 프레임 격자에 있지 않다: {clip.element_path}")
-    return int(timeline_start) - source_start
-
-
-def _internal_gaps(
-    clip: FrameInterval, protected: Sequence[FrameInterval], minimum_frames: int
-) -> tuple[FrameInterval, ...]:
-    spans = _merged_clamped(protected, clip)
-    if len(spans) < 2:
-        return ()
-    gaps = [
-        FrameInterval(left.end_frame, right.start_frame)
-        for left, right in zip(spans, spans[1:], strict=False)
-        if right.start_frame - left.end_frame >= minimum_frames
-    ]
-    return tuple(gaps)
-
-
-def _merged_clamped(
-    spans: Sequence[FrameInterval], clip: FrameInterval
-) -> tuple[FrameInterval, ...]:
-    clamped = sorted(
-        (
-            FrameInterval(
-                max(span.start_frame, clip.start_frame), min(span.end_frame, clip.end_frame)
-            )
-            for span in spans
-            if span.end_frame > clip.start_frame and span.start_frame < clip.end_frame
-        ),
-        key=lambda row: (row.start_frame, row.end_frame),
-    )
-    merged: list[FrameInterval] = []
-    for span in clamped:
-        if not merged or span.start_frame > merged[-1].end_frame:
-            merged.append(span)
-        else:
-            merged[-1] = FrameInterval(
-                merged[-1].start_frame, max(merged[-1].end_frame, span.end_frame)
-            )
-    return tuple(merged)
-
-
-def _candidate(
-    document: ProjectDocument,
-    revision: ProjectRevision,
-    clip: ClipInstance,
-    asset_start: Fraction,
-    source: FrameInterval,
-    timeline: FrameInterval,
-    analysis: CandidateAnalysis,
-) -> CutCandidate:
-    fd = document.frame_duration
-    source_range = RationalRange(
-        asset_start + source.start_frame * fd, asset_start + source.end_frame * fd
-    )
-    timeline_range = RationalRange(
-        document.sequence_tc_start + timeline.start_frame * fd,
-        document.sequence_tc_start + timeline.end_frame * fd,
-    )
-    evidence = ("vad:no_speech", "transcript:no_unique_speech", "vision:no_continuity")
-    window_id = _window_id(revision.revision, clip.instance_id, timeline_range)
-    decision_revision = hashlib.sha256(
-        json.dumps(
-            [window_id, "propose_cut", list(evidence), analysis.confidence],
-            ensure_ascii=True,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()
-    return CutCandidate.create(
-        input_revision=revision.revision,
-        clip_instance_id=clip.instance_id,
-        source_range=source_range,
-        timeline_range=timeline_range,
-        reason="internal_silence",
-        evidence=evidence,
-        confidence=analysis.confidence,
-        window_id=window_id,
-        decision_revision=decision_revision,
-    )
-
-
-def _overlaps_any(span: FrameInterval, others: Sequence[FrameInterval]) -> bool:
-    return any(
-        span.start_frame < row.end_frame and row.start_frame < span.end_frame for row in others
-    )
 
 
 def _require_nonoverlapping(candidates: Sequence[CutCandidate]) -> None:

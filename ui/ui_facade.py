@@ -9,12 +9,10 @@ from __future__ import annotations
 
 import html
 import json
-import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from fractions import Fraction
-from typing import cast
 
 
 def parse_seconds(text: str, *, what: str = "시각") -> Fraction:
@@ -39,19 +37,6 @@ def format_seconds(value: Fraction | float | int) -> str:
     if fraction.denominator == 1:
         return str(fraction.numerator)
     return f"{float(fraction):.6f}".rstrip("0").rstrip(".")
-
-
-def fraction_ms(value: Fraction | float | int) -> int:
-    """초(정확한 유리수)를 ms 정수로 — 가장 가까운 정수, 동률은 올린다.
-
-    저장된 큐의 참값은 언제나 ms 양자화 계약 안에 있으므로 정수다. 그런데
-    이진 부동 소수에서 온 값(`Fraction(1.2)` 등)은 1199.999…처럼 표시되어
-    `int()`로 자르면 1200→1199로 흐른다(A5 실측 — 저장·표시 왕복이 하루살이
-    드리프트를 만든다). 유리수를 그대로 두고 정확히 가장 가까운 정수로 잰다.
-    """
-    fraction = value if isinstance(value, Fraction) else Fraction(str(value))
-    scaled = fraction * 1000
-    return (scaled.numerator * 2 + scaled.denominator) // (scaled.denominator * 2)
 
 
 def format_bytes(size: float) -> str:
@@ -94,230 +79,6 @@ def media_player_html(
         f'    <source src="{source}"></source>{track}\n'
         f"</video>{note}"
     )
-
-
-def waveform_svg(peaks: Sequence[float], *, height: int = 72) -> str:
-    """파형 봉우리를 인라인 SVG로 — 진폭만 보이고 파형 원본은 나가지 않는다.
-
-    W2 작업공간이 잰 PCM 피크 빈(0~1)을 받는다. 막대는 대칭으로 그려 중앙선
-    기준 진폭을 그대로 보여준다 — 시각 장식이 아니라 큐 위치를 짚는 근거다.
-    """
-    values = [max(0.0, min(1.0, float(value))) for value in peaks]
-    if not values:
-        return '<p style="color:var(--vl-ink-muted)">파형 데이터가 없다</p>'
-    width = max(1, len(values) * 3)
-    mid = height / 2
-    bars: list[str] = []
-    for index, value in enumerate(values):
-        bar = max(1.0, value * mid * 0.94)
-        top = mid - bar
-        bars.append(
-            f'<rect x="{index * 3}" y="{top:.1f}" width="2" height="{bar * 2:.1f}"'
-            ' fill="currentColor"></rect>'
-        )
-    return (
-        f'<svg viewBox="0 0 {width} {height}" preserveAspectRatio="none"'
-        f' style="width:100%;height:{height}px; background:var(--vl-surface-sunken);'
-        ' color:var(--vl-accent-ink); border-radius:6px;" role="img" aria-label="오디오 파형">\n'
-        f'  <line x1="0" y1="{mid}" x2="{width}" y2="{mid}"'
-        ' style="stroke:var(--vl-line-strong)"></line>\n'
-        + "\n".join(f"  {bar}" for bar in bars)
-        + "\n</svg>"
-    )
-
-
-@dataclass(frozen=True)
-class CueRowView:
-    """큐 한 줄의 화면 값 — 시각은 미리 포맷한 초 표기, 글자는 그대로.
-
-    시각은 백엔드의 정확한 유리수(초)를 `format_seconds`로 옮긴 문자열이다 —
-    ms 환산에서 반올림 오차가 생기지 않는다. 사람이 주는 편집값만 ms 정수로
-    들어간다(서버 뷰에서 검증한다). `text`는 **지금 큐의 글자**다 — 수동 편집
-    뒤에는 채택 문구와 달라지고, 화면은 그 차이를 숨기지 않고 나란히 보여준다.
-    """
-
-    cue_id: str
-    start_seconds: str
-    end_seconds: str
-    whisper_text: str
-    auto_text: str
-    text: str
-    basis: str
-    chars_per_second: float
-
-
-def _cps_text(value: float) -> str:
-    """초당 글자 수 — 길이 0 큐(재지 못함)는 `inf`가 아니라 `—`로 보인다."""
-    return f"{value:.1f}" if math.isfinite(value) else "—"
-
-
-def cue_table_markdown(rows: Sequence[CueRowView]) -> str:
-    """큐 행 표 — whisper 골격·채택 문구·지금 글자를 나란히, 초당 글자수까지."""
-    if not rows:
-        return "_큐가 없다 — 실행을 먼저 끝내거나, 빈 실행이면 무발화 결정을 남겨라._"
-    lines = [
-        "| 큐 | 시작(초) | 끝(초) | whisper 글자 | 채택 문구 | 지금 글자 | 근거 | 자/초 |",
-        "|---|---|---|---|---|---|---|---|",
-    ]
-    for row in rows:
-        whisper = row.whisper_text.replace("|", "\\|")
-        auto = row.auto_text.replace("|", "\\|")
-        current = row.text.replace("|", "\\|")
-        lines.append(
-            f"| `{row.cue_id}` | {row.start_seconds} | {row.end_seconds}"
-            f" | {whisper or '(없음)'} | {auto or '(없음)'} | {current or '(없음)'}"
-            f" | {row.basis} | {_cps_text(row.chars_per_second)} |"
-        )
-    return "\n".join(lines)
-
-
-def _cue_seek_js(start: str, end: str) -> tuple[str, str]:
-    """큐 이동·반복의 인라인 실행본 — 문맥에 숫자만 들어가므로 이스케이프 대상이 없다.
-
-    실행본은 `(function(){…})()`로 **즉시 실행**된다 — 괄호를 빠뜨리면 식이 함수를
-    그냥 돌려보낼 뿐이라 클릭해도 아무 일도 일어나지 않는다(루트 브라우저 재현).
-    반복은 `timeupdate`에서 큐 끝을 넘으면 시작으로 되돌리는 **참 반복**이다 —
-    `pause` 이벤트(네이티브·수동 포함)에서 스스로 떼어지므로 정지한 뒤 다시
-    재생되지 않는다. `_vlLoop`는 살아 있는 반복을 떼는 파괴자 — 이동·재반복·처음으로는
-    먼저 이것을 불러 묵은 손잡이가 새 선택에 어김없이 발동하는 일을 막는다.
-    """
-    seek = (
-        "(function(){var v=document.getElementById('caption-video');"
-        "if(!v){return;}"
-        "if(v._vlLoop){v._vlLoop();}"
-        "v.currentTime=" + start + ";v.play();})()"
-    )
-    repeat = (
-        "(function(){var v=document.getElementById('caption-video');if(!v){return;}"
-        "if(v._vlLoop){v._vlLoop();}"
-        "var s=" + start + ",e=" + end + ";"
-        "var off=function(){v.removeEventListener('timeupdate',loop);"
-        "v.removeEventListener('pause',off);v._vlLoop=null;};"
-        "var loop=function(){"
-        "if(v.currentTime>=e){v.currentTime=s;}"
-        "else if(v.currentTime<s-0.25){off();}};"
-        "v._vlLoop=off;v.addEventListener('timeupdate',loop);v.addEventListener('pause',off);"
-        "v.currentTime=s;v.play();})()"
-    )
-    return seek, repeat
-
-
-def cue_table_html(
-    rows: Sequence[CueRowView],
-    seek_by_cue: Mapping[str, tuple[str, str]] | None = None,
-) -> str:
-    """큐 편집표의 안전한 HTML — 지금 글자 칸과 큐 이동·반복 단추까지.
-
-    `gr.Markdown`은 SVG·단추를 지워버리므로 큐 표는 이 HTML 구성요소로 나간다.
-    `seek_by_cue`는 큐 ID → (미리보기 시작 시각, 끝 시각) 문자열 — 서버가 잰
-    원점 매핑 그대로고, 없으면 단추 없이 표만 나간다(빈 성공으로 꾸미지 않는다).
-    모든 글자는 이스케이프되고, 실행본에는 숫자만 들어간다.
-    """
-    if not rows:
-        return (
-            '<p style="color:var(--vl-ink-muted)">큐가 없다 — 실행을 먼저 끝내거나, 빈 실행이면'
-            " 무발화 결정을 남긴다.</p>"
-        )
-    parts = [
-        '<table style="width:100%;border-collapse:collapse;font-size:13px;">',
-        "<thead><tr>"
-        '<th style="text-align:left;padding:4px 6px;">큐</th>'
-        '<th style="text-align:left;padding:4px 6px;">시작(초)</th>'
-        '<th style="text-align:left;padding:4px 6px;">끝(초)</th>'
-        '<th style="text-align:left;padding:4px 6px;">whisper 글자</th>'
-        '<th style="text-align:left;padding:4px 6px;">채택 문구</th>'
-        '<th style="text-align:left;padding:4px 6px;">지금 글자</th>'
-        '<th style="text-align:left;padding:4px 6px;">근거</th>'
-        '<th style="text-align:right;padding:4px 6px;">자/초</th>'
-        '<th style="text-align:center;padding:4px 6px;">듣기</th>'
-        "</tr></thead>",
-        "<tbody>",
-    ]
-    for row in rows:
-        seek_spec = (seek_by_cue or {}).get(row.cue_id)
-        if seek_spec is None:
-            listen = '<span style="color:var(--vl-ink-faint)">—</span>'
-        else:
-            start, end = seek_spec
-            seek_js, repeat_js = _cue_seek_js(start, end)
-            listen = (
-                f'<button type="button" data-cue-id="{html.escape(row.cue_id, quote=True)}" '
-                f'data-seek-start="{start}" data-seek-end="{end}" '
-                f'style="margin:1px;" onclick="{seek_js}">▶</button>'
-                f'<button type="button" data-cue-id="{html.escape(row.cue_id, quote=True)}" '
-                f'data-seek-start="{start}" data-seek-end="{end}" '
-                f'style="margin:1px;" onclick="{repeat_js}">반복</button>'
-            )
-        parts.append(
-            "<tr>"
-            f'<td style="padding:4px 6px;"><code>{html.escape(row.cue_id)}</code></td>'
-            f'<td style="padding:4px 6px;">{html.escape(row.start_seconds)}</td>'
-            f'<td style="padding:4px 6px;">{html.escape(row.end_seconds)}</td>'
-            f'<td style="padding:4px 6px;">{html.escape(row.whisper_text) or "(없음)"}</td>'
-            f'<td style="padding:4px 6px;">{html.escape(row.auto_text) or "(없음)"}</td>'
-            f'<td style="padding:4px 6px;">{html.escape(row.text) or "(없음)"}</td>'
-            f'<td style="padding:4px 6px;">{html.escape(row.basis)}</td>'
-            f'<td style="padding:4px 6px;text-align:right;">'
-            f"{_cps_text(row.chars_per_second)}</td>"
-            f'<td style="padding:4px 6px;text-align:center;white-space:nowrap;">{listen}</td>'
-            "</tr>"
-        )
-    parts.append("</tbody></table>")
-    if seek_by_cue is None:
-        parts.append(
-            '<p style="color:var(--vl-ink-muted);font-size:12px;margin:4px 0 0;">'
-            "선택 오디오 미리보기가 아직 없다 — 최종 영상 등록(오디오 트랙 확정)을 마치면"
-            " 큐 단추가 켜진다.</p>"
-        )
-    else:
-        parts.append(
-            '<p style="color:var(--vl-ink-muted);font-size:12px;margin:4px 0 0;">'
-            "▶ 큐 시작으로 이동 · 반복 큐 구간을 끝에서 시작으로 되돌려 잰다"
-            "(정지·다른 선택으로 풀린다) —"
-            " 미리보기 시계(선택 오디오의 잰 원점)에 맞춘 값이다.</p>"
-        )
-    return "".join(parts)
-
-
-def caption_player_html(media_path: str, *, waveform: str, provenance: str) -> str:
-    """자막 검토 재생기 — 선택 오디오 미리보기 영상·파형·출처를 한데 담는다.
-
-    `gr.HTML`로만 나간다(Markdown은 SVG를 지운다 — 루트 브라우저 재현). 영상
-    원소의 아이디 `caption-video`는 큐 표의 이동·반복 실행본이 짚는 대상이다.
-    파형은 이미 안전한 SVG 문자열(`waveform_svg`)을 받아 그대로 싣는다.
-    """
-    source = html.escape(media_path, quote=True)
-    return (
-        '<div id="caption-player" class="vlogsrt-caption-player">\n'
-        f'  <video id="caption-video" controls preload="metadata" src="{source}"'
-        ' style="width:100%;max-height:420px;background:var(--vl-video-well);'
-        'border-radius:6px;"></video>\n'
-        f"  {waveform}\n"
-        '  <div style="display:flex;gap:8px;margin-top:6px;">\n'
-        '    <button type="button" onclick="(function(){var v='
-        "document.getElementById('caption-video');if(!v){return;}"
-        'if(v._vlLoop){v._vlLoop();}v.pause();})()">'
-        "일시정지</button>\n"
-        '    <button type="button" onclick="(function(){var v='
-        "document.getElementById('caption-video');if(!v){return;}"
-        'if(v._vlLoop){v._vlLoop();}v.pause();v.currentTime=0;})()">'
-        "처음으로</button>\n"
-        "  </div>\n"
-        '  <p style="color:var(--vl-ink-muted);font-size:12px;margin:6px 0 0;">'
-        f"{html.escape(provenance)}</p>\n"
-        "</div>"
-    )
-
-
-def caption_cue_choices(rows: Sequence[CueRowView]) -> list[tuple[str, str]]:
-    """큐 선택 목록 — 아이디·시각·지금 글자 미리보기로 편집 칸을 채우는 재료."""
-    return [
-        (
-            f"{row.cue_id} · {row.start_seconds}→{row.end_seconds} · {row.text[:18] or '(없음)'}",
-            row.cue_id,
-        )
-        for row in rows
-    ]
 
 
 def review_rows_markdown(rows: Sequence[dict[str, object]]) -> str:
@@ -374,7 +135,7 @@ def vtt_timecode(total_ms: int) -> str:
 # 재서 작업대 값의 속성으로 싣고, 실행본이 그 값을 머리줄에 옮긴다 — 머리줄을 위한 타이머를
 # 따로 두지 않는다.
 
-FLOW_STEP_LABELS = ("폴더 불러오기", "분석 승인", "검토", "내보내기")
+FLOW_STEP_LABELS = ("폴더 불러오기", "분석 승인", "검토", "편집 · 공유")
 PROJECT_EMPTY_LABEL = "프로젝트 없음"
 SHORTCUT_SEEK_SECONDS = 5
 """J/L이 옮기는 초 — 실행본의 `VL_SEEK_SECONDS`와 같은 값이다(시험이 둘을 맞춰 본다)."""
@@ -509,9 +270,15 @@ def keysheet_html() -> str:
         f"<dt>{_kbd_html(keys)}</dt><dd>{html.escape(meaning)}</dd>"
         for keys, meaning in SHORTCUT_SHEET
     )
+    from ui import keymap
+
+    # 재생기(타임라인 · 자막)의 키도 여기 하나에 모은다(W-102, D175) — 재생기 안의 시트는 없다.
     return (
         '<div id="vl-keysheet" class="vl-keysheet-pop" role="dialog" aria-label="단축키" hidden>'
+        '<h3 class="vl-keysheet-title">원본 보기</h3>'
         f'<dl class="vl-keysheet">{rows}</dl>'
+        '<h3 class="vl-keysheet-title">타임라인 · 자막 — 마지막으로 누른 창이 정한다</h3>'
+        f'<div class="tl-keys vl-keysheet-player">{keymap.keysheet_sections_html()}</div>'
         '<p class="vl-keysheet-note">입력 칸에 글을 쓰는 중에는 단축키가 동작하지 않습니다.</p>'
         "</div>"
     )
@@ -1329,7 +1096,7 @@ def visual_player_shell_html(video_src: str | None, note: str) -> str:
         f'<p id="visual-note" class="vl-note">{safe_note}</p></section>'
         '<section id="visual-timeline" aria-label="추천 구간과 영상 타임라인">'
         '<div class="vl-transport">'
-        f"<strong>타임라인</strong>{TIER_LEGEND_HTML}"
+        f"<strong>원본 구간</strong>{TIER_LEGEND_HTML}"
         '<button type="button" id="vl-source-caption-toggle" class="vl-btn"'
         ' aria-pressed="true">재생 자막</button>'
         '<button type="button" id="vl-timeline-mode" class="vl-btn">원본 타임라인</button>'
@@ -1457,123 +1224,6 @@ def visual_workbench_html(
     )
 
 
-def caption_overlay_player_html(media_path: str, *, waveform: str, provenance: str) -> str:
-    """자막 검토 재생기(V2) — 재생 시각 오버레이와 토글 단추가 붙은 껍데기.
-
-    오버레이 문구는 작업대 실행본이 `timeupdate`에서 textContent로만 바꾼다 —
-    재생기 구성요소를 다시 그리지 않으므로 저장 뒤에도 재생이 끊기지 않는다.
-    기존 아이디(`caption-video`·`caption-player`)는 그대로다(기존 큐 표 실행본
-    호환).
-    """
-    source = html.escape(media_path, quote=True)
-    return (
-        '<div id="caption-player" class="vlogsrt-caption-player">\n'
-        f'  <video id="caption-video" controls preload="metadata" src="{source}"'
-        ' aria-label="선택 오디오 미리보기 재생기" style="width:100%;max-height:42vh;'
-        'background:var(--vl-video-well);border-radius:6px;object-fit:contain;"></video>\n'
-        '  <div id="caption-overlay" class="cap-overlay cap-overlay-on"'
-        ' aria-live="off"></div>\n'
-        f"  {waveform}\n"
-        '  <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap;">\n'
-        '    <button type="button" class="vl-btn" id="cap-overlay-toggle"'
-        ' aria-pressed="true">재생 자막 오버레이</button>\n'
-        '    <button type="button" class="vl-btn" onclick="(function(){var v='
-        "document.getElementById('caption-video');if(!v){return;}"
-        'if(v._vlLoop){v._vlLoop();}v.pause();})()">'
-        "일시정지</button>\n"
-        '    <button type="button" class="vl-btn" onclick="(function(){var v='
-        "document.getElementById('caption-video');if(!v){return;}"
-        'if(v._vlLoop){v._vlLoop();}v.pause();v.currentTime=0;})()">'
-        "처음으로</button>\n"
-        "  </div>\n"
-        # 출처 원문(경로·sha·코덱·등록 ID)은 접힌 상세로 — 기본 재생기 흐름에는
-        # 사람 글자만 보인다(원문은 그대로 보존).
-        '  <details class="vl-details" style="margin-top:6px;"><summary>영상 상세 —'
-        f' 출처·등록</summary><p class="vl-note">{html.escape(provenance)}</p></details>\n'
-        "</div>"
-    )
-
-
-def caption_workbench_html(model: Mapping[str, object]) -> str:
-    """자막 작업대 본문 — 간결 큐 목록·클라이언트 편집기·접힌 상세의 그릇.
-
-    행 선택·편집 칸 채우기·오버레이 갱신은 전부 클라이언트다(미디어·제공자 0회).
-    저장·확정 버튼만 서버 함수로 간다(명시적 저장·명시적 확인 그대로).
-    """
-    placeholder = model.get("empty")
-    if isinstance(placeholder, str) and placeholder:
-        return (
-            '<div id="caption-workbench" class="vl-workbench" data-vl-empty="1">'
-            f'<p class="vl-note">{html.escape(placeholder)}</p></div>'
-        )
-    return (
-        f'<div id="caption-workbench" class="vl-workbench">{_model_holder(model)}\n'
-        '  <div id="cap-cues" class="cap-cues" role="listbox"'
-        ' aria-label="자막 큐 목록 — 행을 고르면 재생기가 그 큐로 이동한다"></div>\n'
-        '  <div class="cap-editor">\n'
-        '    <div class="cap-editor-fields">\n'
-        '      <label>글자<input type="text" id="cap-text" class="vl-input"></label>\n'
-        "    </div>\n"
-        '    <div class="vl-row">\n'
-        '      <button type="button" id="cap-save" class="vl-btn vl-btn-primary">'
-        "글자 저장</button>\n"
-        '      <button type="button" id="cap-confirm" class="vl-btn">확정 게시 승인</button>\n'
-        "    </div>\n"
-        # 정밀 시각·큐 ID는 접힌 상세로 — 기본 흐름은 글자 저장·확정만 본다.
-        # 아이디·읽기 전용·실행본 선택자는 그대로(계약 무변경).
-        '    <details class="vl-details"><summary>정밀 시각 · 큐 ID</summary>\n'
-        '      <div class="cap-editor-fields">\n'
-        '        <label>시작(ms)<input type="text" id="cap-start" class="vl-input'
-        ' vl-input-narrow" inputmode="numeric"></label>\n'
-        '        <label>끝(ms)<input type="text" id="cap-end" class="vl-input'
-        ' vl-input-narrow" inputmode="numeric"></label>\n'
-        '        <label>큐 ID<input type="text" id="cap-cue-id" class="vl-input'
-        ' vl-input-narrow" readonly></label>\n'
-        "      </div>\n"
-        '      <div class="vl-row">\n'
-        '        <button type="button" id="cap-save-time" class="vl-btn">시각 저장</button>\n'
-        "      </div>\n"
-        "    </details>\n"
-        "  </div>\n"
-        '  <p id="cap-msg" class="vl-footnote" role="status"></p>\n'
-        "</div>"
-    )
-
-
-def caption_workbench_details_html(model: Mapping[str, object]) -> str:
-    """자막 작업대의 접힌 상세 — 원시·채택 글자·품질·출처(펼침 전에는 방해하지 않는다).
-
-    서버가 안전하게 조립한 표만 싣는다: 클라이언트는 여기에 손대지 않는다.
-    """
-    placeholder = model.get("empty")
-    if isinstance(placeholder, str) and placeholder:
-        return f'<p class="vl-note">{html.escape(placeholder)}</p>'
-    rows = cast(Sequence[Mapping[str, object]], model.get("details", ()))
-    body: list[str] = []
-    for row in rows:
-        body.append(
-            "<tr>"
-            f'<td class="vl-td"><code>{html.escape(str(row.get("id", "")))}</code></td>'
-            f'<td class="vl-td">{html.escape(str(row.get("startMs", "")))}→'
-            f"{html.escape(str(row.get('endMs', '')))}</td>"
-            f'<td class="vl-td">{html.escape(str(row.get("whisper", ""))) or "(없음)"}</td>'
-            f'<td class="vl-td">{html.escape(str(row.get("auto", ""))) or "(없음)"}</td>'
-            f'<td class="vl-td">{html.escape(str(row.get("now", ""))) or "(없음)"}</td>'
-            f'<td class="vl-td">{html.escape(str(row.get("basis", "")))}</td>'
-            "</tr>"
-        )
-    provenance = str(model.get("provenance", ""))
-    return (
-        '<details class="vl-details"><summary>상세 — whisper·채택 문구·지금 글자·출처</summary>'
-        '<table class="vl-table"><thead><tr>'
-        '<th class="vl-th">큐</th><th class="vl-th">시각(ms)</th>'
-        '<th class="vl-th">whisper 글자</th><th class="vl-th">채택 문구</th>'
-        '<th class="vl-th">지금 글자</th><th class="vl-th">근거</th>'
-        "</tr></thead><tbody>" + "".join(body) + "</tbody></table>"
-        f'<p class="vl-note">{html.escape(provenance)}</p></details>'
-    )
-
-
 _SHELL_CSS = """
 /* ── 껍데기(W-17 B, D57) — 머리줄 44 · 명령 줄 48 · 무대(나머지). 바깥 여백은 16px 하나. ── */
 .gradio-container .main.fillable { padding: 0 16px; }
@@ -1609,7 +1259,7 @@ _SHELL_CSS = """
 }
 .vl-step .no {
   display: inline-grid; place-items: center; box-sizing: border-box; width: 18px; height: 18px;
-  border: 1px solid currentColor; border-radius: 50%; font: 600 11px/1 var(--vl-font-mono);
+  border: 1px solid currentColor; border-radius: 50%; font: 600 12px/1 var(--vl-font-mono);
 }
 .vl-step .no svg { width: 11px; height: 11px; }
 .vl-step.done .no { border-color: var(--vl-success); background: var(--vl-success);
@@ -1618,7 +1268,7 @@ _SHELL_CSS = """
 .vl-step.cur { color: var(--vl-ink); background: var(--vl-surface-raised);
   box-shadow: inset 0 0 0 1px var(--vl-line-strong); }
 .vl-step.cur .no { border-color: var(--vl-accent-ink); color: var(--vl-accent-ink); }
-.vl-step .sub { font: 500 11px/14px var(--vl-font-mono); color: var(--vl-ink-muted); }
+.vl-step .sub { font: 500 12px/16px var(--vl-font-mono); color: var(--vl-ink-muted); }
 .vl-step .sub.r { color: var(--vl-tier-red-ink); }
 .vl-step-sep { flex: none; width: 12px; height: 1px; background: var(--vl-line-strong); }
 .vl-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%);
@@ -1648,7 +1298,13 @@ _SHELL_CSS = """
   border-radius: 6px; box-shadow: var(--vl-shadow-pop); color: var(--vl-ink);
 }
 .vl-keysheet-pop[hidden], .vl-activity-log[hidden], .vl-activity-empty[hidden] { display: none; }
-.vl-keysheet-pop { width: min(440px, calc(100vw - 32px)); padding: 16px; }
+.vl-keysheet-pop { width: min(720px, calc(100vw - 32px)); padding: 16px;
+  max-height: calc(100vh - 80px); overflow-y: auto; }
+.vl-keysheet-title { margin: 0 0 6px; font-size: 13px; }
+.vl-keysheet + .vl-keysheet-title { margin-top: 12px; }
+.vl-keysheet-player { columns: 2 280px; column-gap: 24px; }
+.vl-keysheet-player h4 { break-after: avoid; }
+.vl-keysheet-player dl { break-inside: avoid-column; }
 .vl-keysheet {
   display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 14px; align-items: center;
   margin: 0; font-size: 13px; line-height: 18px; }
@@ -1665,6 +1321,14 @@ _SHELL_CSS = """
 #vl-command-bar > #quick-status { display: none; }
 #vl-command-bar > #vl-usage-src { display: none; }
 #vl-activity-block { flex: 1 1 0; min-width: 120px; padding: 0; overflow: visible; }
+/* 분석 취소 둘 — 늘 누를 수 있지만(도는 일을 못 멈추는 일이 없게) 평소에는 조용한 단추다.
+   위험 색은 손을 얹었을 때와 도는 작업이 있을 때(「N개 작업」 배지)만 보인다. */
+#vl-command-bar > button.vl-cancel {
+  background: transparent; border-color: var(--vl-line-strong); color: var(--vl-ink-muted);
+  box-shadow: none; }
+#vl-command-bar > button.vl-cancel:not(:disabled):is(:hover, :focus-visible),
+#vl-command-bar:has(#vl-activity-count:not([hidden])) > button.vl-cancel:not(:disabled) {
+  border-color: var(--vl-tier-red-ink); color: var(--vl-tier-red-ink); }
 .vl-activity {
   position: relative; display: flex; align-items: center; gap: 10px; box-sizing: border-box;
   height: var(--vl-control-h); min-width: 0; padding: 0 4px 0 10px;
@@ -1755,6 +1419,11 @@ _SHELL_CSS = """
 /* 초안 결과 카드(W-46a, D100 §7a) — 승인 칸 아래. 경로는 고정폭 글자로 줄바꿈해 다 보인다.
    빨간 경고는 확인하지 않은 비추천이 빠졌다는 뜻이다(막지 않고 알린다). */
 #vl-export-card { min-width: 0; padding: 0; }
+/* 자막 입히기의 단추 줄(「미리보기」·「자막 입혀 내보내기」) — 승인 칸이 스크롤해도 칸 아래에
+   붙는다. 끈적이는 줄은 조상이 넘침을 자르면 붙지 못하므로 칸 묶음의 `overflow`를 푼다. */
+#vl-burn, #vl-burn > div { overflow: visible !important; }
+#vl-burn-actions { position: sticky; bottom: 0; z-index: 3; margin-top: 4px; padding: 6px 0;
+  background: var(--vl-surface); border-top: 1px solid var(--vl-line); }
 .vl-export { min-width: 0; padding: 8px 10px; border-radius: 6px; font-size: 12px;
   line-height: 16px; border: 1px solid var(--vl-line-strong); background: var(--vl-surface-raised);
   overflow-wrap: anywhere; }
@@ -1847,7 +1516,7 @@ WORKBENCH_CSS = (
 /* V2F1 작업대 — 색은 작업대 토큰(`--vl-*`, ui/design_tokens.py)만 부른다. 밝은·어두운 두 벌이
    같은 이름을 쓰므로 여기에는 테마 분기가 없다. 본점 채움(--vl-accent)은 주 단추·경계 손잡이·
    선택한 컷 셋뿐이고, 글자·선의 강조는 --vl-accent-ink다(D57). */
-#visual-player, #visual-workbench, #caption-workbench { max-width: 100%; }
+#visual-player, #visual-workbench { max-width: 100%; }
 .vl-note {
   color: var(--vl-ink-muted); font-size: 12px; margin: 4px 0 0;
 }
@@ -1865,18 +1534,20 @@ WORKBENCH_CSS = (
   /* 바닥값 = 타임라인 렠 칸(≈200) + 각주·간격(≈30) + 자막 줄·안내(≈60) + 최소 영상(≈110).
      560이면 800px 높이 창(무대 위쪽 279–335px 실측)에서 렠이 6–62px 잘렸다(D50). */
   --vl-stage-min-h: 400px;
-  --vl-list-col: minmax(240px, 280px);
-  --vl-panel-col: minmax(280px, 320px);
+  /* 열 비율은 Final Cut 위 덱 그대로(토큰, W-85 · D145) — 브라우저 · 뷰어 · 인스펙터. */
+  --vl-list-col: minmax(var(--vl-browser-min), var(--vl-browser-fr));
+  --vl-panel-col: minmax(var(--vl-inspector-min), var(--vl-inspector-fr));
   --vl-stage-gap: 8px;
   --vl-thumb-art-w: 64px; --vl-thumb-art-h: 36px;
   --vl-name-lines: 2;
   --vl-scrollbar: var(--vl-line-strong) var(--vl-surface);
   display: grid;
-  grid-template-columns: var(--vl-list-col) minmax(0, 1fr) var(--vl-panel-col);
-  grid-template-rows: auto minmax(0, 1fr) auto auto var(--vl-statusline-h);
+  grid-template-columns: var(--vl-list-col) minmax(0, var(--vl-viewer-fr)) var(--vl-panel-col);
+  /* 아래 덱(deck)은 원본 범위 타임라인이다 — 비어 있으면 높이가 없다(예전 화면 그대로). */
+  grid-template-rows: auto minmax(0, 1fr) auto auto auto var(--vl-statusline-h);
   grid-template-areas:
     "thumbs player quote" "thumbs player ranges" "thumbs player panel" "thumbs timeline timeline"
-    "foot foot foot";
+    "deck deck deck" "foot foot foot";
   height: max(var(--vl-stage-min-h), calc(100vh - var(--vl-stage-top)));
   gap: var(--vl-stage-gap); align-items: stretch; margin-top: 0; min-width: 0;
 }
@@ -1890,6 +1561,16 @@ WORKBENCH_CSS = (
 #visual-workbench:not([data-vl-empty]) { display: contents; }
 #visual-workbench[data-vl-empty] { grid-column: 1 / -1; }
 #vl-thumbs { grid-area: thumbs; }
+/* 아래 덱(W-85, D145) — 원본 범위 타임라인 요약 · 재생기. 타임라인이 있으면(재생기 뿌리가
+   `tl-empty`가 아니면) 무대는 화면 높이에 묶이지 않고 내용 높이다 — 위 덱 뷰어의 영상은 토큰
+   높이를 갖고, 덱은 그 아래 제 높이로 선다(문서가 스크롤한다). 없으면 예전 화면 그대로다. */
+#vl-timeline-deck { grid-area: deck; min-width: 0; flex-wrap: nowrap; }
+#visual-stage:has(#vl-timeline-deck .tl-root:not(.tl-empty)) {
+  height: auto; grid-template-rows: auto auto auto auto auto var(--vl-statusline-h);
+  --vl-viewer-video-h: var(--vl-deck-viewer-h); --vl-viewer-video-flex: none; }
+/* 넓은 브라우저 열은 Final Cut 필름스트립처럼 카드를 여러 열로 늘어놓는다. */
+#visual-stage .vl-cards {
+  grid-template-columns: repeat(auto-fill, minmax(var(--vl-browser-card-min), 1fr)); }
 /* 카드 열은 minmax(0,1fr) — 그냥 1fr(=minmax(auto,1fr))이면 카드 최소 폭 아래로
    줄지 못해 목록 안에 가로 스크롤이 생긴다. 스크롤바 색을 주지 않으면 어두운
    테마에서 흰 띠로 남는다. */
@@ -2016,8 +1697,10 @@ WORKBENCH_CSS = (
   display: flex; flex-direction: column; }
 .vl-video-surface { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
 /* 영상은 두 테마 모두 어두운 우물 위에 놓인다 — 밝은 바탕에 영상을 띄우지 않는다. */
+/* 높이·늘기는 무대 변수 — 아래 덱이 차 있으면 토큰 높이(W-85). 선언은 여기 한 번이다(D50). */
 #visual-preview video {
-  width: 100%; height: auto; flex: 1 1 auto; min-height: 0;
+  width: 100%; height: var(--vl-viewer-video-h, auto); flex: var(--vl-viewer-video-flex, 1 1 auto);
+  min-height: 0;
   background: var(--vl-video-well); object-fit: contain; }
 .vl-current-caption, #visual-note { flex: none; }
 #visual-note, .vl-footnote { overflow-wrap: anywhere; }
@@ -2052,7 +1735,9 @@ WORKBENCH_CSS = (
 #visual-stage:not([data-vl-advanced="open"]) .vl-handle { display: none; }
 @media (min-width: 1051px) {
   #visual-stage[data-vl-advanced="open"] {
-    grid-template-rows: auto minmax(0, 1fr) minmax(0, 2fr) auto var(--vl-statusline-h); }
+    grid-template-rows: auto minmax(0, 1fr) minmax(0, 2fr) auto auto var(--vl-statusline-h); }
+  #visual-stage[data-vl-advanced="open"]:has(#vl-timeline-deck .tl-root:not(.tl-empty)) {
+    grid-template-rows: auto auto auto auto auto var(--vl-statusline-h); }
 }
 .vl-markbar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
 .vl-markbar .vl-btn { padding: 4px 10px; }
@@ -2239,19 +1924,6 @@ WORKBENCH_CSS = (
 .vl-int > span > b { color: inherit; font-weight: 600; }
 .vl-int-ex > span > b { text-decoration: line-through; }
 
-/* 자막 무대 — 왼쪽 재생기(영상·파형·이동) · 오른쪽 큐 목록+편집기(주 저장·확정).
-   세팅·등록·실행은 무대 위 접힌 아코디언으로, 1440x900에서 주 조작이
-   문서 스크롤 없이 먼저 들어온다(ROOT 실측 재배치). */
-#caption-stage {
-  display: grid;
-  grid-template-columns: minmax(0, 7fr) minmax(300px, 5fr);
-  grid-template-areas: "player cues";
-  gap: 12px; align-items: start; margin-top: 4px;
-}
-#caption-stage .vl-stage-cell { display: contents; }
-#caption-stage .html-container { display: contents !important; }
-#caption-player { grid-area: player; }
-#caption-workbench { grid-area: cues; }
 /* 렠 층 좌표는 여기 한 곳(D50) — 202px 렠이 800–900px 창에서 재생기를 130–250px로 눌렀다.
    실행본은 층의 left·width만 정하고 세로 좌표는 CSS만 안다. 층 사이는 4px씩 띄운다
    (등급 20+22 · 컷 46+36 · 오디오 86+20 · 자막 110+22 — 디자인 Timeline, D57). */
@@ -2329,6 +2001,10 @@ WORKBENCH_CSS = (
   background: var(--vl-surface); border-color: var(--vl-line); color: var(--vl-ink-faint);
   box-shadow: none; cursor: default;
 }
+/* 그라디오의 `.gradio-style button[disabled] { opacity: .5; filter: grayscale(30%) }`가 꺼진
+   단추 글자를 대비 2.3:1까지 흐렸다 — 꺼짐은 위의 옅은 글자·테두리로만 보인다. */
+.vl-btn:disabled, .vl-current-caption:disabled {
+  opacity: 1 !important; filter: none !important; }
 .vl-btn-primary { background: var(--vl-accent); border-color: var(--vl-accent);
   color: var(--vl-on-accent); }
 .vl-btn-primary:hover:not(:disabled) {
@@ -2363,39 +2039,6 @@ WORKBENCH_CSS = (
   color: var(--vl-ink); font-size: 12px;
   margin: 6px 0 0; min-height: 1em;
 }
-.cap-overlay {
-  min-height: 1.7em; margin-top: 4px; padding: 4px 10px; font-size: 15px;
-  background: var(--vl-surface); border-radius: 6px;
-  color: var(--vl-ink);
-  border: 1px solid var(--vl-line);
-}
-.cap-overlay:not(.cap-overlay-on) { display: none; }
-.cap-cues {
-  max-height: 34vh; overflow-y: auto; display: flex; flex-direction: column; gap: 4px;
-  margin-top: 8px; border-radius: 6px; padding: 6px;
-  border: 1px solid var(--vl-line);
-}
-.cap-row {
-  display: flex; gap: 8px; border: none; background: none; padding: 4px 6px;
-  border-radius: 4px; cursor: pointer; text-align: left; align-items: baseline;
-  width: 100%; color: var(--vl-ink);
-}
-.cap-row:hover { background: var(--vl-surface-hover); }
-.cap-row-sel { background: var(--vl-accent-soft); }
-.cap-row-time {
-  flex: none; font-size: 11px; color: var(--vl-ink-muted);
-  font-family: var(--vl-font-mono); font-variant-numeric: tabular-nums; width: 12ch;
-}
-.cap-row-text { font-size: 14px; color: var(--vl-ink); }
-.cap-row-manual .cap-row-text::after {
-  content: " ·수동"; color: var(--vl-ink-muted); font-size: 11px; }
-.cap-editor { margin-top: 8px; }
-.cap-editor-fields { display: flex; gap: 8px; flex-wrap: wrap; }
-.cap-editor-fields label {
-  display: flex; flex-direction: column; gap: 2px; font-size: 11px;
-  color: var(--vl-ink-muted); min-width: 0;
-}
-.cap-editor-fields label:first-child { flex: 1 1 220px; }
 #visual-video::cue,.vl-source-overlay { font-size:clamp(20px,1.8vw,28px); }
 .vl-current-caption { width:100%; min-height:36px; padding:5px 10px; margin-top:4px;
  color: var(--vl-ink); background: var(--vl-surface); border:1px solid var(--vl-line);
@@ -2418,7 +2061,7 @@ WORKBENCH_CSS = (
   #visual-stage { height: auto; grid-template-columns: minmax(180px, 220px) minmax(0, 1fr);
     grid-template-rows: none;
     grid-template-areas: "quote quote" "thumbs player" "thumbs timeline" "thumbs ranges"
-      "thumbs panel" "foot foot"; }
+      "thumbs panel" "deck deck" "foot foot"; }
   #visual-stage .vl-thumbs { max-height: none; contain: size; }
   #vl-panel { max-height: 64vh; }
   #visual-preview video { flex: none; height: clamp(300px, 48vh, 540px); }
@@ -2426,8 +2069,7 @@ WORKBENCH_CSS = (
 }
 @media (max-width: 860px) {
   #visual-stage { grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: "quote" "player" "timeline" "ranges" "thumbs" "panel" "foot"; }
-  #caption-stage { grid-template-columns: minmax(0, 1fr); grid-template-areas: "player" "cues"; }
+    grid-template-areas: "quote" "player" "timeline" "deck" "ranges" "thumbs" "panel" "foot"; }
   #visual-stage .vl-thumbs { max-height: none; overflow: visible; contain: none; }
   #visual-stage .vl-thumbs > .vl-queue { position: static; box-shadow: none; }
   #visual-stage .vl-cards {
@@ -2435,7 +2077,6 @@ WORKBENCH_CSS = (
     scrollbar-color: var(--vl-scrollbar); }
   #visual-stage .vl-cards > .vl-thumb { flex: none; width: 236px; }
   #visual-preview video { height: clamp(230px, 45vh, 420px); }
-  .cap-cues { max-height: 28vh; }
   .vl-topbar { flex-wrap: wrap; height: auto; min-height: var(--vl-topbar-h); padding: 6px 0;
     gap: 6px 8px; }
   .vl-step-sep { display: none; }
@@ -2540,7 +2181,7 @@ if (!VL) {
 
 
 def _workbench_state(component_id: str, state_key: str) -> str:
-    """공용 실행본 머리 — 상태 저장소·서버 호출·늦은 응답 버림(두 작업대 공용).
+    """작업대 실행본 머리 — 상태 저장소·서버 호출·늦은 응답 버림(영상 작업대).
 
     서버 응답은 `echoEpoch`가 **지금 문서의 모델 epoch**와 같을 때만 적용한다
     (A→B→A 전환 뒤 도착한 낡은 응답은 조용히 버린다 — 잘못된 프로젝트에
@@ -2552,7 +2193,7 @@ def _workbench_state(component_id: str, state_key: str) -> str:
       var state = W.__vl{state_key}State;
       if (!state) {{
         state = {{ epoch: null, selectedId: null, selectedPlan: null, draft: null,
-          loop: null, lastMsg: "", downloads: null }};
+          loop: null, lastMsg: "" }};
         W.__vl{state_key}State = state;
       }}
       var props = W.__vl{state_key}Props;
@@ -2608,9 +2249,6 @@ def _workbench_state(component_id: str, state_key: str) -> str:
               "새로고침하세요.");
           }}
         }}
-        // 새 요청이 시작되면 이 화면에 남아 있던 내려받기 링크는 물러난다 —
-        // 편집 뒤 낡은 머리의 링크가 살아 있지 않게(자막 확정 흐름).
-        state.downloads = null;
         if (!server || !server[name]) {{ msg("서버 함수가 없습니다: " + name); return; }}
         server[name](payload).then(function (res) {{
           if (lateRequest()) {{ dropped(); return; }}
@@ -2633,10 +2271,6 @@ def _workbench_state(component_id: str, state_key: str) -> str:
             return;
           }}
           msg(humanLine(res.message));
-          if (res.downloads && res.downloads.length &&
-            typeof appendDownloads === "function") {{
-            appendDownloads(res.downloads);
-          }}
           if (onResponse) {{ onResponse(res); }}
           if (res.html && props) {{
             props.value = res.html;
@@ -2671,8 +2305,9 @@ VISUAL_BOOTSTRAP_JS = (
   // 열린 서랍 안에 초점이 있으면 재생 단축키를 쓰지 않는다 — 서랍을 열면 「닫기」에 초점이 가는데,
   // 거기서 누른 스페이스가 막 뒤의 영상을 틀면 안 된다(W-17 B).
   var VL_OPEN_DRAWER = ".sidebar.open";
+  var VL_OWN_KEYS = "[data-vl-own-keys]";
   // 보이는 첫 영상 하나만 조작한다 — 숨은 탭의 영상은 offsetParent가 null이다.
-  var VL_SHORTCUT_VIDEOS = [["visual-video", "vl-footnote"], ["caption-video", "cap-msg"]];
+  var VL_SHORTCUT_VIDEOS = [["visual-video", "vl-footnote"]];
   var VL_SHORTCUT_ACTIONS = { "Space": "toggle", "KeyK": "toggle", "KeyJ": "back",
     "KeyL": "forward", "Comma": "frameBack", "Period": "frameForward" };
   var VL_PLAY_FAILED_TEXT = "재생할 수 없습니다: ";
@@ -3193,6 +2828,29 @@ VISUAL_BOOTSTRAP_JS = (
         out.push("</details>");
         return out.join("");
       }
+      // 「글자 다시 받기(Hydrogen)」(W-114d, D187) — 단추가 지금 범위의 digest를 싣고 서버가 누른
+      // 순간 다시 재어 대조한다. 견적은 없다(D110 — 누름이 승인).
+      function hydrogenPanel(info) {
+        var hy = info && info.hydrogen;
+        if (!hy) { return ""; }
+        var out = ['<details class="vl-details" data-vl-hydrogen="1"' +
+          (hy.state === "running" ? " open" : "") + "><summary>" + esc(hy.label) +
+          (hy.state === "running" ? ' <span class="vl-badge">진행 중</span>' : "") +
+          "</summary>"];
+        out.push('<p class="vl-kv">' + esc(hy.explanation) + "</p>");
+        if (hy.summary) { out.push('<p class="vl-kv">' + esc(hy.summary) + "</p>"); }
+        if (hy.note) { out.push('<p class="vl-kv"><small>' + esc(hy.note) + "</small></p>"); }
+        if (hy.state === "ready" && hy.digest) {
+          out.push('<button type="button" class="vl-btn vl-btn-primary" ' +
+            'data-vl-act="hydrogen-retext" data-vl-digest="' + esc(hy.digest) + '">' +
+            esc(hy.label) + "</button>");
+        } else if (hy.reason) {
+          out.push('<p class="vl-kv">' + esc(hy.reason) + "</p>");
+        }
+        if (hy.last) { out.push('<p class="vl-kv"><small>' + esc(hy.last) + "</small></p>"); }
+        out.push("</details>");
+        return out.join("");
+      }
       // 3단 등급(D51) — 글자 표지는 색과 별개로 등급을 말한다(색약·흑백에서도 읽힌다). 빨강의
       // 화면 이름은 「비추천」(W-46a) — 대기열·결정 상자의 「제외 제안」은 기다리는 제안이다.
       function tierWord(tier, hold) {
@@ -3362,8 +3020,10 @@ VISUAL_BOOTSTRAP_JS = (
         var picked = c.id === sel || c.sourceId === curSourceId();
         var cls = "vl-thumb" + (picked ? " vl-thumb-sel" : "") +
           (cardExcluded(info) ? " vl-thumb-ex" : "");
+        // 끌 수 있다(W-110, D184) — 타임라인 끝에 놓으면 그 원본 전체가 클립으로 선다.
         return '<button type="button" class="' + cls + '" data-vl-card="' +
-            esc(c.id) + '" role="option"' + ' title="' + esc(c.sourceName) + '"' +
+            esc(c.id) + '" draggable="true" data-vl-source="' + esc(c.sourceId) + '"' +
+            ' role="option"' + ' title="' + esc(c.sourceName) + '"' +
           ' aria-selected="' + (picked ? "true" : "false") + '">' + cardArt(c) +
           '<span class="vl-thumb-name">' + esc(c.sourceName) + "</span>" +
           '<span class="vl-thumb-meta">' + cardCounts(info) + cardBadge(c, info) + "</span>" +
@@ -4119,6 +3779,7 @@ VISUAL_BOOTSTRAP_JS = (
         out.push(snapPanel(info));
         out.push(relistenPanel(info));
         out.push(refillPanel(info));
+        out.push(hydrogenPanel(info));
         ((info && info.crossSourceCandidates) || []).forEach(function(candidate) {
           out.push('<p class="vl-kv">다른 원본의 중복 후보 · ' +
             esc(candidate.other_source + ': ' + candidate.text) +
@@ -4837,6 +4498,8 @@ VISUAL_BOOTSTRAP_JS = (
         var cardId = node.getAttribute("data-vl-card");
         if (cardId) {
           var chosen = findCard(cardId); selectCard(cardId, true);
+          // 타임라인에서 그 영상의 자리로 간다(W-112, D186) — 재생기가 없으면 아무것도 하지 않는다.
+          if (chosen && window.__vlTimelineJump) { window.__vlTimelineJump(chosen.sourceId); }
           if (chosen && model.autoAnalyzeSelection && state.requestedSource !== chosen.sourceId) {
             var wanted = chosen.sourceId;
             state.requestedSource = wanted;
@@ -4899,6 +4562,11 @@ VISUAL_BOOTSTRAP_JS = (
         if (act === 'refill-approve') {
           call('vl_refill', {sourceId:curSourceId(),
             digest:node.getAttribute('data-vl-digest') || ''}, '빈칸 재전사를 시작하는 중…');
+          return;
+        }
+        if (act === 'hydrogen-retext') {
+          call('vl_hydrogen_retext', {sourceId:curSourceId(),
+            digest:node.getAttribute('data-vl-digest') || ''}, '글자 다시 받기를 시작하는 중…');
           return;
         }
         if (act === 'ear-take') { takeEar(node.getAttribute('data-vl-take')); return; }
@@ -5053,6 +4721,17 @@ VISUAL_BOOTSTRAP_JS = (
       // 옛 모델로 사건을 처리하는 일이 없다(듣는이 재사용 금지, A5 실측).
       if (prevRootClick) { root.removeEventListener("click", prevRootClick); }
       root.addEventListener("click", root._vlClick);
+      // 영상 카드를 끌면 원본 아이디를 싣는다(W-110, D184) — 받는 쪽은 타임라인 재생기다.
+      if (root._vlDrag) { root.removeEventListener("dragstart", root._vlDrag); }
+      root._vlDrag = function (ev) {
+        var target = ev && ev.target;
+        var node = target && target.closest ? target.closest("[data-vl-source]") : null;
+        if (!node || !root.contains(node) || !ev.dataTransfer) { return; }
+        var sourceId = node.getAttribute("data-vl-source");
+        ev.dataTransfer.setData("application/x-vlogsrt-source", sourceId);
+        ev.dataTransfer.effectAllowed = "copy";
+      };
+      root.addEventListener("dragstart", root._vlDrag);
       // 누르는 순간(pointerdown) 시각 맞춤 적용·되돌리기 단추면 그때 보이던 제안을 적어 둔다 —
       // 다른 곳을 누르면 지운다(남은 누름이 나중 키보드 승인에 묻어가지 않는다).
       if (root._vlDown) { root.removeEventListener("pointerdown", root._vlDown); }
@@ -5359,9 +5038,12 @@ VISUAL_BOOTSTRAP_JS = (
       if (typeof document.querySelector === "function" && document.querySelector(VL_OPEN_DRAWER)) {
         return true;
       }
+      // 제 키를 가진 칸(타임라인 재생기 · 초안 편집 — `data-vl-own-keys`) 안의 키는 그 칸 몫이다 —
+      // 같은 창 아래 덱의 J·L·I·O가 위 재생기를 움직이면 안 된다(W-85, D145).
       var t = ev.target;
       return !!(t && (t.isContentEditable || (typeof t.closest === "function" &&
-        (t.closest(VL_EDITABLE) || t.closest(VL_OPEN_DRAWER)))));
+        (t.closest(VL_EDITABLE) || t.closest(VL_OPEN_DRAWER) ||
+          t.closest(VL_OWN_KEYS)))));
     };
     W.__vlShortcutAction = function (ev) {
       if (W.__vlShortcutBlocked(ev)) { return null; }
@@ -5443,405 +5125,9 @@ VISUAL_BOOTSTRAP_JS = (
 )
 
 
-CAPTION_BOOTSTRAP_JS = (
-    _CLIENT_LIB_BODY
-    + r"""
-(function () {
-  var W = window;
-  if (!W.__vlWireCaption) {
-    W.__vlWireCaption = function (root, doc) {
-"""
-    + _workbench_state("caption-workbench", "CaptionWorkbench")
-    + r"""
-      var VL = W.__vlLib;
-      if (!root || !root.getAttribute) { return; }
-      var rawModel = VL.modelRaw(root);
-      if (!rawModel) { return; }
-      var model;
-      try { model = JSON.parse(rawModel); } catch (err) { return; }
-      // 같은 화면 생명의 **낡은 원본 출력** 방어 — 등록·실행·검토 같은 옛 원본
-      // 처리의 지연 도착이, 이미 받아들인 검토 머리보다 **낮은 머리**의 HTML로
-      // 화면을 되돌리던 길(ROOT 실측: 저장·확정 뒤 머리2 화면이 머리1로 굴러가
-      // 편집 칸·행·오버레이만 옛 글자를 보였다 — A10 확증 10케이스). 토큰이 같고
-      // 머리가 낮으면 못 믿는다 — **새 배선 세대를 만들지 않고** 지금 커밋된
-      // 모델로 화면만 다시 그린다: 대기 중인 진짜 요청의 신선도(배선 세대·epoch)
-      // 까지 무효화하면 옛 출력이 이긴 꼴이 된다(A10 실측: 대기 저장이 맥빗줬다).
-      // 같은 머리 재렌더·새 토큰 전환·진짜 오류 안내는 그대로다. 머리 숫자는
-      // **같은 실행(run) 안에서만** 비교한다 — 같은 작업공간의 새 실행은 머리가
-      // 낮게 다시 시작해도 의도한 현재 화면이니 열어 준다.
-      if (state.model && model.token === state.model.token &&
-          model.runId === state.model.runId &&
-          typeof model.head === "number" && typeof state.model.head === "number" &&
-          model.head < state.model.head) {
-        var keepRaw = JSON.stringify(state.model);
-        var keepHolder = VL.modelHolder(root);
-        try {
-          if (keepHolder) { keepHolder.textContent = keepRaw; }
-          else { root.setAttribute("data-vl-model", keepRaw); }
-        } catch (setErr) {
-          // 읽기 전용 뿌리 — 표식만으로도 다음 배선이 지금 모델을 본다.
-        }
-        root.__vlCaptionWiredModel = keepRaw;
-        if (typeof root.__vlCaptionRepaint === "function") {
-          root.__vlCaptionRepaint();
-        }
-        return;
-      }
-      // 배선 세대 표식 — 영상 작업대와 같은 재료: 같은 태그 뿌리의 그 자리
-      // morph(원소 유지·모델만 교체, A8 실측)까지 잡는다(아래 wireCommitted).
-      root.__vlCaptionWiredModel = rawModel;
-      state.model = model;
-      state.epoch = model.epoch;
-      // 배선 세대 — 옛 클로저 사건은 새 배선 앞에서 공용 상태·문서·서버를
-      // 건드리기 전에 물러난다(A6 실측: 옛 A1 자막 클릭이 새 A2 편집 칸·재생기를
-      // 바꾸던 결함). 화면 수명 토큰은 작업공간을 다시 열 때만 바뀐다 — 보통의
-      // 저장 재렌더(epoch만 바뀜)는 같은 화면이므로 선택·재생이 그대로 이어진다.
-      var wireSerial = (W.__vlCaptionWireSerial = (W.__vlCaptionWireSerial || 0) + 1);
-      state.wire = wireSerial;
-      var screenFresh = state.token !== model.token;
-      state.token = model.token;
-      if (screenFresh) {
-        state.selectedId = null;
-        state.downloads = null; // 새 화면 생명 — 옛 확정 머리의 링크는 못 남는다
-      }
-      function staleWire() {
-        return state.wire !== wireSerial || state.epoch !== model.epoch ||
-          doc.getElementById("caption-workbench") !== root;
-      }
-
-      function msg(text) {
-        var el = doc.getElementById("cap-msg");
-        if (el) { el.textContent = text || ""; }
-        state.lastMsg = text || "";
-      }
-      function paintDownloads() {
-        // 상태에 남아 있는 이 화면의 내려박기 링크를 안전한 <a>로 다시 그린다.
-        // 커밋 morph가 각주의 동적 자식을 지우고 재배선이 안내문을 복원하므로,
-        // 링크도 **커밋 뒤 재배선에서** 다시 붙는다(ROOT 실측: 옛 DOM에만 붙은
-        // 링크는 실제 props 커밋 뒤 사라졌다).
-        var box = doc.getElementById("cap-msg");
-        if (!box || !box.appendChild) { return; }
-        var items = state.downloads || [];
-        for (var i = 0; i < items.length; i += 1) {
-          var anchor = doc.createElement("a");
-          anchor.href = String(items[i].href);
-          anchor.setAttribute("download", "");
-          anchor.textContent = String(items[i].label || items[i].href);
-          box.appendChild(doc.createTextNode(" "));
-          box.appendChild(anchor);
-        }
-      }
-      function appendDownloads(items) {
-        // 서버가 등록 미디어 ID(`/media/<id>`)로만 준 링크를 검증해 상태에 둔다 —
-        // 사용자 글자·임의 경로가 HTML이 되는 길이 없다(글자는 textContent만).
-        // 새 요청 시작(call)과 화면 전환(토큰·자리표시 정리)이 상태를 비운다.
-        var kept = [];
-        for (var i = 0; i < items.length; i += 1) {
-          var href = String((items[i] && items[i].href) || "");
-          if (href.indexOf("/media/") !== 0) { continue; }
-          kept.push({ href: href, label: String((items[i] && items[i].label) || href) });
-        }
-        state.downloads = kept;
-        paintDownloads();
-      }
-      function esc(value) {
-        return String(value === null || value === undefined ? "" : value)
-          .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-          .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-      }
-      function videoEl() { return doc.getElementById("caption-video"); }
-
-      function renderCues() {
-        var mount = doc.getElementById("cap-cues");
-        if (!mount) { return; }
-        var rows = [];
-        for (var i = 0; i < (model.cues || []).length; i += 1) {
-          var cue = model.cues[i];
-          rows.push(
-            '<button type="button" class="cap-row' + (cue.basis === "manual" ?
-              " cap-row-manual" : "") +
-            (cue.id === state.selectedId ? " cap-row-sel" : "") +
-            '" data-vl-cue="' + esc(cue.id) + '" role="option"' +
-            ' aria-selected="' + (cue.id === state.selectedId ? "true" : "false") + '"' +
-            ' data-seek-start="' + esc(cue.seek) + '" data-seek-end="' + esc(cue.endSeek) + '"' +
-            ' data-text="' + esc(cue.text) + '" data-start-ms="' + esc(cue.startMs) + '"' +
-            ' data-end-ms="' + esc(cue.endMs) + '">' +
-            '<span class="cap-row-time">' + esc(cue.startMs) + "→" + esc(cue.endMs) + "</span>" +
-            '<span class="cap-row-text">' + esc(cue.text || "(빈 큐)") + "</span></button>"
-          );
-        }
-        mount.innerHTML = rows.join("") ||
-          '<p class="vl-note">큐가 없다 — 실행을 끝내고 새로고침하면 여기 나타난다.</p>';
-      }
-
-      function fillEditor(cue) {
-        var idEl = doc.getElementById("cap-cue-id");
-        var textEl = doc.getElementById("cap-text");
-        var startEl = doc.getElementById("cap-start");
-        var endEl = doc.getElementById("cap-end");
-        if (idEl) { idEl.value = cue.id; }
-        if (textEl) { textEl.value = cue.text || ""; }
-        if (startEl) { startEl.value = cue.startMs; }
-        if (endEl) { endEl.value = cue.endMs; }
-      }
-
-      function pickCue(id) {
-        for (var i = 0; i < (model.cues || []).length; i += 1) {
-          if (model.cues[i].id === id) { return model.cues[i]; }
-        }
-        return null;
-      }
-
-      function overlayFor(t) {
-        var cues = model.cues || [];
-        for (var i = 0; i < cues.length; i += 1) {
-          var s = parseFloat(cues[i].seek);
-          var e = parseFloat(cues[i].endSeek);
-          if (isFinite(s) && isFinite(e) && s <= t && t < e) { return cues[i]; }
-        }
-        return null;
-      }
-      function tick() {
-        var v = videoEl();
-        var overlay = doc.getElementById("caption-overlay");
-        if (!v || !overlay) { return; }
-        var cue = overlayFor(v.currentTime);
-        overlay.textContent = cue ? (cue.text || "") : "";
-      }
-      var v0 = videoEl();
-      var vPrev = W.__vlCaptionVideoEl;
-      if (vPrev && vPrev !== v0) {
-        // 재생기 껍데기가 다시 그려져 옛 자막 영상이 문서에서 떨어졌다(작업공간
-        // 전환·새 원본 등록) — 능동 언로드한다: 정지·주소 제거·청취 해제·옛 반복
-        // 해제에 이어 오버레이까지 지운다. 보통의 저장 재렌더는 껍데기가 그대로라
-        // (vPrev === v0) 이 길을 쓰지 않는다 — 재생 머리가 살아 있다(A6 실측).
-        if (vPrev._vlCapTick) { vPrev.removeEventListener("timeupdate", vPrev._vlCapTick); }
-        if (vPrev._vlLoop) {
-          try { vPrev._vlLoop(); } catch (err) { /* 최선 언로드 — 정지가 본질이다 */ }
-          vPrev._vlLoop = null;
-        }
-        try {
-          vPrev.pause();
-          vPrev.removeAttribute("src");
-          vPrev.load();
-        } catch (err) {
-          // 언로드 최선 — 재생 정지가 본질이다
-        }
-        var staleOverlay = doc.getElementById("caption-overlay");
-        if (staleOverlay) { staleOverlay.textContent = ""; }
-      }
-      if (v0) {
-        W.__vlCaptionVideoEl = v0;
-        if (v0._vlCapTick) { v0.removeEventListener("timeupdate", v0._vlCapTick); }
-        v0._vlCapTick = tick;
-        v0.addEventListener("timeupdate", tick);
-      }
-      var toggle = doc.getElementById("cap-overlay-toggle");
-      if (toggle) {
-        if (toggle._vlToggle) { toggle.removeEventListener("click", toggle._vlToggle); }
-        toggle._vlToggle = function () {
-          if (staleWire()) { return; }
-          var overlay = doc.getElementById("caption-overlay");
-          var on = toggle.getAttribute("aria-pressed") === "true";
-          toggle.setAttribute("aria-pressed", on ? "false" : "true");
-          if (overlay) {
-            if (on) { overlay.classList.remove("cap-overlay-on"); }
-            else { overlay.classList.add("cap-overlay-on"); }
-          }
-        };
-        toggle.addEventListener("click", toggle._vlToggle);
-      }
-
-      var prevCapClick = root._vlCapClick;
-      root._vlCapClick = function (ev) {
-        if (staleWire()) { return; }
-        if (!ev || !ev.target) { return; }
-        // 자식(글자·시각 칸)을 눌러도 그 행 단추의 사건으로 — 메타데이터 가진
-        // 조상까지 올라간다(A5 실측: 자식 클릭이 무시되던 결함).
-        var node = ev.target;
-        while (node && node !== root) {
-          if (node.getAttribute) {
-            var nid = node.getAttribute("id");
-            if (node.getAttribute("data-vl-cue") || nid === "cap-save" ||
-              nid === "cap-save-time" || nid === "cap-confirm") {
-              break;
-            }
-          }
-          node = node.parentNode;
-        }
-        if (!node || node === root || !node.getAttribute) { return; }
-        var cueId = node.getAttribute("data-vl-cue");
-        if (cueId) {
-          var cue = pickCue(cueId);
-          if (!cue) { return; }
-          state.selectedId = cueId;
-          renderCues();
-          fillEditor(cue);
-          var v = videoEl();
-          var seekAt = parseFloat(cue.seek);
-          if (v && isFinite(seekAt)) { v.currentTime = seekAt; v.play(); }
-          return;
-        }
-        var act = node.getAttribute("id");
-        if (act === "cap-save" || act === "cap-save-time") {
-          var idEl = doc.getElementById("cap-cue-id");
-          var textEl = doc.getElementById("cap-text");
-          var startEl = doc.getElementById("cap-start");
-          var endEl = doc.getElementById("cap-end");
-          if (!idEl || !idEl.value) { msg("큐를 먼저 목록에서 고르세요."); return; }
-          call("cap_save", {
-            op: act === "cap-save" ? "text" : "time",
-            cueId: idEl.value,
-            text: textEl ? textEl.value : "",
-            startMs: startEl ? startEl.value : "",
-            endMs: endEl ? endEl.value : "",
-            head: model.head,
-          }, "저장하는 중… — 재생은 그대로 이어진다");
-          return;
-        }
-        if (act === "cap-confirm") {
-          if (!model.canConfirm) {
-            msg(model.blockReason || "확정 조건이 남아 있다 — 열린 경고·미대응을 먼저 처리하세요.");
-            return;
-          }
-          call("cap_confirm", { head: model.head }, "확정 게시하는 중…");
-          return;
-        }
-      };
-      // 배선마다 듣는이를 갈아끼운다 — 옛 클로저가 재렌더 뒤 살아 있지 않게.
-      if (prevCapClick) { root.removeEventListener("click", prevCapClick); }
-      root.addEventListener("click", root._vlCapClick);
-
-      renderCues();
-      var first = pickCue(state.selectedId) || (model.cues &&
-        model.cues.length ? model.cues[0] : null);
-      if (first) { fillEditor(first); }
-      tick();
-      if (state.lastMsg) { msg(state.lastMsg); }
-      // 커밋 morph가 지운 내려박기 링크를 이 화면의 것만 다시 그린다(확정 흐름).
-      paintDownloads();
-      // 낡은 원본 출력 방어의 재그림 고리 — 새 배선 세대를 만들지 않고 이 배선의
-      // 그림 함수로 지금 커밋된 모델을 다시 칠한다(위 방어 분기가 쓴다).
-      root.__vlCaptionRepaint = function () {
-        renderCues();
-        var cue = pickCue(state.selectedId) || (model.cues &&
-          model.cues.length ? model.cues[0] : null);
-        if (cue) { fillEditor(cue); }
-        tick();
-        if (state.lastMsg) { msg(state.lastMsg); }
-        paintDownloads();
-      };
-    };
-  }
-  // 영상 작업대와 같은 고침(설치본 실측: watch는 인자 없이 불리고 직접 대입은
-  // watch를 아예 안 부르며, 렌더기는 같은 태그 뿌리를 그 자리에서 morph한다 —
-  // A7/A8 실측의 0큐 결함). 재배선의 주된 길은 부팅 때부터 상시인 관찰자와 대입
-  // 직후 스케줄러, watch는 보조 신호다. **커밋된 모델 문자열**(세대)이 다를 때만
-  // 다시 묶는다 — 보통의 저장 재렌더(같은 토큰·새 epoch)는 morph든 교체든 선택·
-  // 재생이 그대로 이어진다.
-  var teardownEmpty = function () {
-    // 자리표시 커밋(등록된 최종 영상 없음 — data-vl-empty, 모델 없음)도 그 자리
-    // morph로 온다(A9 실측). 묶은 화면을 정리한다: 배선 세대 무효화(옛 클로저·
-    // 늦은 응답 사망 — 문서 epoch가 사라져 echoEpoch 검사도 버린다), 상태·편집
-    // 칸·큐 목록·안내문·오버레이 청소, 재생 중이던 영상 능동 언로드.
-    W.__vlCaptionWireSerial = (W.__vlCaptionWireSerial || 0) + 1;
-    var st = W.__vlCaptionWorkbenchState;
-    if (st) {
-      st.wire = null; st.epoch = null; st.model = null; st.token = null;
-      st.selectedId = null; st.lastMsg = ""; st.downloads = null;
-    }
-    var d = W.__vlCaptionDoc || document;
-    var idEl = d.getElementById("cap-cue-id");
-    if (idEl) { idEl.value = ""; }
-    var textEl = d.getElementById("cap-text");
-    if (textEl) { textEl.value = ""; }
-    var startEl = d.getElementById("cap-start");
-    if (startEl) { startEl.value = ""; }
-    var endEl = d.getElementById("cap-end");
-    if (endEl) { endEl.value = ""; }
-    var cues = d.getElementById("cap-cues");
-    if (cues) { cues.innerHTML = ""; }
-    var msgEl = d.getElementById("cap-msg");
-    if (msgEl) { msgEl.textContent = ""; }
-    var overlay = d.getElementById("caption-overlay");
-    if (overlay) { overlay.textContent = ""; }
-    var v = W.__vlCaptionVideoEl;
-    if (v) {
-      if (v._vlCapTick) { v.removeEventListener("timeupdate", v._vlCapTick); }
-      if (v._vlLoop) {
-        try { v._vlLoop(); } catch (err) { /* 최선 정리 — 정지가 본질이다 */ }
-        v._vlLoop = null;
-      }
-      try {
-        v.pause();
-        v.removeAttribute("src");
-        v.load();
-      } catch (err) {
-        // 언로드 최선 — 정지가 본질이다
-      }
-    }
-    W.__vlCaptionVideoEl = null;
-  };
-  var wireCommitted = function () {
-    var d = W.__vlCaptionDoc || document;
-    var fresh = d.getElementById("caption-workbench");
-    if (!fresh || !fresh.getAttribute) { return; }
-    var raw = W.__vlLib.modelRaw(fresh);
-    if (!raw) {
-      // 반복 통보는 무동작(같은 빈 세대 표식) — 관찰자 루프 없음.
-      if (fresh.__vlCaptionWiredModel === "__vlEmpty__") { return; }
-      fresh.__vlCaptionWiredModel = "__vlEmpty__";
-      teardownEmpty();
-      return;
-    }
-    if (fresh.__vlCaptionWiredModel === raw) { return; }
-    // 먼저 찍고 묶는다 — 배선 중 관찰자가 다시 불려도 같은 모델엔 재배선 0.
-    fresh.__vlCaptionWiredModel = raw;
-    W.__vlWireCaption(fresh, d);
-  };
-  var rewireScheduled = function () {
-    wireCommitted();
-    Promise.resolve().then(wireCommitted);
-  };
-  W.__vlCaptionBlockEl = element;
-  W.__vlCaptionDoc = document;
-  // 영상 작업대와 같은 이름 규칙 — call()의 {state_key}Rewire 조회와 짝 맞춤.
-  W.__vlCaptionWorkbenchRewire = rewireScheduled;
-  var Observer = W.MutationObserver ||
-    (typeof MutationObserver !== "undefined" ? MutationObserver : null);
-  if (Observer && element && !element.__vlCaptionObserver) {
-    // 영상 작업대와 같은 관찰 — 포장 안쪽 morph(subtree)와 모델 칸의 글자·옛 모델 속성
-    // (세대)을 함께 본다. 배선은 모델을 건드리지 않는다 — 루프 없음(낡은 출력 방어가 칸을
-    // 지금 모델로 되돌려도 표식이 같아 wireCommitted가 무동작).
-    element.__vlCaptionObserver = new Observer(function () { wireCommitted(); });
-    element.__vlCaptionObserver.observe(element, { childList: true, subtree: true,
-      characterData: true, attributes: true, attributeFilter: ["data-vl-model"] });
-  }
-  if (!W.__vlCaptionWatchBound) {
-    W.__vlCaptionWatchBound = true;
-    watch("value", rewireScheduled);
-  }
-  W.__vlCaptionWorkbenchProps = props;
-  W.__vlCaptionWorkbenchServer = server;
-  W.__vlWireCaption(document.getElementById("caption-workbench"), document);
-})();
-"""
-)
-
-
 __all__ = [
-    "CAPTION_BOOTSTRAP_JS",
-    "CueRowView",
     "VISUAL_BOOTSTRAP_JS",
     "WORKBENCH_CSS",
-    "caption_cue_choices",
-    "caption_overlay_player_html",
-    "caption_player_html",
-    "cue_table_html",
-    "cue_table_markdown",
-    "caption_workbench_details_html",
-    "caption_workbench_html",
-    "cue_table_markdown",
     "format_bytes",
     "format_seconds",
     "media_player_html",
@@ -5850,5 +5136,4 @@ __all__ = [
     "visual_player_shell_html",
     "visual_workbench_html",
     "vtt_timecode",
-    "waveform_svg",
 ]

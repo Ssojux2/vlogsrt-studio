@@ -116,6 +116,16 @@ def test_style_scales_with_video_height() -> None:
     assert ko[19] == ko[20] == "192"  # 3840 / 20
 
 
+def test_portrait_style_scales_with_the_short_side() -> None:
+    """W-96(D171) — 세로 영상은 짧은 변(너비)으로 잰다: 2160×3840은 가로 4K와 같은 글자 크기다."""
+    pairing = burn_in.pair_cues(KO, EN)
+    tall = _styles(burn_in.ass_document(pairing, burn_in.default_style(), 2160, 3840))["KO"]
+    assert (tall[2], tall[16], tall[21]) == ("108", "8", "120")
+    assert tall[19] == tall[20] == "108"  # 2160 / 20 — 좌우 여백은 여전히 너비 몫
+    phone = _styles(burn_in.ass_document(pairing, burn_in.default_style(), 1080, 1920))["KO"]
+    assert (phone[2], phone[16], phone[21]) == ("54", "4", "60")
+
+
 def test_top_position_and_colors() -> None:
     style = _style(position="top", text_color="#FF8000")
     ko = _styles(burn_in.ass_document(burn_in.pair_cues(KO, None), style, 1920, 1080))["KO"]
@@ -155,3 +165,42 @@ def test_settings_reject_bad_values() -> None:
         BurnSettings(default_text_color="red")
     with pytest.raises(ValueError):
         BurnSettings(font_file="../x.otf")
+
+
+def test_a_dragged_position_is_the_block_center_and_old_styles_stay_anchored() -> None:
+    """W-107(D181) — 화면에서 끌어 옮긴 자리는 덩어리 가운데(천분율)다.
+    없으면 예전 위·아래 그대로."""
+    assert burn_in.default_style().x_permille is None
+    assert "x_permille" not in burn_in.style_to_mapping(burn_in.default_style())
+    moved = burn_in.style_from_mapping({"x_permille": 250, "y_permille": "400", "font_px": 60})
+    assert (moved.x_permille, moved.y_permille, moved.font_px) == (250, 400, 60)
+    assert burn_in.style_from_mapping(burn_in.style_to_mapping(moved)) == moved
+    cleared = burn_in.style_from_mapping({"x_permille": None, "y_permille": None})
+    assert cleared == burn_in.default_style()
+    for bad in (
+        {"x_permille": 500},  # 둘 다 있어야 한다
+        {"x_permille": 500, "y_permille": 1001},
+        {"x_permille": -1, "y_permille": 500},
+        {"x_permille": 500.5, "y_permille": 500},
+        {"x_permille": True, "y_permille": 500},
+    ):
+        with pytest.raises(burn_in.BurnInError):
+            burn_in.style_from_mapping(bad)
+
+
+def test_a_dragged_position_burns_at_that_point_centered() -> None:
+    """옮긴 자리는 ASS `\\pos`(덩어리 가운데 — 정렬 5)로 간다. 크기·여백 규칙은 그대로다."""
+    style = _style(x_permille=250, y_permille=400)
+    document = burn_in.ass_document(burn_in.pair_cues(KO, EN), style, 1920, 1080)
+    ko = _styles(document)["KO"]
+    assert (ko[18], ko[21]) == ("5", "0")
+    assert ko[19] == ko[20] == "96"  # 좌우 여백(접는 폭)은 그대로
+    first, _second = _events(document)
+    assert first == (
+        "Dialogue: 0,0:00:01.00,0:00:02.50,KO,,0,0,0,,{\\pos(480,432)}"
+        "오늘은 제주도\\N{\\rEN}Today, Jeju"
+    )
+    tall = burn_in.preview_document(
+        burn_in.BurnEvent(Fraction(0), Fraction(1), "가", ""), style, 1080, 1920
+    )
+    assert "{\\pos(270,768)}가" in tall

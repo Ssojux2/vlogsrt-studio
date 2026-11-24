@@ -1,19 +1,14 @@
 from __future__ import annotations
 
-import pytest
-
 from tests.raw.test_browser_runtime import _make_media
 from tests.raw.test_review_workspace import _wait_terminal
 from tests.raw.test_selection_analysis import SuitabilityClient, make_server, wait_until
 from ui.workspace_service import RawWorkspaceUi
 
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
-
 EXTRA_FIRST_SECONDS = 4
 
 
-def setup_library(tmp_path, monkeypatch, extra=(), parallel_analysis_limit=None):
+def setup_library(tmp_path, monkeypatch, extra=(), parallel_analysis_limit=None, gemini=True):
     a, b = tmp_path / "a.mov", tmp_path / "b.mov"
     _make_media(a, audio=True, seconds="32")
     _make_media(b, audio=True, seconds="3")
@@ -24,7 +19,12 @@ def setup_library(tmp_path, monkeypatch, extra=(), parallel_analysis_limit=None)
         _make_media(other, audio=True, seconds=str(EXTRA_FIRST_SECONDS + offset))
     client = SuitabilityClient(pause_second=True)
     ui, sender, client = make_server(
-        tmp_path, monkeypatch, a, client, parallel_analysis_limit=parallel_analysis_limit
+        tmp_path,
+        monkeypatch,
+        a,
+        client,
+        parallel_analysis_limit=parallel_analysis_limit,
+        gemini=gemini,
     )
     ui._selection_auto_approval = None
     root = ui.workspace_root()

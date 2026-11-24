@@ -27,6 +27,7 @@ pytest.importorskip(
 
 import gradio as gr  # noqa: E402
 
+from tests.raw.review_tick_parts import tick_part  # noqa: E402
 from tests.raw.test_background_library import setup_library  # noqa: E402
 from tests.raw.test_relisten import approve, pre_19b_digest, stage  # noqa: E402
 from tests.raw.test_selection_analysis import wait_until  # noqa: E402
@@ -39,14 +40,15 @@ from ui.workspace_service import (  # noqa: E402
 )
 from vlogsrt.env import ANALYSIS_GEMINI_KEY_ENV  # noqa: E402
 from vlogsrt.project.raw import service as raw  # noqa: E402
+from vlogsrt.project.raw import timing_engine  # noqa: E402
 from vlogsrt.project.raw.analysis_approval import LiveAnalysisTransport  # noqa: E402
 from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings  # noqa: E402
 from vlogsrt.project.raw.analysis_store import AnalysisStore  # noqa: E402
-from vlogsrt.project.raw.config import DEFAULT_ANALYSIS_MODEL  # noqa: E402
+from vlogsrt.project.raw.config import (  # noqa: E402
+    DEFAULT_ANALYSIS_MODEL,
+    TIMING_ENGINE_WHISPER,
+)
 from vlogsrt.project.raw.models import AnalysisRevision, RawWorkspaceError  # noqa: E402
-
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
 
 needs_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
 
@@ -63,8 +65,12 @@ POLITE_END = re.compile(r"(니다|세요|까요)[.)]*$")
 def test_the_mode_is_folded_into_the_digest_and_the_full_digest_is_pinned(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ui, _sender, client, root, ids = setup_library(tmp_path, monkeypatch)
+    # 견적만 재는 시험 — 옛 whisper 원본의 digest 바이트가 그대로인지 본다(D163 읽기 그대로).
+    ui, _sender, client, root, ids = setup_library(tmp_path, monkeypatch, gemini=False)
     client.resume.set()
+    workspace = ui.raw._workspace(root)
+    for asset_id in ids.values():  # 은퇴 전에 whisper로 듣기로 고정된 원본들이다
+        timing_engine.pin(workspace, asset_id, 0, TIMING_ENGINE_WHISPER)
     measured = ui.raw.selection_quote(root, ui._library_ids(root))
     every = tuple(measured.asset_ids)
     assert measured.mode == FULL and measured.digest == pre_19b_digest(ui, root, measured)
@@ -289,9 +295,12 @@ def test_blocks_put_the_approval_mode_in_the_approval_cell_and_wire_it(
     # 칸의 값을 맞추는 것은 둘 — 화면을 열 때(그때의 작업공간 값)와 1초 틱. 틱은 그 탭의 칸
     # 값을 입력으로 받아 저장값과 다를 때만 보낸다(탭마다 따로 — 검증 지적 1). 틱은 1초 상태 틱
     # 하나다(D63 세션 C) — 범위 칸은 그 틱의 첫 칸이다.
+    # 상태 틱은 화면 틱 하나에 실린 처리기다(W-83, D143) — 그 몫의 입력이 예전 의존 그대로다.
     refresh = {d["targets"][0][1]: d for d in deps if radio._id in d["outputs"]}
     assert sorted(refresh) == ["load", "tick"]
-    assert refresh["tick"]["inputs"][:2] == [ui._signature_state._id, radio._id]
+    status = tick_part(app, ui, ui.status_tick)
+    assert refresh["tick"] == status.dep
+    assert status.inputs[:2] == [ui._signature_state._id, radio._id]
     # 승인 클릭은 서명만 보낸다 — 견적 문구가 없다(D110).
     buttons = {b.value: b for b in app.blocks.values() if isinstance(b, gr.Button)}
     (approve_dep,) = [
@@ -302,9 +311,10 @@ def test_blocks_put_the_approval_mode_in_the_approval_cell_and_wire_it(
     names = [fn.__name__ for fn in ui._visual_workbench_block.server_fns]
     # 19f가 빈칸 재전사 승인을, 19h가 시각 맞춤 적용·되돌리기를, W-25b가 시각 정답을, W-25e가
     # 모든 영상 시각 맞춤 확인·적용을, W-71이 고르지 않은 영상의 패널 칸 읽기를 끝에 더했다.
-    assert names[-8:] == [
+    assert names[-9:] == [
         "vl_relisten",
         "vl_refill",
+        "vl_hydrogen_retext",
         "vl_snap_apply",
         "vl_snap_revert",
         "vl_timing_truth",

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 import types
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -16,20 +17,10 @@ from typing import Any
 import pytest
 
 from vlogsrt.config import Config
-from vlogsrt.models import Chunk
 from vlogsrt.project.pricing import LUNA_MODEL, official_pricing_snapshot
 from vlogsrt.project.raw import request_log, request_usage
 from vlogsrt.project.raw.workspace import RawWorkspace
-from vlogsrt.transcribe import (
-    CAPTION_TIMING_KIND,
-    AudioTranscriptionRequest,
-    LiveTranscriber,
-    ObserverFailure,
-    request_luna_vision,
-)
-
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
+from vlogsrt.transcribe import ObserverFailure, request_luna_vision
 
 PRICING = official_pricing_snapshot()
 WHISPER = Config().transcribe_model
@@ -74,106 +65,9 @@ def _workspace(tmp_path: Path) -> RawWorkspace:
     return RawWorkspace.create(tmp_path / "ws", "사용량")
 
 
-def _request(tmp_path: Path, model: str = WHISPER) -> AudioTranscriptionRequest:
-    audio = tmp_path / "chunk.wav"
-    audio.write_bytes(b"\x00")
-    return AudioTranscriptionRequest(
-        chunk=Chunk(audio, 0.0, 24.0, 0),
-        model=model,
-        response_format="verbose_json",
-        timestamp_granularities=("segment",),
-    )
-
-
-def _send(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, client: _FakeAudioClient, model: str = WHISPER
-) -> dict[str, Any]:
-    monkeypatch.setattr(LiveTranscriber, "_client", lambda self: client)
-    live = LiveTranscriber(api_key="sk-test", observer=request_usage.observer())
-    return live.send_request(
-        _request(tmp_path, model), Config(), kind=CAPTION_TIMING_KIND, stem="chunk"
-    )
-
-
 def _rows(workspace: RawWorkspace) -> list[sqlite3.Row]:
     with workspace.connect() as db:
         return db.execute("SELECT * FROM analysis_requests ORDER BY rowid").fetchall()
-
-
-def test_whisper_duration_usage_is_recorded_and_priced_per_minute(monkeypatch, tmp_path):
-    workspace = _workspace(tmp_path)
-    reply = {"segments": [], "usage": {"type": "duration", "seconds": 30}}
-    with request_log.scope(workspace, "job-1", live=True):
-        attempt = request_log.begin(
-            "asr", "fp"
-        )  # 이해 단계가 하는 그대로 — 이 행에 사용량이 붙는다
-        _send(monkeypatch, tmp_path, _FakeAudioClient(reply))
-        request_log.finish(attempt, received=True)
-    (row,) = _rows(workspace)
-    assert (row["stage"], row["status"]) == ("asr", "response_received")
-    assert row["model"] == WHISPER
-    assert Decimal(row["billed_seconds"]) == Decimal(30)
-    assert Decimal(row["cost_usd"]) == Decimal("0.003")  # 30초 × $0.006/분
-    assert row["unpriced_reason"] is None
-    assert row["pricing_revision"] == PRICING.snapshot_revision
-
-
-def test_duration_as_sdk_object_is_read_the_same_way(monkeypatch, tmp_path):
-    workspace = _workspace(tmp_path)
-    reply = types.SimpleNamespace(usage=_UsageObject(), model_dump=lambda: {"segments": []})
-    with request_log.scope(workspace, "job-1", live=True):
-        _send(monkeypatch, tmp_path, _FakeAudioClient(reply))
-    (row,) = _rows(workspace)
-    assert Decimal(row["billed_seconds"]) == Decimal(30)
-    assert Decimal(row["cost_usd"]) == Decimal("0.003")
-
-
-def test_caption_call_without_an_open_attempt_gets_its_own_receipt(monkeypatch, tmp_path):
-    """최종 자막 경로는 `begin`을 안 부른다 — 관찰자가 호출 하나당 행 하나를 만든다."""
-    workspace = _workspace(tmp_path)
-    reply = {"segments": [], "usage": {"type": "duration", "seconds": 60}}
-    with request_log.scope(workspace, "job-cap", live=True):
-        _send(monkeypatch, tmp_path, _FakeAudioClient(reply))
-        _send(monkeypatch, tmp_path, _FakeAudioClient(reply))
-    rows = _rows(workspace)
-    assert [(r["job_id"], r["stage"], r["status"]) for r in rows] == [
-        ("job-cap", CAPTION_TIMING_KIND, "response_received")
-    ] * 2
-    assert all(Decimal(r["cost_usd"]) == Decimal("0.006") for r in rows)
-
-
-def test_missing_usage_is_unpriced_never_zero(monkeypatch, tmp_path):
-    workspace = _workspace(tmp_path)
-    with request_log.scope(workspace, "job-1", live=True):
-        _send(monkeypatch, tmp_path, _FakeAudioClient({"segments": []}))
-    (row,) = _rows(workspace)
-    assert row["status"] == "response_received"
-    assert row["billed_seconds"] is None and row["cost_usd"] is None
-    assert row["unpriced_reason"] == "missing_usage"
-    assert request_usage.summarize(workspace).unpriced == 1
-
-
-def test_token_only_audio_usage_keeps_tokens_but_no_seconds_or_cost(monkeypatch, tmp_path):
-    """청 길이로 초를 지어내지 않는다 — 토큰만 온 전사는 가격 미정이다."""
-    workspace = _workspace(tmp_path)
-    reply = {"text": "안녕", "usage": {"type": "tokens", "input_tokens": 90, "output_tokens": 7}}
-    with request_log.scope(workspace, "job-1", live=True):
-        _send(monkeypatch, tmp_path, _FakeAudioClient(reply), model=GPT_TRANSCRIBE)
-    (row,) = _rows(workspace)
-    assert row["billed_seconds"] is None and row["cost_usd"] is None
-    assert (row["input_tokens"], row["output_tokens"]) == (90, 7)
-    assert row["unpriced_reason"] == "token_only_audio_usage"
-
-
-def test_unknown_audio_model_is_unpriced_but_seconds_are_kept(monkeypatch, tmp_path):
-    workspace = _workspace(tmp_path)
-    reply = {"segments": [], "usage": {"type": "duration", "seconds": 12}}
-    with request_log.scope(workspace, "job-1", live=True):
-        _send(monkeypatch, tmp_path, _FakeAudioClient(reply), model="mystery-stt")
-    (row,) = _rows(workspace)
-    assert row["model"] == "mystery-stt"
-    assert Decimal(row["billed_seconds"]) == Decimal(12)
-    assert row["cost_usd"] is None and row["unpriced_reason"] == "unknown_model"
 
 
 def test_luna_tokens_are_recorded_and_priced_for_the_snapshot_model(tmp_path):
@@ -226,35 +120,6 @@ def test_luna_response_without_usage_is_unpriced(tmp_path):
     (row,) = _rows(workspace)
     assert row["input_tokens"] is None and row["cost_usd"] is None
     assert row["unpriced_reason"] == "missing_or_invalid_usage"
-
-
-def test_uncertain_attempts_are_counted_and_never_priced(monkeypatch, tmp_path):
-    workspace = _workspace(tmp_path)
-    with request_log.scope(workspace, "job-1", live=True):
-        attempt = request_log.begin("asr", "lost")  # 보냈는데 응답을 못 받았다
-        request_log.finish(attempt, received=False, note="timeout")
-        with pytest.raises(_Timeout):  # 최종 자막 경로의 시간 초과도 같은 불확실이다
-            _send(monkeypatch, tmp_path, _FakeAudioClient(failure=_Timeout("t")))
-    rows = _rows(workspace)
-    assert [r["status"] for r in rows] == ["response_uncertain", "response_uncertain"]
-    assert all(r["cost_usd"] is None and r["unpriced_reason"] is None for r in rows)
-    summary = request_usage.summarize(workspace)
-    assert (summary.attempts, summary.received, summary.uncertain) == (2, 0, 2)
-    assert summary.unpriced == 0  # 불확실은 가격 미정과 따로 센다
-    assert summary.cost_usd == Decimal(0)
-
-
-def test_rejected_request_is_a_received_failure_not_uncertain(monkeypatch, tmp_path):
-    workspace = _workspace(tmp_path)
-
-    class _Rejected(Exception):
-        status_code = 400
-
-    with request_log.scope(workspace, "job-1", live=True), pytest.raises(_Rejected):
-        _send(monkeypatch, tmp_path, _FakeAudioClient(failure=_Rejected("bad")))
-    (row,) = _rows(workspace)
-    assert row["status"] == "response_received" and row["note"] == "request_format"
-    assert row["cost_usd"] is None
 
 
 def test_old_schema_table_gains_columns_once_and_old_rows_stay_readable(tmp_path):
@@ -317,32 +182,6 @@ def test_two_analyses_adding_the_same_column_at_once_both_open(tmp_path):
     assert {"unpriced_reason", "provider_request_id"} <= columns
 
 
-def test_summary_totals_per_job_and_overall(monkeypatch, tmp_path):
-    workspace = _workspace(tmp_path)
-    asr = {"segments": [], "usage": {"type": "duration", "seconds": 60}}
-    luna = {"output_text": "{}", "usage": {"input_tokens": 1000, "output_tokens": 500}}
-    with request_log.scope(workspace, "job-a", live=True):
-        _send(monkeypatch, tmp_path, _FakeAudioClient(asr))
-        _send(monkeypatch, tmp_path, _FakeAudioClient({"segments": []}))  # 사용량 없음
-    with request_log.scope(workspace, "job-b", live=True):
-        request_luna_vision(
-            _FakeResponsesClient(luna),
-            model=LUNA_MODEL,
-            payload={"input": []},
-            online=True,
-            observer=request_usage.observer(),
-        )
-        request_log.finish(request_log.begin("asr", "x"), received=False, note="timeout")
-    first = request_usage.summarize(workspace, ("job-a",))
-    assert (first.attempts, first.received, first.uncertain, first.unpriced) == (2, 2, 0, 1)
-    assert first.billed_seconds == Decimal(60) and first.cost_usd == Decimal("0.006")
-    both = request_usage.summarize(workspace)
-    assert (both.attempts, both.received, both.uncertain, both.unpriced) == (4, 3, 1, 1)
-    assert both.cost_usd == Decimal("0.0068")
-    assert (both.luna_input_tokens, both.luna_output_tokens) == (1000, 500)
-    assert request_usage.summarize(workspace, ()).attempts == 0  # 빈 집합은 빈 집계다
-
-
 def test_summary_of_a_workspace_that_never_ran_live_is_empty(tmp_path):
     workspace = _workspace(tmp_path)
     summary = request_usage.summarize(workspace)
@@ -374,29 +213,6 @@ def test_usage_line_is_compact_and_flags_uncertain_and_unpriced(tmp_path):
     )
 
 
-def test_offline_or_unscoped_runs_write_nothing(monkeypatch, tmp_path):
-    workspace = _workspace(tmp_path)
-    with request_log.scope(workspace, "job-off", live=False):  # 오프라인·픽스처 실행의 문
-        assert request_log.begin("asr", "fp") is None
-    reply = {"segments": [], "usage": {"type": "duration", "seconds": 30}}
-    _send(monkeypatch, tmp_path, _FakeAudioClient(reply))  # 범위 밖 호출 — 기록할 자리가 없다
-    with workspace.connect() as db:
-        tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert "analysis_requests" not in tables
-
-
-def test_a_broken_recorder_surfaces_as_observer_failure(monkeypatch, tmp_path):
-    workspace = _workspace(tmp_path)
-    reply = {"segments": [], "usage": {"type": "duration", "seconds": 30}}
-
-    def broken(*args: object, **kwargs: object) -> None:
-        raise sqlite3.OperationalError("disk I/O error")
-
-    monkeypatch.setattr(request_log, "record_usage", broken)
-    with request_log.scope(workspace, "job-1", live=True), pytest.raises(ObserverFailure):
-        _send(monkeypatch, tmp_path, _FakeAudioClient(reply))
-
-
 def test_live_browser_senders_carry_the_usage_observer():
     from vlogsrt.project.raw import browser_runtime
 
@@ -405,9 +221,19 @@ def test_live_browser_senders_carry_the_usage_observer():
         credentials, asr_approvals=lambda *a: {}, luna_approvals=lambda *a: {}
     )
     assert isinstance(transport.sender.observer, request_usage.UsageObserver)  # type: ignore[attr-defined]
-    timing, text = browser_runtime.caption_transport_providers(credentials)
-    assert isinstance(timing.sender.observer, request_usage.UsageObserver)
-    assert isinstance(text.sender.observer, request_usage.UsageObserver)
+    # whisper 전송이 실어 나르던 관찰자를 Gemini 시간 엔진이 운반자에서 그대로 받는다(D163).
+    from vlogsrt.project.raw.caption_provider import timing_provider_for
+    from vlogsrt.project.raw.config import GEMINI_TRANSCRIBE_PROFILE, RawWorkflowConfig
+
+    base = RawWorkflowConfig()
+    workflow = replace(
+        base, models=replace(base.models, timing_model=GEMINI_TRANSCRIBE_PROFILE.model)
+    )
+    timing = timing_provider_for(
+        workflow, sender=transport.sender, cfg=transport.cfg, gemini_client=object()
+    )
+    assert timing.observer is transport.sender.observer  # type: ignore[attr-defined]
+    assert not hasattr(transport.sender, "send_request")  # 오디오를 보내는 길이 없다
 
 
 def test_live_selection_records_luna_usage_and_the_status_line_shows_it(tmp_path, monkeypatch):
@@ -428,39 +254,18 @@ def test_live_selection_records_luna_usage_and_the_status_line_shows_it(tmp_path
     assert server._quick["stage"] == "추천 구간 준비 완료", server._quick
     root = server.workspace_root()
     summary = server.raw.analysis_usage_summary(root, server._quick["revision"])
-    assert summary.attempts == len(sender.calls) + len(client.calls) == 4
-    assert (summary.received, summary.uncertain) == (4, 0)
+    # 전사 1 · Hydrogen 글자 귀 1(D187 — 처음 듣는 영상) · Luna 3
+    hydrogen = len(sender.text_calls)
+    assert hydrogen == 1
+    assert summary.attempts == len(sender.calls) + hydrogen + len(client.calls) == 5
+    assert (summary.received, summary.uncertain) == (5, 0)
     assert (summary.luna_input_tokens, summary.luna_output_tokens) == (3000, 1500)
-    assert summary.unpriced == 4  # 앱 기본 Luna 모델은 스냅샷 밖이고 가짜 전송은 사용량이 없다
+    # 앱 기본 Luna 모델은 스냅샷 밖이고 가짜 전사는 사용량이 없다 — Hydrogen은 공식 단가로 매긴다
+    assert summary.unpriced == 4
     assert server.raw.analysis_usage_summary(root, "no-such-revision").attempts == 0
     line = request_usage.format_usage_line(summary)
     assert "Luna 입력 3,000/출력 1,500 토큰" in line
     assert line in server._quick_status()
-
-
-def test_final_caption_run_gets_receipts_only_when_its_providers_are_live(monkeypatch, tmp_path):
-    from vlogsrt.project.raw.caption_provider import TransportTimingProvider
-    from vlogsrt.project.raw.service import RawWorkspaceService
-
-    service = RawWorkspaceService()
-    root = tmp_path / "project"
-    service.create_workspace(root, "자막 영수증")
-    reply = {"segments": [], "usage": {"type": "duration", "seconds": 60}}
-    monkeypatch.setattr(LiveTranscriber, "_client", lambda self: _FakeAudioClient(reply))
-    live = LiveTranscriber(api_key="sk-test", observer=request_usage.observer())
-    live_timing = TransportTimingProvider(sender=live, cfg=Config())
-
-    def body(context: Any) -> None:
-        live.send_request(_request(tmp_path), Config(), kind=CAPTION_TIMING_KIND)
-
-    context = types.SimpleNamespace(job_id="job_caption")
-    service.with_request_receipts(root, body, live_timing, object())(context)
-    summary = service.job_usage_summary(root, "job_caption")
-    assert (summary.attempts, summary.received, summary.cost_usd) == (1, 1, Decimal("0.006"))
-    service.with_request_receipts(root, body, object(), object())(
-        types.SimpleNamespace(job_id="job_fixture")
-    )
-    assert service.job_usage_summary(root, "job_fixture").attempts == 0
 
 
 # ─────────────────────────────────────────────────────────────
@@ -691,3 +496,52 @@ def test_a_second_claude_response_on_one_attempt_adds_up(tmp_path):
     (row,) = _rows(workspace)
     assert Decimal(row["cost_usd"]) == Decimal("0.088")
     assert row["provider_request_id"] == "req_second"
+
+
+# ─────────────────────────────────────────────────────────────
+#  D163 — 시간 엔진 영수증은 Gemini 문으로만(whisper 전송 영수증 시험을 옮겼다)
+# ─────────────────────────────────────────────────────────────
+
+
+def _gemini_send(tmp_path: Path) -> Any:
+    """Gemini 3.5 Transcribe 한 청크 — 관찰자는 실제 앱과 같은 `request_usage.observer()`다."""
+    from tests.raw.gemini_echo import GeminiEcho
+    from tests.raw.test_gemini_timing_provider import GEMINI_VIEW, ON, _chunk
+    from vlogsrt.project.raw.caption_provider import GeminiTranscribeTimingProvider
+
+    chunk, binding = _chunk(tmp_path)
+    echo = GeminiEcho([{"start": 0.5, "end": 1.5, "text": "합성 영상입니다."}])
+    provider = GeminiTranscribeTimingProvider(
+        client=echo.client(), observer=request_usage.observer()
+    )
+    return provider.timed_transcript(binding=binding, chunk=chunk, settings=GEMINI_VIEW, on=ON)
+
+
+def test_a_gemini_hearing_records_one_received_receipt(tmp_path):
+    workspace = _workspace(tmp_path)
+    with request_log.scope(workspace, "job-1", live=True):
+        _gemini_send(tmp_path)
+    (row,) = _rows(workspace)
+    assert (row["stage"], row["status"]) == ("caption-timing", "response_received")
+    assert row["model"] == "gemini-3.5-transcribe"
+
+
+def test_offline_or_unscoped_gemini_hearings_write_nothing(tmp_path):
+    workspace = _workspace(tmp_path)
+    with request_log.scope(workspace, "job-off", live=False):  # 오프라인·픽스처 실행의 문
+        assert request_log.begin("asr", "fp") is None
+    _gemini_send(tmp_path)  # 범위 밖 호출 — 기록할 자리가 없다
+    with workspace.connect() as db:
+        tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "analysis_requests" not in tables
+
+
+def test_a_broken_recorder_surfaces_as_observer_failure_on_a_gemini_hearing(monkeypatch, tmp_path):
+    workspace = _workspace(tmp_path)
+
+    def broken(*args: object, **kwargs: object) -> None:
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(request_log, "record_usage", broken)
+    with request_log.scope(workspace, "job-1", live=True), pytest.raises(ObserverFailure):
+        _gemini_send(tmp_path)

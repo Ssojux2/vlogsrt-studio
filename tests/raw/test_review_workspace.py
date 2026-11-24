@@ -24,6 +24,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.raw.gemini_echo import write_utterance_replay
 from vlogsrt import preprocess
 from vlogsrt.project.raw import review_workspace as facade_module
 from vlogsrt.project.raw import service as raw
@@ -46,9 +47,6 @@ from vlogsrt.project.raw.segment_review import (
 )
 from vlogsrt.project.raw.workspace import DB_NAME, RawWorkspace
 from vlogsrt.project.timebase import milliseconds_half_up
-
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
 
 needs_ffmpeg = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
@@ -196,9 +194,7 @@ def _write_replay_fixtures(root: Path, asr_sources: dict[str, list[dict[str, obj
     keep_luna_workspace(root)
     fixtures = root / "analysis" / "replay"
     fixtures.mkdir(parents=True, exist_ok=True)
-    (fixtures / "asr-fixtures.json").write_text(
-        json.dumps({"sources": asr_sources}, ensure_ascii=False), encoding="utf-8"
-    )
+    write_utterance_replay(fixtures, asr_sources)
     (fixtures / "luna-fixtures.json").write_text(
         json.dumps({"windows": {"window_000000": _luna_body("window_000000")}}, ensure_ascii=False),
         encoding="utf-8",
@@ -271,7 +267,7 @@ def _prepared_workspace(
             {
                 shas[assets["발화.mov"]]: [
                     {"start": 0.8, "end": 2.0, "text": "도착해서 일정 설명"},
-                    {"start": 2.5, "end": 3.4, "text": "다음 장소 안내"},
+                    {"start": 2.7, "end": 3.4, "text": "다음 장소 안내"},
                 ]
             },
         )
@@ -570,7 +566,8 @@ def test_measured_vtt_uses_saved_utterances_and_measured_tail(
 
     output = facade.review_vtt(speech_segments[0].segment_id, package_dir)
     cues = output.vtt.cues
-    # 첫 조각 [0, 2초) — 첫 발화만 들어오고 두째 발화(2.5~3.4초)는 창 밖이다.
+    # 첫 조각 [0, 2초) — 첫 발화만 들어오고 두째 발화(2.7~3.4초)는 창 밖이다. 두 발화 사이를
+    # Gemini 단어 묶기의 쉼(0.6초)보다 길게 둬 두 줄로 남긴다(D163).
     assert len(cues) == 1
     assert cues[0].lines and "도착해서 일정 설명" in cues[0].lines[0]
     assert parse_review_vtt(output.vtt.text)[0].text == "도착해서 일정 설명"

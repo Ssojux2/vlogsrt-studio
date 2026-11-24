@@ -5,7 +5,7 @@
 
 실행 계약(계획 §4.1·§4.4): loopback 고정, `share` 없음, `allowed_paths` 없음.
 서버를 직접 띄우는 것은 이곳뿐이고, 서버 시작 때 한 번만 작업 복구가 일어난다.
-기존 단일 영상 자막 화면은 `ui/service.py`·CLI(`vlogsrt run`)로 그대로 살아 있다.
+옛 단일 영상 자막 화면과 CLI(`vlogsrt run`)는 whisper와 함께 지웠다(D163).
 """
 
 from __future__ import annotations

@@ -43,7 +43,8 @@ job 상태(별칭 포함)와 분리돼 있으며 이미 있어서는 안 된다 
 실행 파일·버전, 실제 자식 환경의 ffmpeg·ffprobe, 운반자 버전)만 담는다 —
 잠금·workspace·결과 동기화가 전부 없다.
 
-`caption-run`은 공유 받기로 시작한 자막 job의 문이다(S4A — 비용 추정 문
+`analyze`·`caption-run`은 whisper와 함께 지웠다(D163) — 부르면 계약 위반(2)으로 닫는다.
+아래는 옛 설명이다. `caption-run`은 공유 받기로 시작한 자막 job의 문이었다(S4A — 비용 추정 문
 `caption-estimate`는 D110에서 지웠다; 첫 실행이 범위를 고정한다). 이 job에는
 `input.fcpxml`이 없으므로 receive를 거치지 않는다 — 입력은
 스테이징된 `final.wav`·`final.fcpxml`·`caption-origin.json`이고, 실행 문은
@@ -95,6 +96,8 @@ _CAPTION_DIAGNOSTIC_FILES = (
 )
 _CAPTION_DELIVERY_DIR = "captions"
 _CAPTION_OPERATIONS = frozenset({"caption-run"})
+# whisper로만 돌던 분석·자막 작업 — whisper와 함께 지웠다(D163). 계약 위반(2)으로 닫는다.
+_RETIRED_OPERATIONS = frozenset({"analyze", *_CAPTION_OPERATIONS})
 _CARRIER = "VLOGSRT_ENGINE_API_KEY"
 # V2 환경 운반자(번들) — 값은 stdin V2 봉투와 같은 JSON 세 필드다(S2A-2 단위2).
 # 적용·제거 시점은 V1과 같다: 공급자 해석 전에 소비되고 이름은 지운다.
@@ -683,7 +686,10 @@ def _dispatch(argv: list[str]) -> tuple[int, str | None]:
     operation, job_id, job_dir_text = argv[0], argv[1], argv[2]
     if "/" in job_id or ".." in job_id:
         return 2, None
-    if operation not in {"analyze", "roughcut", _READINESS_OPERATION, *_CAPTION_OPERATIONS}:
+    if operation in _RETIRED_OPERATIONS:
+        print(f"retired operation: {operation} — whisper와 함께 지웠다(D163)", file=sys.stderr)
+        return 2, None
+    if operation not in {"roughcut", _READINESS_OPERATION}:
         print(f"unknown operation: {operation}", file=sys.stderr)
         return 2, None
     job_dir = Path(job_dir_text)

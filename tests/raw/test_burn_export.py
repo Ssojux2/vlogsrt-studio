@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
@@ -167,7 +168,9 @@ def test_burn_writes_beside_the_video_and_never_overwrites(
     job = burn_export.prepare(*_files(tmp_path / "trip"))
     facts = burn_export.burn(service, root, job, burn_in.default_style())
     output = tmp_path / "trip" / "draft.burned.mp4"
-    assert facts["path"] == str(output) and output.stat().st_mode & 0o777 == 0o644
+    # Windows의 권한 칸은 읽기 전용 한 비트뿐이다 — 쓸 수 있는 파일은 0o666으로 보인다.
+    published_mode = 0o644 if os.name == "posix" else 0o666
+    assert facts["path"] == str(output) and output.stat().st_mode & 0o777 == published_mode
     assert "오늘은 제주도\\N{\\rEN}Today, Jeju" in fake.ass and "바다 \\{예쁘다\\}" in fake.ass
     assert fake.fonts == [BURN_SETTINGS.font_file]
     report = json.loads(output.with_suffix(".json").read_text(encoding="utf-8"))

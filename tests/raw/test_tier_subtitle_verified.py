@@ -31,6 +31,7 @@ from typing import Any
 
 import pytest
 
+from tests.raw.invariant_tree import CLEAN_TIERING, TIER_SERVICE, check_invariants, fake_source_tree
 from tests.raw.test_finalcut_caption_timing import _put_report
 from tests.raw.test_tier_timing_service import (
     _flagged,
@@ -43,7 +44,6 @@ from tests.raw.test_tier_timing_service import (
 from tests.raw.test_tiering_v3 import _random_document, chatter, cue_key, make_document
 from tests.raw.test_visual_workbench_ui import _NODE_HARNESS, needs_node
 from tests.raw.tier_rules import V5_RULES, pin_v5_rules
-from tests.test_invariants import CLEAN_TIERING, TIER_SERVICE, _fake_source_tree, check_invariants
 from ui import ui_facade
 from vlogsrt.project import sync_check
 from vlogsrt.project.raw import sync_report, tiering
@@ -54,9 +54,6 @@ from vlogsrt.project.raw.analysis_config import (
 )
 from vlogsrt.project.raw.review_workspace import ReviewWorkspaceFacade
 from vlogsrt.project.raw.service import RawWorkspaceService
-
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
 
 needs_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
 
@@ -282,19 +279,22 @@ NINE: tuple[dict[str, object], ...] = tuple(
     {"start": 0.5 + 1.5 * i, "end": 2 + 1.5 * i, "text": text}
     for i, text in enumerate(
         (
-            "안녕하세요 오늘은 계곡에 왔어요",
-            "물이 정말 맑고 시원해 보여요",
-            "저기 바위 위에 앉아 볼게요",
-            "발을 담그니까 차갑네요",
-            "물고기가 지나가요 보이세요",
-            "햇빛이 나뭇잎 사이로 들어와요",
-            "바람이 불어서 시원하네요",
-            "조금 더 위쪽으로 올라가 볼게요",
-            "이제 천천히 들어가 볼게요",
+            "안녕하세요 오늘은 계곡에 왔어요.",
+            "물이 정말 맑고 시원해 보여요.",
+            "저기 바위 위에 앉아 볼게요.",
+            "발을 담그니까 차갑네요.",
+            "물고기가 지나가요 보이세요.",
+            "햇빛이 나뭇잎 사이로 들어와요.",
+            "바람이 불어서 시원하네요.",
+            "조금 더 위쪽으로 올라가 볼게요.",
+            "이제 천천히 들어가 볼게요.",
         )
     )
 )
-"""`usable` 화면 위 아홉 줄(0.5–14초, 서로 다른 말) — 한 줄이 짚히면 확인 필요 몫이 11.1%다."""
+"""`usable` 화면 위 아홉 줄(0.5–14초, 서로 다른 말) — 한 줄이 짚히면 확인 필요 몫이 11.1%다.
+
+줄 사이에 쉼이 없어 Gemini 단어 묶기는 문장 끝 부호에서만 줄을 나눈다 — 줄마다 온점으로
+끝낸다(D163)."""
 
 
 def _tier_rows(service: RawWorkspaceService, root: Path, asset_id: str) -> list[tuple]:
@@ -499,7 +499,7 @@ def test_verified_subtitle_fields_are_filled_only_by_the_service_entry(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rel: str, body: str, line: int, fragment: str
 ):
     clean = {TIER_SERVICE: CLEAN_SERVICE, "vlogsrt/project/raw/tiering.py": CLEAN_TIERING}
-    _fake_source_tree(monkeypatch, tmp_path, clean)
+    fake_source_tree(monkeypatch, tmp_path, clean)
     (tmp_path / "ui").mkdir(exist_ok=True)
     assert check_invariants.check_tier_timing_only_from_service() == []
     (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -515,7 +515,7 @@ def test_reading_the_field_elsewhere_is_not_a_producer(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
     clean = {TIER_SERVICE: CLEAN_SERVICE, "vlogsrt/project/raw/tiering.py": CLEAN_TIERING}
-    _fake_source_tree(monkeypatch, tmp_path, clean)
+    fake_source_tree(monkeypatch, tmp_path, clean)
     (tmp_path / "ui").mkdir(exist_ok=True)
     (tmp_path / "ui/view.py").write_text(
         "def shown(timing):\n    return timing.subtitle_verified\n", encoding="utf-8"
@@ -560,9 +560,7 @@ def _run_lift(tmp_path: Path) -> dict[str, Any]:
     )
     payload = tmp_path / "payload.json"
     payload.write_text(
-        json.dumps(
-            {"visual": ui_facade.VISUAL_BOOTSTRAP_JS, "caption": ui_facade.CAPTION_BOOTSTRAP_JS}
-        ),
+        json.dumps({"visual": ui_facade.VISUAL_BOOTSTRAP_JS}),
         encoding="utf-8",
     )
     completed = subprocess.run(

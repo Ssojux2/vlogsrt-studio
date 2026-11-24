@@ -10,6 +10,7 @@ from __future__ import annotations
 import dataclasses
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -154,6 +155,15 @@ def test_the_real_opener_is_one_open_call_and_tests_can_never_reach_it(
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    from vlogsrt.project.raw.service import RawWorkspaceError
+
+    if sys.platform != "darwin":
+        # Final Cut Pro는 macOS에만 있다 — 다른 운영체제에서는 열기를 부르지 않고
+        # 까닭을 댄다(W-84a).
+        with pytest.raises(RawWorkspaceError, match="macOS에만"):
+            workspace_ui.open_in_final_cut.__wrapped__(target)
+        assert calls == []
+        return
     workspace_ui.open_in_final_cut.__wrapped__(target)  # 막기 전 원래 함수 — argv만 본다
     assert calls == [["/usr/bin/open", "-a", "Final Cut Pro", str(target)]]
 

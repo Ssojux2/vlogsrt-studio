@@ -463,12 +463,12 @@ def test_uniform_extraction_argv_is_locked(monkeypatch: pytest.MonkeyPatch) -> N
     assert _argv(clock, probe) == [
         "ffmpeg", "-hide_banner", "-nostdin", "-y",
         "-seek_timestamp", "1", "-ss", "0.498333", "-t", "1.000000",
-        "-i", "/src/clip.mov", "-map", "0:0",
+        "-i", str(Path("/src/clip.mov")), "-map", "0:0",  # Windows는 `\\src\\clip.mov`
         "-c:v", "libx264", "-preset", "medium", "-crf", "17",
         "-pix_fmt", "yuv420p", "-vf", "select=lt(n\\,30)", "-fps_mode", "passthrough",
         "-c:a", "copy",
         "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709",
-        "-color_range", "tv", "-f", "mp4", "/stage/out.part",
+        "-color_range", "tv", "-f", "mp4", str(Path("/stage/out.part")),
     ]  # fmt: skip
 
 

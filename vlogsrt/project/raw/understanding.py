@@ -19,34 +19,36 @@ ffmpeg·ffprobe는 `vlogsrt/preprocess.py`의 공개 함수만 쓴다(불변 규
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
-import inspect
 import io
 import json
 import math
 import sys
+import threading
 import wave
 from array import array
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import date
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Protocol
 
 from vlogsrt import log, oscompat
-from vlogsrt.config import Config
 from vlogsrt.models import Chunk
 from vlogsrt.preprocess import VideoStreamInfo, extract_frame_index, extract_pcm_s16le
-from vlogsrt.project.raw import ear_rescue, request_log
+from vlogsrt.project.raw import request_log
 from vlogsrt.project.raw.analysis_config import (
     ASR_CHUNK_CUT,
+    PROVIDER_CONCURRENCY,
     AsrChunkCutSettings,
     RawUnderstandingSettings,
     validate_understanding_settings,
 )
 from vlogsrt.project.raw.caption_provider import (
-    RescueTimingProvider,
     TimedSegment,
     TimedTranscript,
     TimingProvider,
@@ -295,7 +297,7 @@ def plan_heard_chunks(
     처음 듣는 원본과 「다시 듣기」로 차례가 오른 원본만 조용한 계획이다. 청크 수는 같다."""
     fixed = plan_audio_chunks(audio, understanding)
     if len(fixed) == 1 or _heard_before(
-        audio, fixed, settings, type(provider).__name__, workdir, cache_dir, asr_epoch
+        audio, fixed, settings, provider_origin(provider), workdir, cache_dir, asr_epoch
     ):
         return ChunkPlan(fixed, CHUNK_PLAN_FIXED)
     return ChunkPlan(plan_quiet_chunks(audio, understanding), CHUNK_PLAN_QUIET)
@@ -406,29 +408,76 @@ def transcribe_selected_audio(
     않는다. 한 청크의 실패는 다음 청크를 멈추지 않는다(§7.3). 다시 듣기 차례는 `asr_chunk_key`.
     """
     _require_settings(understanding)
-    outcomes: list[AsrChunkOutcome] = []
-    for position, span in enumerate(spans):
+
+    def one(position: int, span: SampleSpan) -> AsrChunkOutcome:
         check_cancel()
-        outcomes.append(
-            _transcribe_span(
-                audio,
-                span,
-                position=position,
-                settings=settings,
-                provider=provider,
-                on=on,
-                request_id=request_id,
-                workdir=workdir,
-                cache_dir=cache_dir,
-                asr_epoch=asr_epoch,
-            )
+        return _transcribe_span(
+            audio,
+            span,
+            position=position,
+            settings=settings,
+            provider=provider,
+            on=on,
+            request_id=request_id,
+            workdir=workdir,
+            cache_dir=cache_dir,
+            asr_epoch=asr_epoch,
         )
+
+    outcomes = _each_chunk(list(enumerate(spans)), one, PROVIDER_CONCURRENCY.asr_chunks)
     return AsrEvidence(
         request_id=request_id,
         sample_rate=audio.sample_rate,
         chunks=tuple(outcomes),
         chunk_plan=chunk_plan,
     )
+
+
+_ASR_SLOT_GUARD = threading.Lock()
+_ASR_SLOTS: dict[int, threading.BoundedSemaphore] = {}
+
+
+@contextmanager
+def _asr_slot(width: int) -> Iterator[None]:
+    """프로세스 전체의 전사 청크 자리 — 영상 여럿이 같은 자리를 나눠 쓴다. 기다리며 취소를 본다."""
+    with _ASR_SLOT_GUARD:
+        slots = _ASR_SLOTS.setdefault(width, threading.BoundedSemaphore(width))
+    while not slots.acquire(timeout=PROVIDER_CONCURRENCY.slot_poll_seconds):
+        check_cancel()
+    try:
+        yield
+    finally:
+        slots.release()
+
+
+def _each_chunk(
+    jobs: list[tuple[int, SampleSpan]],
+    one: Callable[[int, SampleSpan], AsrChunkOutcome],
+    width: int,
+) -> list[AsrChunkOutcome]:
+    """청크마다 전사한다 — 1이면 예전 그대로 차례로, 넘으면 그만큼 함께(P-5, D159).
+
+    결과는 언제나 청크 차례다. 청크 하나의 실패는 그 청크의 기록이라(§7.3) 여기까지 오지 않고, 오는
+    것은 취소 같은 실행 전체의 멈춤뿐이다 — 그때는 아직 시작하지 않은 청크를 거두고 올린다(이미 보낸
+    청크는 끝나 캐시에 남는다)."""
+    if width <= 1 or len(jobs) <= 1:
+        return [one(position, span) for position, span in jobs]
+
+    def slotted(position: int, span: SampleSpan) -> AsrChunkOutcome:
+        with _asr_slot(width):
+            return one(position, span)
+
+    with ThreadPoolExecutor(max_workers=width, thread_name_prefix="vlogsrt-asr") as pool:
+        futures: list[Future[AsrChunkOutcome]] = [
+            pool.submit(contextvars.copy_context().run, slotted, position, span)
+            for position, span in jobs
+        ]
+        try:
+            return [future.result() for future in futures]
+        except BaseException:
+            for future in futures:
+                future.cancel()
+            raise
 
 
 def _transcribe_span(
@@ -455,7 +504,7 @@ def _transcribe_span(
     )
     chunk_request_id = f"{request_id}:chunk-{position:04d}"
     fingerprint = asr_chunk_key(
-        _sha256_file(wav_path), type(provider).__name__, settings, span, asr_epoch
+        _sha256_file(wav_path), provider_origin(provider), settings, span, asr_epoch
     )
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -527,228 +576,6 @@ def _write_cache(cache_path: Path, fingerprint: str, outcome: AsrChunkOutcome) -
 # ── 다른 귀 기준 재전사(W-29b, D78) — 어긋난 청크만 whisper에 다시 묻는다 ─────────────────
 
 
-@dataclass(frozen=True, slots=True)
-class _RescueContext:
-    audio: SelectedAudio
-    settings: RawWorkflowConfig
-    provider: TimingProvider
-    on: date
-    workdir: Path
-    cache_dir: Path | None
-    asr_epoch: int
-    cfg: Config
-
-
-def rescue_disagreeing_chunks(
-    audio: SelectedAudio,
-    evidence: AsrEvidence,
-    other_texts: Mapping[int, str],
-    *,
-    settings: RawWorkflowConfig,
-    provider: TimingProvider,
-    on: date,
-    workdir: Path,
-    cache_dir: Path | None = None,
-    asr_epoch: int = 0,
-    cfg: Config | None = None,
-    may_ask: bool = True,
-) -> AsrEvidence:
-    """다른 귀(`other_texts`, 청크 번호 → 받은 글자)와 어긋난 청크만 whisper에 다시 묻는다(D78).
-
-    `other_texts`에는 이번에 다른 귀 답을 **받은** 청크만 있다 — 빈 글자는 「아무것도 못 들음」(묻지
-    않는다), 열쇠가 없으면 「이번엔 답이 없음」(꺼짐·실패)이고 그때는 전에 채택한 답을 캐시에서 이어
-    쓴다(1차 환각으로 되돌아가지 않는다, 새로 묻지 않는다). `may_ask`가 거짓이면(승인이 다시 묻기를
-    묶지 않았다) 새로 묻지 않고 전에 채택한 답만 이어 쓴다.
-
-    온도 손잡이가 없는 제공자(재생)는 묻지 않는다 — 조용히 기본 온도로 회복을 묻지 않는다(D28).
-    엔진 `repair_*` 온도 차례로 묻고 다른 귀와 맞는(D37 조각 게이트를 지나는) 첫 답을 채택한다 —
-    시각은 그 whisper 답 그대로이고, 1차 세그먼트와 시도는 기록에 남는다. 모두 어긋나거나 묻지
-    못하면 1차 답 그대로다(비우지 않는다, 규칙 9). 같은 시도는 캐시로 다시 사지 않는다.
-    """
-    if "temperature" not in inspect.signature(provider.timed_transcript).parameters:
-        return evidence
-    context = _RescueContext(
-        audio, settings, provider, on, workdir, cache_dir, asr_epoch, cfg or Config()
-    )
-    chunks = tuple(
-        _rescued(chunk, other_texts.get(chunk.chunk_index) if may_ask else None, context)
-        for chunk in evidence.chunks
-    )
-    return evidence if chunks == evidence.chunks else replace(evidence, chunks=chunks)
-
-
-def _rescued(
-    outcome: AsrChunkOutcome, other: str | None, context: _RescueContext
-) -> AsrChunkOutcome:
-    """청크 하나 — 다른 귀 답이 이번에 없으면(`None`) 전에 채택한 답을 이어 쓴다(1차로 되돌아가지
-    않게)."""
-    if not outcome.succeeded:
-        return outcome
-    if other is None:
-        return _accepted_before(outcome, context)
-    duration = float(Fraction(outcome.sample_end - outcome.sample_start, context.audio.sample_rate))
-    if not ear_rescue.needs_rescue(outcome.transcript, duration, other, context.cfg):
-        return outcome
-    attempts: list[tuple[float, float, bool]] = []
-    for temperature in ear_rescue.temperatures(context.cfg):
-        check_cancel()
-        answer = _rescue_answer(outcome, temperature, context)
-        if answer is None:
-            break
-        trusted, similarity = ear_rescue.agreement(answer.transcript, duration, other, context.cfg)
-        attempts.append((temperature, round(similarity, SIMILARITY_DIGITS), trusted))
-        if trusted:
-            log.out(
-                f"내부 전사 청크 {outcome.chunk_index}: 다른 귀와 맞는 답을 온도 {temperature}에서"
-                " 받아 갈아끼웠다 (D78)"
-            )
-            _mark_accepted(outcome, attempts[-1], context)
-            return replace(
-                answer, rescue_attempts=tuple(attempts), first_transcript=outcome.transcript
-            )
-    if attempts:
-        log.warn(
-            f"내부 전사 청크 {outcome.chunk_index}: 다시 물어도 다른 귀와 맞지 않아 1차 답을 그대로"
-            " 둔다 — 원본 자막의 「확인 필요」를 보세요 (D78)"
-        )
-    return replace(outcome, rescue_attempts=tuple(attempts))
-
-
-SIMILARITY_DIGITS = 6
-"""기록에 남기는 조각 유사도의 소수 자리 — 표시용 반올림이다(판정은 반올림 전 값으로 한다)."""
-
-
-@dataclass(frozen=True, slots=True)
-class _RescueSlot:
-    """한 청크의 다시 묻기 자리 — WAV·범위·1차 열쇠(차례 포함)."""
-
-    span: SampleSpan
-    position: int
-    wav_path: Path
-    base: str
-
-
-def _rescue_slot(outcome: AsrChunkOutcome, context: _RescueContext) -> _RescueSlot:
-    span = SampleSpan(outcome.sample_start, outcome.sample_end)
-    wav_path = chunk_wav_path(context.workdir, outcome.chunk_index)
-    write_pcm_slice(context.audio, span, wav_path)
-    origin = type(context.provider).__name__
-    base = asr_chunk_key(_sha256_file(wav_path), origin, context.settings, span, context.asr_epoch)
-    return _RescueSlot(span, outcome.chunk_index, wav_path, base)
-
-
-def _rescue_path(slot: _RescueSlot, name: str, fingerprint: str, context: _RescueContext) -> Path:
-    if context.cache_dir is None:
-        return context.workdir / f"asr-chunk-{slot.position:04d}-rescue-{name}.json"
-    context.cache_dir.mkdir(parents=True, exist_ok=True)
-    return context.cache_dir / (fingerprint + ".json")
-
-
-def _mark_accepted(
-    outcome: AsrChunkOutcome, attempt: tuple[float, float, bool], context: _RescueContext
-) -> None:
-    """채택한 온도를 남긴다 — 다음 실행에 다른 귀 답이 없어도(꺼짐·실패) 그 답을 이어 쓴다."""
-    slot = _rescue_slot(outcome, context)
-    fingerprint = _rescue_key(slot.base, "accepted")
-    path = _rescue_path(slot, "accepted", fingerprint, context)
-    temperature, similarity, _accepted = attempt
-    body = {"fingerprint": fingerprint, "temperature": temperature, "similarity": similarity}
-    temp = path.with_suffix(".tmp")
-    temp.write_text(json.dumps(body), encoding="utf-8")
-    oscompat.replace(temp, path)
-
-
-def _accepted_before(outcome: AsrChunkOutcome, context: _RescueContext) -> AsrChunkOutcome:
-    """전에 채택한 다시 묻기 답(캐시) — 없으면 1차 답 그대로. 새로 묻지 않는다(돈이 들지 않는다)."""
-    slot = _rescue_slot(outcome, context)
-    fingerprint = _rescue_key(slot.base, "accepted")
-    path = _rescue_path(slot, "accepted", fingerprint, context)
-    try:
-        marker = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
-    except ValueError:
-        return outcome
-    if marker.get("fingerprint") != fingerprint:
-        return outcome
-    temperature = float(marker["temperature"])
-    key = _rescue_key(slot.base, temperature)
-    answer = _cached_success(_rescue_path(slot, str(temperature), key, context), key)
-    if answer is None:
-        return outcome
-    attempt = (temperature, float(marker["similarity"]), True)
-    return replace(answer, rescue_attempts=(attempt,), first_transcript=outcome.transcript)
-
-
-def _rescue_answer(
-    outcome: AsrChunkOutcome, temperature: float, context: _RescueContext
-) -> AsrChunkOutcome | None:
-    """한 온도의 다시 묻기 답 — 캐시에 있으면 그것, 묻지 못하면 None(경고)."""
-    slot = _rescue_slot(outcome, context)
-    fingerprint = _rescue_key(slot.base, temperature)
-    cache_path = _rescue_path(slot, str(temperature), fingerprint, context)
-    cached = _cached_success(cache_path, fingerprint)
-    if cached is not None:
-        return cached
-    request_id = f"{outcome.request_id}:rescue-{temperature}"
-    span = slot.span
-    chunk = Chunk(
-        path=slot.wav_path,
-        offset=float(Fraction(span.start, context.audio.sample_rate)),
-        duration=float(Fraction(span.end - span.start, context.audio.sample_rate)),
-        index=slot.position,
-    )
-    answer = _ask_tempered(
-        chunk, span, request_id, slot.wav_path, temperature, fingerprint, context
-    )
-    if answer is not None:
-        _write_cache(cache_path, fingerprint, answer)
-    return answer
-
-
-def _ask_tempered(
-    chunk: Chunk,
-    span: SampleSpan,
-    request_id: str,
-    wav_path: Path,
-    temperature: float,
-    fingerprint: str,
-    context: _RescueContext,
-) -> AsrChunkOutcome | None:
-    tempered = cast(RescueTimingProvider, context.provider)  # 서명 검사가 이 계약을 보증한다
-    attempt = request_log.begin("asr", fingerprint)
-    try:
-        binding = audio_chunk_binding(
-            chunk,
-            sample_start=span.start,
-            sample_end=span.end,
-            sample_rate=context.audio.sample_rate,
-            request_id=request_id,
-        )
-        timed = tempered.timed_transcript(
-            binding=binding,
-            chunk=chunk,
-            settings=stage1_timing_view(context.settings),
-            on=context.on,
-            stem=wav_path.stem,
-            source=context.audio.source_id,
-            temperature=temperature,
-        )
-    except Exception as exc:  # 다시 묻기 하나의 실패 — 1차 답은 그대로 남는다
-        request_log.finish(
-            attempt, received=not provider_error(exc)[2], note=provider_error(exc)[0]
-        )
-        check_cancel()
-        log.warn(f"내부 전사 청크 {chunk.index} 다시 묻기 실패 — 1차 답을 그대로 둔다: {exc}")
-        return None
-    request_log.finish(attempt, received=True)
-    return _timed_outcome(span, chunk.index, request_id, wav_path, timed)
-
-
-def _rescue_key(base: str, name: float | str) -> str:
-    """다시 묻기 캐시 열쇠 — 1차 청크 열쇠 + 온도(또는 채택 표지 `accepted`). 1차 열쇠는
-    그대로다."""
-    return hashlib.sha256(f"{base}:rescue/{name}".encode()).hexdigest()
-
-
 def _cache_path(workdir: Path, cache_dir: Path | None, position: int, fingerprint: str) -> Path:
     """청크 캐시의 자리 — 원본 캐시 폴더가 있으면 열쇠 이름, 없으면 실행 폴더의 차례 이름."""
     if cache_dir is None:
@@ -794,6 +621,16 @@ def _outcome_from_cache(raw: Mapping[str, Any]) -> AsrChunkOutcome:
 def chunk_wav_path(workdir: Path, position: int) -> Path:
     """청크 WAV의 자리 — 1단계 글자 경로(D59 19c)가 whisper와 **같은 WAV**를 다시 쓴다."""
     return workdir / f"asr-chunk-{position:04d}.wav"
+
+
+def provider_origin(provider: object) -> str:
+    """청크 캐시 열쇠의 제공자 칸(P-6, D160) — 제공자 클래스의 고정 값 `CACHE_ORIGIN`.
+
+    예전에는 `type(provider).__name__`이라 클래스 이름을 바꾸면 이미 산 전사를 다시 샀다. 고정
+    값은 지금 이름과 같아 열쇠 바이트가 그대로다. 값이 없는 제공자(시험의 가짜)는 예전처럼 클래스
+    이름이다."""
+    origin = getattr(provider, "CACHE_ORIGIN", None)
+    return origin if isinstance(origin, str) and origin else type(provider).__name__
 
 
 def asr_chunk_key(

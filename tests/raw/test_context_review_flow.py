@@ -28,9 +28,6 @@ from vlogsrt.project.raw import context_review as cr
 from vlogsrt.project.raw import service as raw_service
 from vlogsrt.project.raw.analysis_config import CONTEXT_REVIEW
 
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
-
 needs_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
 
 
@@ -193,6 +190,7 @@ def test_an_expired_gemini_price_refuses_context_and_english_before_any_send(
     from ui import workspace_service as ws
     from vlogsrt.config import Config
     from vlogsrt.project.raw.analysis_approval import LiveAnalysisTransport
+    from vlogsrt.project.raw.config import TRANSLATION
 
     flash = "gemini-3.8-flash"
     server = ws.RawWorkspaceUi(state_path=tmp_path / "ui-state.json")
@@ -204,7 +202,8 @@ def test_an_expired_gemini_price_refuses_context_and_english_before_any_send(
         client=object(),
         asr_approvals=server._production_asr_approvals,
         luna_approvals=server._production_luna_approvals,
-        gemini_clients={flash: object()},
+        # 맥락 평가는 Flash, 번역은 설정의 번역 모델(D187 — Hydrogen)이다.
+        gemini_clients={flash: object(), TRANSLATION.model: object()},
         on=date(2030, 1, 1),  # 모든 Gemini 단가의 재확인 기한 뒤
     )
     paid: list[str] = []

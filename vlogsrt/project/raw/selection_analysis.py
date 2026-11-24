@@ -312,6 +312,8 @@ def _run_transcription(
         cfg=transport.cfg,
         on=transport.on,
         timing_client=getattr(transport, "timing_client", None),
+        # 전체 승인이면 전사를 기다리는 동안 Gemini 창 클립을 미리 자른다(P-4, D158).
+        preencode_clips=approved.mode != MODE_TRANSCRIBE,
     )
     job = service.get_job(root, first.job_id)
     revisions = AnalysisStore(service._workspace(root)).list_revisions()

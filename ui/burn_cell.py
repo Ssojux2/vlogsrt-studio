@@ -30,23 +30,27 @@ BURN_ID = "vl-burn"
 BURN_JOB_LABEL = "자막 입히기"
 TITLE_TEXT = (
     "**자막 입히기** — 영상에 한국어·영어 자막을 Pretendard로 새겨 `<이름>.burned.mp4`를"
-    " 만듭니다(원본은 그대로)."
+    " 만듭니다(원본은 그대로). 파일을 고르지 않으면 방금 공유한 타임라인의 영상·자막을 씁니다."
 )
+PATHS_LABEL = "파일 직접 고르기(고급)"
+"""세 경로 칸을 접어 두는 칸 — 비워 두는 것이 기본 길이라 단추가 칸 아래로 밀리지 않게 한다."""
+ACTIONS_ID = f"{BURN_ID}-actions"
+"""「미리보기」·「자막 입혀 내보내기」 줄 — 승인 칸이 스크롤해도 칸 아래에 붙는다(CSS)."""
 VIDEO_LABEL = "영상"
-VIDEO_INFO = (
-    "비워 두면 마지막 초안의 draft.mp4입니다 — 최종 편집을 저장했으면 그 컷대로 잘라 이어 입힙니다."
-)
+VIDEO_INFO = "비워 두면 방금 공유한 타임라인의 영상을 씁니다."
 KOREAN_LABEL = "한국어 SRT"
-KOREAN_INFO = (
-    "비워 두면 마지막 초안의 SRT입니다 — 최종 편집을 저장했으면 편집본 SRT(`edit/final.srt`)입니다."
-)
+KOREAN_INFO = "비워 두면 방금 공유한 타임라인의 자막을 씁니다."
 ENGLISH_LABEL = "영어 SRT"
-ENGLISH_INFO = (
-    "비워 두면 한국어 SRT 옆의 `<이름>.en.srt`(없으면 한글만)입니다 — 최종 편집이면 지금 편집본"
-    " 글을 옮긴 것만 씁니다."
-)
+ENGLISH_INFO = "비워 두면 한국어 SRT 옆의 `<이름>.en.srt`를 씁니다(없으면 한글만)."
 BROWSE_LABEL = "고르기"
 POSITION_LABEL = "위치"
+POSITION_INFO = (
+    "화면에서 자막을 끌어 옮겼으면 그 자리를 씁니다 — 「위치」나 「여백」을 바꾸면 위·아래 자리로"
+    " 돌아갑니다."
+)
+SYNC_ID = f"{BURN_ID}-sync"
+"""재생기 화면에서 모양을 저장하면(W-107, D181) 누르는 숨은 단추 — 손잡이를 저장값으로
+다시 맞춘다."""
 POSITION_CHOICES = [("아래", "bottom"), ("위", "top")]
 FONT_LABEL = "글자 크기 (1080p 기준 px)"
 OUTLINE_LABEL = "외곽선 (px)"
@@ -71,6 +75,19 @@ WAKE_JS = (
 )
 """내보내기의 앞 단계 — 활동 띠를 바쁜 폴링으로 깨우고 입력을 그대로 넘긴다(D101)."""
 STYLE_KEYS = ("position", "font_px", "outline_px", "margin_px", "text_color")
+POINT_KEYS = ("x_permille", "y_permille")
+"""화면에서 끌어 옮긴 자리(W-107, D181) — 손잡이에는 없고 저장값에만 있다."""
+OVERLAY_STYLE_JS = """
+(signature, position, font, outline, margin, color) => {
+  const player = window.__vlTimelinePlayer;
+  if (player && player.setBurnStyle) {
+    player.setBurnStyle({ position: position, font_px: Number(font), outline_px: Number(outline),
+      margin_px: Number(margin), text_color: color });
+  }
+  return [signature, position, font, outline, margin, color];
+}
+"""
+"""손잡이를 바꾸면 저장하기 전에 재생기 자막 겹을 다시 그린다(W-98, D173) — 값은 그대로 넘긴다."""
 _SHORT_HEX = re.compile(r"#([0-9A-Fa-f])([0-9A-Fa-f])([0-9A-Fa-f])")
 
 
@@ -128,15 +145,12 @@ class BurnCell:
         style = self.owner.raw.subtitle_burn_style()
         with gr.Group(elem_id=BURN_ID):
             gr.Markdown(TITLE_TEXT, elem_id=f"{BURN_ID}-title")
-            self.video, self.video_browse = self._path_row(VIDEO_LABEL, VIDEO_INFO, "video")
-            self.korean, self.korean_browse = self._path_row(KOREAN_LABEL, KOREAN_INFO, "korean")
-            self.english, self.english_browse = self._path_row(
-                ENGLISH_LABEL, ENGLISH_INFO, "english"
-            )
+            self._path_rows()
             self.position = gr.Radio(
                 POSITION_CHOICES,
                 value=style.position,
                 label=POSITION_LABEL,
+                info=POSITION_INFO,
                 elem_id=f"{BURN_ID}-position",
             )
             self.font = self._slider(FONT_LABEL, settings.font_px_range, style.font_px, "font")
@@ -149,13 +163,24 @@ class BurnCell:
             self.color = gr.ColorPicker(
                 style.text_color, label=COLOR_LABEL, elem_id=f"{BURN_ID}-color"
             )
-            with gr.Row():
+            # 결과는 단추 줄 위에 선다 — 단추 줄이 칸 아래에 붙어 결과를 가리지 않는다.
+            self.preview_html = gr.HTML("", elem_id=f"{BURN_ID}-preview")
+            self.result = gr.Markdown("", elem_id=f"{BURN_ID}-result")
+            with gr.Row(elem_id=ACTIONS_ID):
                 self.preview_button = gr.Button(
                     PREVIEW_LABEL, size="sm", elem_id=f"{BURN_ID}-preview-run"
                 )
                 self.export_button = gr.Button(EXPORT_LABEL, size="sm", elem_id=f"{BURN_ID}-run")
-            self.preview_html = gr.HTML("", elem_id=f"{BURN_ID}-preview")
-            self.result = gr.Markdown("", elem_id=f"{BURN_ID}-result")
+            self.sync_button = gr.Button(SYNC_ID, visible="hidden", elem_id=SYNC_ID)
+
+    def _path_rows(self) -> None:
+        """세 경로 칸 — 비우는 것이 기본 길이라 접어 둔다(칸·처리기는 그대로다)."""
+        with gr.Accordion(PATHS_LABEL, open=False, elem_id=f"{BURN_ID}-paths"):
+            self.video, self.video_browse = self._path_row(VIDEO_LABEL, VIDEO_INFO, "video")
+            self.korean, self.korean_browse = self._path_row(KOREAN_LABEL, KOREAN_INFO, "korean")
+            self.english, self.english_browse = self._path_row(
+                ENGLISH_LABEL, ENGLISH_INFO, "english"
+            )
 
     def _path_row(self, label: str, info: str, name: str) -> tuple[Any, Any]:
         box = gr.Textbox(value="", label=label, info=info, elem_id=f"{BURN_ID}-{name}")
@@ -203,6 +228,27 @@ class BurnCell:
             self.export_view, inputs, [self.result, status], concurrency_limit=1, js=WAKE_JS
         )
         self.owner._report_activity(exported, status)
+        # 손잡이를 사람이 바꾸면 바로 저장하고 재생기 자막 겹에도 보인다(W-98, D173) — 공유의
+        # 번인이 화면에 보인 모양을 쓴다. `input`은 사람의 손만 — 되살리기(`restore_view`)는 아니다.
+        for knob in self.style_inputs():
+            knob.input(
+                self.save_view,
+                [self.owner._signature_state, *self.style_inputs()],
+                None,
+                js=OVERLAY_STYLE_JS,
+                show_progress="hidden",
+                api_name=False,
+            )
+
+        # 재생기 화면에서 끌어 옮기거나 키우면(W-107, D181) 그쪽이 저장하고 이 숨은 단추를 누른다 —
+        # 손잡이가 낡은 값으로 남아 다음 손잡이 저장이 화면의 모양을 덮지 않게.
+        self.sync_button.click(
+            self.restore_view,
+            self.owner._signature_state,
+            self.style_inputs(),
+            show_progress="hidden",
+            api_name=False,
+        )
 
     def wire_restore(self, event: Any) -> None:
         """페이지를 열면 그 작업공간에 저장한 모양으로 손잡이를 맞춘다."""
@@ -228,6 +274,15 @@ class BurnCell:
         style = self.owner.raw.subtitle_burn_style(root)
         return (style.position, style.font_px, style.outline_px, style.margin_px, style.text_color)
 
+    def save_view(self, signature: str | None, *values: Any) -> None:
+        root = self.owner._snapshot_root()
+        if root is None or not signature or signature != self.owner._signature_for(root):
+            return
+        try:
+            self.owner.raw.save_subtitle_burn_style(root, self._mapping(root, values))
+        except self.service_error as error:
+            gr.Warning(f"자막 모양을 저장하지 못했습니다 — {error}")
+
     def preview_view(self, signature: str | None, *values: Any) -> tuple[str, str]:
         closed = self.owner._library_first_reply()
         if closed is not None:
@@ -235,7 +290,7 @@ class BurnCell:
         root = self.owner._require_current_selection(signature)
         raw = self.owner.raw
         try:
-            style = self._style(values[3:])
+            style = self._style(root, values[3:])
             job = raw.prepare_subtitle_burn(root, *(_given(text) for text in values[:3]))
             picture = raw.subtitle_burn_preview(job, style)
         except self.service_error as error:
@@ -256,7 +311,7 @@ class BurnCell:
         root = self.owner._require_current_selection(signature)
         raw = self.owner.raw
         try:
-            style = self._style(values[3:])
+            style = self._style(root, values[3:])
             job = raw.prepare_subtitle_burn(root, *(_given(text) for text in values[:3]))
             text = self._run(root, job, style)
         except self.service_error as error:
@@ -277,8 +332,25 @@ class BurnCell:
             raise self.service_error(f"자막을 입히지 못했습니다 — {record.error}")
         return _done_text(facts[0]) if facts else JOINED_TEXT.format(name=job.video.name)
 
-    def _style(self, values: tuple[Any, ...]) -> Any:
-        """손잡이 값 → 검사한 모양. 색은 `#RRGGBB`로 맞춘 뒤 넘긴다."""
+    def _mapping(self, root: Path, values: tuple[Any, ...]) -> dict[str, Any]:
+        """손잡이 값 → 모양 사전. 색은 `#RRGGBB`로 맞춘다. 저장값에 끌어 옮긴 자리가 있고
+        「위치」·「여백」이 저장값 그대로면 그 자리를 잇는다(W-107, D181) — 바꿨으면 위·아래
+        자리로 돌아간다."""
         mapping = dict(zip(STYLE_KEYS, values, strict=True))
         mapping["text_color"] = normalize_color(mapping["text_color"])
-        return self.owner.raw.subtitle_burn_style(values=mapping)
+        saved = self.owner.raw.subtitle_burn_style(root)
+        if saved.x_permille is None:
+            return mapping
+        try:
+            same = mapping["position"] == saved.position and (
+                float(mapping["margin_px"]) == saved.margin_px
+            )
+        except (TypeError, ValueError):
+            return mapping
+        if same:
+            mapping.update({key: getattr(saved, key) for key in POINT_KEYS})
+        return mapping
+
+    def _style(self, root: Path, values: tuple[Any, ...]) -> Any:
+        """손잡이 값 → 검사한 모양."""
+        return self.owner.raw.subtitle_burn_style(values=self._mapping(root, values))

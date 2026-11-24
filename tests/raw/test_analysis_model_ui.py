@@ -44,13 +44,11 @@ from ui.workspace_service import (
 from vlogsrt.project.raw import service as raw_service
 from vlogsrt.project.raw.analysis_store import AnalysisStore
 
-# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
-pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
-
 needs_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
 
 SECRET = "sk-ant-synthetic-never-shown"
 FLASH = "gemini-3.8-flash"
+HYDROGEN = "gemini-4-hydrogen"
 
 
 def bare_server(tmp_path: Path, model: str | None = LUNA) -> RawWorkspaceUi:
@@ -72,9 +70,10 @@ def model_of(server: RawWorkspaceUi) -> str:
 
 def test_the_dropdown_switches_the_workspace_model_and_back(tmp_path: Path) -> None:
     server = bare_server(tmp_path)
-    # W-30d(D87): 기본(Gemini 3.8 Flash)이 맨 앞에 「(기본)」으로, 나머지는 그대로 고른다
+    # D168: 기본(Gemini 4 Hydrogen)이 맨 앞에 「(기본)」으로, 나머지는 그대로 고른다
     assert server.analysis_model_choices() == [
-        ("Gemini 3.8 Flash (기본)", FLASH),
+        ("Gemini 4 Hydrogen (기본)", HYDROGEN),
+        ("Gemini 3.8 Flash", FLASH),
         ("Gemini 4 Argon", "gemini-4-argon"),
         ("Claude Sonnet 5.5", SONNET),
         ("Claude Opus 5.5", CLAUDE),
@@ -87,18 +86,18 @@ def test_the_dropdown_switches_the_workspace_model_and_back(tmp_path: Path) -> N
     assert model_of(server) == LUNA and dropdown.value == LUNA
 
 
-def test_a_new_workspace_shows_flash_as_the_default_without_a_price(tmp_path: Path) -> None:
-    """새 작업공간은 Gemini 3.8 Flash로 시작한다(D87) — 「(기본)」은 선택지에만, 달러는 선택지에
+def test_a_new_workspace_shows_hydrogen_as_the_default_without_a_price(tmp_path: Path) -> None:
+    """새 작업공간은 Gemini 4 Hydrogen으로 시작한다(D168) — 「(기본)」은 선택지에만, 달러는 선택지에
     없다."""
     server = bare_server(tmp_path, model=None)
-    assert model_of(server) == FLASH
+    assert model_of(server) == HYDROGEN
     dropdown, status = server.analysis_model_controls()
-    assert dropdown.value == FLASH
+    assert dropdown.value == HYDROGEN
     labels = [label for label, _ in server.analysis_model_choices()]
-    assert labels[0] == "Gemini 3.8 Flash (기본)"
+    assert labels[0] == "Gemini 4 Hydrogen (기본)"
     assert sum("(기본)" in label for label in labels) == 1
     assert not any("$" in label for label in labels)
-    assert "Gemini 3.8 Flash" in status and "(기본)" not in status
+    assert "Gemini 4 Hydrogen" in status and "(기본)" not in status
     # 상태 줄도 달러·토큰 용어 없이 단가 상태만 말한다 — 금액은 말하지 않는다(D57 결정 7 · D110)
     assert "공식 단가 확인됨" in status and "견적" not in status
     assert not any(word in status for word in PRICE_WORDS), status
@@ -107,37 +106,33 @@ def test_a_new_workspace_shows_flash_as_the_default_without_a_price(tmp_path: Pa
 
 
 PRICE_WORDS = ("$", "100만 토큰", "effort", "출력 한도", "입력 $", "출력 $")
-"""화면(설정 요약·분석 설정 줄·모델 상태 줄)에 나오면 안 되는 단가·토큰 용어(D57 결정 7)."""
+"""화면(분석 설정 줄·모델 상태 줄)에 나오면 안 되는 단가·토큰 용어(D57 결정 7)."""
 
 
 @pytest.mark.parametrize("model", list(raw_service.ANALYSIS_MODEL_CHOICES))
 def test_no_screen_text_outside_quotes_shows_a_unit_price(tmp_path: Path, model: str) -> None:
-    """모든 모델에서 상태 줄·설정 요약·분석 설정 줄에 달러·토큰 용어가 없다(D110)."""
+    """모든 모델에서 상태 줄·분석 설정 줄에 달러·토큰 용어가 없다(D110)."""
     server = bare_server(tmp_path, model=model)
     root = server.workspace_root()
-    texts = (
-        server.analysis_model_status(),
-        server.settings_markdown(root),
-        server._analysis_settings_markdown(root),
-    )
+    texts = (server.analysis_model_status(), server._analysis_settings_markdown(root))
     for text in texts:
         assert not any(word in text for word in PRICE_WORDS), text
     official = raw_service.official_price_model(model)
     expected = "공식 단가 확인됨" if official else "단가 **미확인**"
-    assert all(expected in text for text in (texts[0], texts[2]))
+    assert all(expected in text for text in texts)
 
 
 def test_switching_workspaces_refreshes_the_model_chooser(tmp_path: Path) -> None:
-    """작업공간을 바꾸면 칸도 그 작업공간의 모델을 보인다 — Luna 작업공간이 Flash로 안 보인다.
+    """작업공간을 바꾸면 칸도 그 작업공간의 모델을 보인다 — Luna 작업공간이 기본으로 안 보인다.
 
-    사람이 고른 Luna는 열어도 옮기지 않는다 — 옮기는 것은 예전 기본(Sonnet)에 머문
-    작업공간뿐이다(D87).
+    사람이 고른 Luna는 열어도 옮기지 않는다 — 옮기는 것은 예전 기본(Sonnet · Flash)에 머문
+    작업공간뿐이다(D87 · D168).
     """
     server = bare_server(tmp_path)  # Luna를 저장한 기존 작업공간
     luna_root = server.workspace_root()
     server.create_workspace_view("새 작업공간", str(tmp_path / "fresh"))
     dropdown, status = server.analysis_model_controls()
-    assert dropdown.value == FLASH and "Gemini 3.8 Flash" in status
+    assert dropdown.value == HYDROGEN and "Gemini 4 Hydrogen" in status
     server.open_workspace_view(str(luna_root))
     dropdown, status = server.analysis_model_controls()
     assert dropdown.value == LUNA and "gpt-6-luna" in status
@@ -268,6 +263,7 @@ def test_the_model_panel_carries_the_model_dropdown_and_never_the_key(
     dropdown, status = by_id["analysis-model"], by_id["analysis-model-status"]
     assert isinstance(dropdown, gr.Dropdown) and dropdown.label == "영상 분석 모델"
     assert [value for _, value in dropdown.choices] == [
+        HYDROGEN,
         FLASH,
         "gemini-4-argon",
         SONNET,
@@ -299,16 +295,14 @@ def test_the_model_panel_carries_the_model_dropdown_and_never_the_key(
 def test_settings_summaries_show_official_claude_prices_only_for_claude(tmp_path: Path) -> None:
     server = bare_server(tmp_path)
     root = server.workspace_root()
-    luna_settings = server.settings_markdown(root)
     luna_analysis = server._analysis_settings_markdown(root)
-    assert "$4" not in luna_settings and "Luna 단가 **미확인**" in luna_analysis
+    assert "$4" not in luna_analysis and "Luna 단가 **미확인**" in luna_analysis
     choose_model(server, CLAUDE)
-    for text in (server.settings_markdown(root), server._analysis_settings_markdown(root)):
-        # D58: 단가(달러)는 견적에서만 — 설정 화면은 단가 상태만 말한다(D57 결정 7)
-        assert "Claude Opus 5.5" in text and "공식 단가 확인됨" in text
-        assert "$" not in text
+    text = server._analysis_settings_markdown(root)
+    # D58: 단가(달러)는 견적에서만 — 설정 화면은 단가 상태만 말한다(D57 결정 7)
+    assert "Claude Opus 5.5" in text and "공식 단가 확인됨" in text
+    assert "$" not in text
     choose_model(server, LUNA)
-    assert server.settings_markdown(root) == luna_settings
     assert server._analysis_settings_markdown(root) == luna_analysis
 
 
@@ -502,6 +496,8 @@ def test_a_first_run_without_a_key_still_reaches_the_claude_analysis(
     for _ in range(3):
         server._quick_status()  # 타이머 — 연결 안내가 상태 줄을 붙잡고 있다
     server._startup_credentials = raw_service.EnvironmentCredentials("sk-openai-synthetic", None)
+    # 처음 듣는 영상은 Gemini로 듣는다(D163) — 그 키도 `.env`에서 함께 찍힌다.
+    server._startup_gemini = raw_service.GeminiCredentials(api_key="AIza-synthetic")
     assert (len(sender.calls), len(luna.calls), len(opener.calls)) == (0, 0, 0)
     server.quick_approve_view(signature)
     assert not server._quick.get("connection_required")  # 키가 생겼으니 안내를 걷는다

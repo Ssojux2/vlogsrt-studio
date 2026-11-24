@@ -45,10 +45,14 @@ TEXT_ON_GROUNDS: dict[str, tuple[str, ...]] = {
         "success-soft",
         "warn-soft",
         "danger-soft",
+        # 재생기 클립 띠의 라벨(`#3 C_tall · 2.4초`)은 두 클립 채움 위에 놓인다.
+        "clip-fill",
+        "clip-fill-alt",
     ),
     "ink-muted": ("bg", "surface", "surface-raised", "surface-hover", "surface-sunken"),
     "ink-faint": ("surface", "surface-raised"),
     "accent-ink": ("bg", "surface", "surface-raised", "accent-soft"),
+    # 고른 클립(accent 채움)의 라벨도 on-accent다 — ink는 accent 위에서 4.5:1이 안 된다.
     "on-accent": ("accent", "accent-hover"),
     "on-tier-green": ("tier-green",),
     "on-tier-yellow": ("tier-yellow",),
@@ -69,6 +73,8 @@ MARK_ON_GROUNDS: dict[str, tuple[str, ...]] = {
     "accent-ink": ("surface-sunken", "caption-chip"),
     "warn": ("caption-chip",),
     "playhead": ("surface-sunken",),
+    "skimmer": ("surface-sunken", "video-well"),
+    "snap-guide": ("video-well",),
     "draft": ("surface-sunken",),
     "accent": ("surface-sunken",),
     "tier-yellow-ink": ("surface-sunken",),
@@ -133,9 +139,10 @@ def test_gradio_theme_is_built_from_the_tokens_with_dark_pairs() -> None:
     assert f"--body-text-color: {tokens['ink'][1]};" in dark
     assert f"--input-background-fill: {tokens['surface-raised'][1]};" in dark
     assert f"--code-background-fill: {tokens['surface-sunken'][1]};" in dark
-    for half in (light, dark):
-        assert "--button-primary-background-fill: #2f6db3;" in half  # 본점 하나, 두 테마 같다
-        assert "--checkbox-background-color-selected: #2f6db3;" in half
+    # 본점은 테마마다 하나 — 어두움은 Final Cut 보라 쪽(W-90).
+    for half, accent in ((light, tokens["accent"][0]), (dark, tokens["accent"][1])):
+        assert f"--button-primary-background-fill: {accent};" in half
+        assert f"--checkbox-background-color-selected: {accent};" in half
     # 그라디오의 --color-accent는 글자·선(선택한 탭 글자 등)이다 — accent-ink(4.5:1)로 간다.
     assert f"--color-accent: {tokens['accent-ink'][0]};" in light
     assert f"--color-accent: {tokens['accent-ink'][1]};" in dark
@@ -231,7 +238,8 @@ def test_tokens_are_declared_once_for_light_and_once_for_dark() -> None:
         assert f"{prop}: {value};" in light and prop not in dark, name
     # 영상은 두 테마 모두 어두운 우물 위에 놓인다. 본점은 두 테마가 같다.
     assert design_tokens.COLOR_TOKENS["video-well"] == ("#050607", "#050607")
-    assert design_tokens.COLOR_TOKENS["accent"] == ("#2f6db3", "#2f6db3")
+    # 밝은 본점은 그대로, 어두운 본점은 Final Cut 보라 쪽(W-90 — 흰 글자 4.5:1을 지키는 #645FF0).
+    assert design_tokens.COLOR_TOKENS["accent"] == ("#2f6db3", "#645ff0")
     for light_value, dark_value in design_tokens.COLOR_TOKENS.values():
         assert re.fullmatch(r"#[0-9a-f]{6}(?:[0-9a-f]{2})?", light_value), light_value
         assert re.fullmatch(r"#[0-9a-f]{6}(?:[0-9a-f]{2})?", dark_value), dark_value
@@ -249,7 +257,8 @@ def test_token_pairs_hold_contrast(theme_index: int) -> None:
             ratio = _contrast(tokens[mark], tokens[ground])
             assert ratio >= 3.0, (mark, ground, round(ratio, 2))
     # 재생 머리는 양옆 테두리(casing)와 함께 모든 등급 막대 위에서 읽힌다.
-    for fill in ("tier-green", "tier-yellow", "tier-red", "tier-red-deep", "surface-sunken"):
+    fills = ("tier-green", "tier-yellow", "tier-red", "tier-red-deep", "surface-sunken")
+    for fill in (*fills, "clip-fill", "clip-fill-alt", "accent", "caption-chip"):
         best = max(
             _contrast(tokens["playhead"], tokens[fill]),
             _contrast(tokens["playhead-casing"], tokens[fill]),

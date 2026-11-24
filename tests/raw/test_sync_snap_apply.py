@@ -30,7 +30,7 @@ from typing import Any
 import pytest
 
 from tests._sync_fakes import BURSTS, energy_factory, make_media, numpy_or_fake
-from tests.raw.test_speech_refill import RefillSender, context, transport
+from tests.raw.test_speech_refill import RefillSender, context, pin_gemini, transport
 from tests.raw.test_speech_refill_edges import Blocking
 from vlogsrt.project import config as project_config
 from vlogsrt.project import sync_check, sync_snap
@@ -631,14 +631,13 @@ def test_refill_after_apply_is_allowed_and_then_undo_is_refused(
     되돌리기가 넣은 줄을 지우지 않게 거절된다."""
     service, root, asset_id = snapped
     workspace = service._workspace(root)
+    pin_gemini(service, root, asset_id)  # 빈칸은 Gemini 원본만 묻는다(D163)
     applied = service.apply_snap(root, asset_id, _preview(service, root, asset_id).sha256)
     wait_sync(service, root)
     quote = service.refill_scope(root, asset_id)
     assert isinstance(quote, speech_refill.RefillScope), quote
     assert quote.transcript_revision == applied["revision"]
     monkeypatch.setattr("vlogsrt.env.is_offline", lambda: False)
-    service.set_cross_check(root, False)
-    quote = service.refill_scope(root, asset_id)
     sender = RefillSender()
     record = service.refill_source(root, asset_id, quote, transport(sender), context())
     assert record["inserted"], record
@@ -654,6 +653,7 @@ def test_refill_waits_for_the_new_report_and_a_stale_refill_quote_never_lands(
 ) -> None:
     """적용은 자막 리비전을 바꾼다 — 그 전 견적의 digest로는 빈칸 재전사가 묻지 않는다(0송신)."""
     service, root, asset_id = snapped
+    pin_gemini(service, root, asset_id)  # 빈칸은 Gemini 원본만 묻는다(D163)
     old_quote = service.refill_scope(root, asset_id)
     assert isinstance(old_quote, speech_refill.RefillScope)
     service.apply_snap(root, asset_id, _preview(service, root, asset_id).sha256)
@@ -661,7 +661,7 @@ def test_refill_waits_for_the_new_report_and_a_stale_refill_quote_never_lands(
     with pytest.raises(RawWorkspaceError) as refused:
         service.refill_source(root, asset_id, old_quote, transport(sender), context())
     assert str(refused.value) in (raw.REFILL_CHANGED, raw.REFILL_WAITING)
-    assert sender.whisper == [] and sender.text == []
+    assert sender.calls == []
 
 
 def test_the_clock_round_trip_is_exact_when_audio_starts_late(
@@ -868,8 +868,8 @@ def test_a_refill_started_while_apply_waits_keeps_its_answers_and_apply_writes_n
     재전사는 받은 줄을 그대로 넣는다 — 유료 답이 헛되지 않는다(19h 검증 뒤 고침 3)."""
     service, root, asset_id = snapped
     workspace = service._workspace(root)
+    pin_gemini(service, root, asset_id)  # 빈칸은 Gemini 원본만 묻는다(D163)
     monkeypatch.setattr("vlogsrt.env.is_offline", lambda: False)
-    service.set_cross_check(root, False)
     quote = service.refill_scope(root, asset_id)
     assert isinstance(quote, speech_refill.RefillScope), quote
     sha = _preview(service, root, asset_id).sha256
@@ -889,7 +889,7 @@ def test_a_refill_started_while_apply_waits_keeps_its_answers_and_apply_writes_n
     assert document["sequence"] == 1 and "snap" not in document  # 넣은 줄만 — 적용은 없다
     record = service.refill_last(root, asset_id)
     assert record is not None and not record.get("refused") and record["inserted"]
-    assert len(sender.whisper) == len(quote.pieces)  # 산 답은 모두 넣기까지 갔다(헛된 호출 없음)
+    assert len(sender.calls) == len(quote.pieces)  # 산 답은 모두 넣기까지 갔다(헛된 호출 없음)
 
 
 def _analysis_in_progress(service: Any, root: Path, asset_id: str) -> threading.Event:

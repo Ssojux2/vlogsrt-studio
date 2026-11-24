@@ -6,15 +6,10 @@
 
 from __future__ import annotations
 
-import json
 import random
 from dataclasses import replace
-from pathlib import Path
 
-import pytest
-
-from vlogsrt import pipeline, retext, transcribe
-from vlogsrt.cli import main
+from vlogsrt import retext
 from vlogsrt.config import Config
 from vlogsrt.hangul import strip_for_compare
 from vlogsrt.models import (
@@ -22,17 +17,11 @@ from vlogsrt.models import (
     REPAIR_KEPT,
     REPAIR_REPLACED,
     RETEXT_APPLIED,
-    RETEXT_OFF,
-    RETEXT_UNAVAILABLE,
-    Cue,
     Repair,
     Repeat,
     Segment,
-    Trace,
 )
-from vlogsrt.output import parse_srt
 from vlogsrt.retext import ChunkText
-from vlogsrt.transcribe import TranscriptionJob
 
 
 def _seg(seg_id: int, start: float, end: float, text: str) -> Segment:
@@ -340,171 +329,3 @@ def test_unavailable_and_off_records_replace_nothing() -> None:
     assert retext.unavailable("boom").texts == ()
     assert retext.unavailable("boom").error == "boom"
     assert retext.switched_off().texts == ()
-
-
-# ─────────────────────────────────────────────────────────────
-#  파이프라인 — 오프라인 합성 픽스처
-# ─────────────────────────────────────────────────────────────
-
-SYNTHETIC = Path(__file__).parent / "fixtures" / "synthetic"
-RETEXTED = Path("golden/retexted.mp4")
-LOOPYLONG = Path("golden/loopylong.mp4")
-WHISPER_ONLY = replace(Config(), retext_enabled=False)
-
-
-@pytest.fixture
-def synthetic(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("VLOGSRT_FIXTURE_DIR", str(SYNTHETIC))
-
-
-def _body(result: pipeline.RunResult) -> str:
-    return " ".join(cue.text for cue in parse_srt(result.outputs["srt"].read_text("utf-8")))
-
-
-@pytest.mark.usefixtures("synthetic")
-def test_the_srt_carries_gpt_letters_on_whisper_times(tmp_path: Path) -> None:
-    result = pipeline.run(RETEXTED, Config(), tmp_path, force_offline=True)
-
-    body = _body(result)
-    assert "블루펭귄" in body and "블루팽귄" not in body
-    assert "소시지" in body
-    # 세그먼트 사이에 낀 말은 시각이 없어 나가지 않는다 — 기록에만 남는다.
-    assert "연남동" not in body
-    assert any("연남동" in item.text for item in result.trace.retext.unplaced)
-    # 과소전사 세그먼트에 몰린 말은 게이트가 막는다.
-    assert "수제 맥주" not in body
-    assert any(cue.flags and pipeline.RETEXTED in cue.flags for cue in result.cues)
-
-
-@pytest.mark.usefixtures("synthetic")
-def test_retext_changes_letters_only_right_after_spine_to_cues(tmp_path: Path) -> None:
-    """큐 개수·시각·seg_ids는 교정 on/off에 같다. refine 뒤 개수는 요구하지 않는다(D37)."""
-    result = pipeline.run(RETEXTED, Config(), tmp_path, force_offline=True)
-    spine = list(result.trace.spine)
-    plain = pipeline.spine_to_cues(spine)
-    fixed = pipeline.apply_retext(pipeline.spine_to_cues(spine), result.trace.retext)
-
-    def shape(cues: list[Cue]) -> list[tuple[float, float, tuple[int, ...], int]]:
-        return [(cue.start, cue.end, cue.seg_ids, cue.index) for cue in cues]
-
-    assert shape(fixed) == shape(plain)
-    assert [cue.text for cue in fixed] != [cue.text for cue in plain]
-
-
-@pytest.mark.usefixtures("synthetic")
-def test_refined_retext_cues_stay_inside_their_whisper_segments(tmp_path: Path) -> None:
-    cfg = Config()
-    result = pipeline.run(RETEXTED, cfg, tmp_path, force_offline=True)
-    segments = {segment.id: segment for segment in result.trace.spine}
-    for cue in result.cues:
-        first, last = segments[cue.seg_ids[0]], segments[cue.seg_ids[-1]]
-        assert cue.start >= first.start - cfg.lead_in - 1e-6
-        assert cue.end <= last.end + cfg.lead_out + cfg.min_duration + 1e-6
-
-
-@pytest.mark.usefixtures("synthetic")
-def test_verification_cannot_change_the_retexted_srt(tmp_path: Path) -> None:
-    """규칙 5 — 교정이 켜져 있어도 검증 on/off에 SRT 바이트가 같다."""
-    plain = pipeline.run(
-        RETEXTED, Config(), tmp_path / "plain", force_offline=True, verify_with_second_model=False
-    )
-    checked = pipeline.run(RETEXTED, Config(), tmp_path / "checked", force_offline=True)
-
-    assert checked.verification is not None
-    assert plain.outputs["srt"].read_bytes() == checked.outputs["srt"].read_bytes()
-    assert "블루펭귄" in _body(plain), "--no-verify여도 두 번째 모델 응답은 쓰인다"
-
-
-@pytest.mark.usefixtures("synthetic")
-def test_the_second_model_is_called_once_for_retext_and_verification(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    kinds: list[str] = []
-    real = transcribe.FixtureTranscriber.transcribe
-
-    def counting(self: transcribe.FixtureTranscriber, job: TranscriptionJob, cfg: Config):  # type: ignore[no-untyped-def]
-        kinds.append(job.kind)
-        return real(self, job, cfg)
-
-    monkeypatch.setattr(transcribe.FixtureTranscriber, "transcribe", counting)
-    pipeline.run(RETEXTED, Config(), tmp_path, force_offline=True)
-    assert kinds.count(transcribe.VERIFY_KIND) == 1
-
-
-@pytest.mark.usefixtures("synthetic")
-def test_turning_retext_off_gives_back_the_whisper_letters(tmp_path: Path) -> None:
-    result = pipeline.run(RETEXTED, WHISPER_ONLY, tmp_path, force_offline=True)
-    assert "블루팽귄" in _body(result)
-    assert result.trace.retext.status == RETEXT_OFF
-
-
-def test_a_missing_second_model_still_leaves_a_whisper_srt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    lonely = tmp_path / "no-gpt"
-    lonely.mkdir()
-    for name in ("retexted.whisper.json", "retexted.meta.json"):
-        (lonely / name).write_bytes((SYNTHETIC / name).read_bytes())
-    monkeypatch.setenv("VLOGSRT_FIXTURE_DIR", str(lonely))
-    monkeypatch.setenv("VLOGSRT_LOG_LEVEL", "WARN")
-
-    result = pipeline.run(RETEXTED, Config(), tmp_path / "out", force_offline=True)
-
-    assert "블루팽귄" in _body(result)
-    assert result.trace.retext.status == RETEXT_UNAVAILABLE
-    assert result.trace.retext.error
-    assert json.loads((tmp_path / "out" / "trace.json").read_text("utf-8"))["retext"]["status"] == (
-        RETEXT_UNAVAILABLE
-    )
-    assert "글자 교정" in capsys.readouterr().err
-
-
-@pytest.mark.usefixtures("synthetic")
-def test_a_raising_second_model_still_leaves_a_whisper_srt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    real = transcribe.FixtureTranscriber.transcribe
-
-    def broken(self: transcribe.FixtureTranscriber, job: TranscriptionJob, cfg: Config):  # type: ignore[no-untyped-def]
-        if job.kind == transcribe.VERIFY_KIND:
-            raise RuntimeError("계정에 모델이 없다")
-        return real(self, job, cfg)
-
-    monkeypatch.setattr(transcribe.FixtureTranscriber, "transcribe", broken)
-    result = pipeline.run(RETEXTED, Config(), tmp_path, force_offline=True)
-
-    assert "블루팽귄" in _body(result)
-    assert result.trace.retext.status == RETEXT_UNAVAILABLE
-    assert "계정에 모델이 없다" in result.trace.retext.error
-    assert result.verification is None
-
-
-@pytest.mark.usefixtures("synthetic")
-def test_unrecovered_repeats_are_really_excluded_and_warned(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """빈 repairs가 배선되면 조용히 통과하는 모양을 막는다 — 제외가 **실제로** 있어야 한다."""
-    monkeypatch.setenv("VLOGSRT_LOG_LEVEL", "WARN")
-    result = pipeline.run(LOOPYLONG, Config(), tmp_path, force_offline=True)
-
-    record = result.trace.retext
-    held = {seg_id for item in record.excluded for seg_id in item.seg_ids}
-    assert held, "loopylong에는 접힌 되풀이가 있다"
-    assert held.isdisjoint(dict(record.texts))
-    assert "되풀이는 교정하지 않는다" in capsys.readouterr().err
-
-
-@pytest.mark.usefixtures("synthetic")
-def test_redo_reapplies_the_retext_mapping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    first = pipeline.run(RETEXTED, Config(), tmp_path, force_offline=True)
-    monkeypatch.setenv("VLOGSRT_FIXTURE_DIR", str(tmp_path / "no-such-dir"))
-    again = pipeline.redo(tmp_path / "trace.json", Config(), tmp_path / "redo")
-
-    assert again.outputs["srt"].read_bytes() == first.outputs["srt"].read_bytes()
-    assert Trace.load(tmp_path / "redo" / "trace.json").retext == first.trace.retext
-
-
-@pytest.mark.usefixtures("synthetic")
-def test_cli_no_retext_prints_whisper_letters(tmp_path: Path) -> None:
-    assert main(["run", str(RETEXTED), "--offline", "--no-retext", "-o", str(tmp_path)]) == 0
-    assert "블루팽귄" in (tmp_path / "retexted.srt").read_text("utf-8")

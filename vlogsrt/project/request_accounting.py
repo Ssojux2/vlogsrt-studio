@@ -124,7 +124,7 @@ def endpoint_identity_sha256(project_config: ProjectConfig) -> str:
     환경 상속이 승인과 다른 엔드포인트를 고르는 일이 없어야 하기 때문이다.
     키 값은 재료에 없다(회전이 지출을 리셋하지 않는다).
     """
-    stt_base = env.base_url() or _PUBLIC_ENDPOINT
+    stt_base = env.get("OPENAI_BASE_URL").strip() or _PUBLIC_ENDPOINT
     if env.role_credentials_applied():
         payload = {
             "routing": "v2-role",

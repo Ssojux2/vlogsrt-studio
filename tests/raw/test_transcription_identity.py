@@ -20,21 +20,16 @@ import json
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from tests.raw.test_final_caption_run import make_video
 from tests.raw.test_raw_config import ACCEPTED_SETTINGS_JSON
 from tests.raw.test_understanding import BEFORE_SHUTDOWN, SETTINGS, FakeTimingProvider, make_audio
-from vlogsrt.config import Config
-from vlogsrt.project.raw import final_caption
 from vlogsrt.project.raw.analysis_approval import asr_settings_fingerprint
 from vlogsrt.project.raw.analysis_config import (
     UNDERSTANDING_SCHEMA_VERSION,
     RawUnderstandingSettings,
 )
-from vlogsrt.project.raw.caption_config import FinalCaptionSettings
 from vlogsrt.project.raw.config import (
     RawWorkflowConfig,
     raw_workflow_config_from_json,
-    raw_workflow_config_to_json,
 )
 from vlogsrt.project.raw.understanding import SampleSpan, transcribe_selected_audio
 
@@ -121,45 +116,6 @@ def test_a_claude_run_after_a_luna_run_buys_no_transcription(tmp_path: Path) -> 
     second = run(tmp_path, claude(RawWorkflowConfig()), cache)
     assert second.seen == []  # 전송 0회 — whisper를 다시 사지 않는다
     assert sorted(path.name for path in cache.glob("*.json")) == keys
-
-
-def pre_w14_caption_fingerprint(video, spans, settings, workflow, engine) -> str:
-    """W-14 이전 `caption_settings_fingerprint`의 조립 그대로."""
-    audio = video.audio
-    payload = {
-        "schema": settings.schema_version,
-        "prompt_revision": settings.prompt_revision,
-        "final_video_revision": video.final_video_revision,
-        "pcm_sha256": audio.pcm_sha256,
-        "audio_stream_index": audio.audio_stream_index,
-        "sample_rate": audio.sample_rate,
-        "channels": audio.channels,
-        "sample_count": audio.sample_count,
-        "pcm_sample0_file_time": str(audio.pcm_sample0_file_time),
-        "chunk_max_seconds": settings.chunk_max_seconds,
-        "chunk_max_bytes": settings.chunk_max_bytes,
-        "spans": [[span.start, span.end] for span in spans],
-        "text_model": workflow.models.text_model,
-        "timing_model": workflow.models.timing_model,
-        "languages": list(workflow.caption.languages),
-        "keywords": list(workflow.caption.keywords),
-        "registry_revision": workflow.registry.revision,
-        "workflow": json.loads(raw_workflow_config_to_json(workflow)),
-        "engine_thresholds": final_caption._engine_threshold_snapshot(engine),
-    }
-    body = json.dumps(payload, ensure_ascii=False, sort_keys=True, allow_nan=False)
-    return hashlib.sha256(body.encode("utf-8")).hexdigest()
-
-
-def test_the_final_caption_fingerprint_ignores_the_analysis_model(tmp_path: Path) -> None:
-    video = make_video(tmp_path)
-    settings, engine, workflow = FinalCaptionSettings(), Config(), RawWorkflowConfig()
-    default = final_caption.caption_settings_fingerprint(video, SPANS, settings, workflow, engine)
-    assert default == pre_w14_caption_fingerprint(video, SPANS, settings, PRE_W18_DEFAULT, engine)
-    switched = final_caption.caption_settings_fingerprint(
-        video, SPANS, settings, claude(workflow), engine
-    )
-    assert switched == default
 
 
 def pre_w14_asr_settings_fingerprint(

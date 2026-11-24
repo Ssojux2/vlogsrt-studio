@@ -18,9 +18,8 @@ pytest.importorskip("gradio", reason="웹 UI extra(gradio)가 없다", exc_type=
 import gradio as gr  # noqa: E402
 
 from ui import timeline_cell, ui_facade  # noqa: E402
-from ui.final_edit_ui import FINAL_EDIT_TAB_KEY  # noqa: E402
 from ui.timeline_cell import SEND_ID, timeline_summary_html  # noqa: E402
-from ui.workspace_service import RENDER_EXPORT_ID, RawWorkspaceUi  # noqa: E402
+from ui.workspace_service import REVIEW_TAB_KEY, RawWorkspaceUi  # noqa: E402
 
 
 def _model(**overrides: Any) -> dict[str, Any]:
@@ -76,18 +75,30 @@ def test_the_summary_names_what_was_left_out_and_escapes_it() -> None:
     assert "클립 3개" in page and "자막 4/5줄 보임" in page and "3.0초" in page
     assert "&lt;B&gt;.mp4" in page and "<B>" not in page
     assert "C.mp4 — unsupported_grid" in page
-    assert "추천 구간이 없어 넣지 않은 원본: D.mp4" in page
+    assert "보통·추천 구간이 없어 넣지 않은 원본: D.mp4" in page
     assert "빈 자막 2줄" in page and "1줄을 원본 안으로" in page
     assert timeline_summary_html(None) == ""
 
 
-def test_a_successful_send_switches_to_the_final_edit_tab(
+def test_the_summary_is_one_line_when_nothing_was_left_out() -> None:
+    """디자인 점검(U1) · D179 — 요약은 한 줄이다. 빠진 것은 짧은 표(수)만 늘 보이고(규칙 9 — 조용히
+    사라지지 않는다) 이름은 그 표의 title에 있다. 옛 안내 글(「출력은 다음 단계」)은 지웠다."""
+    page = timeline_summary_html(_model())
+    assert "<ul" not in page and "<li" not in page and "vl-timeline-note" not in page
+    assert "title=" not in page
+    noted = timeline_summary_html(_model(seed={"unseeded": [{"name": "D.mp4"}, {"name": "E.mp4"}]}))
+    assert "<ul" not in noted and ">⚠ 넣지 않은 원본 2개</span>" in noted
+    assert 'title="보통·추천 구간이 없어 넣지 않은 원본: D.mp4, E.mp4' in noted
+
+
+def test_a_successful_send_stays_in_the_window_with_the_timeline_deck(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """W-85(D145) — 타임라인은 같은 창 아래 덱이다. 보내기가 끝나도 「영상 정리」에 머문다."""
     server, _root, signature = _server(tmp_path)
     _fake_jobs(monkeypatch, server, "succeeded")
     tabs, summary, text = server._timeline_cell.send_view(signature)
-    assert isinstance(tabs, gr.Tabs) and tabs.selected == FINAL_EDIT_TAB_KEY
+    assert isinstance(tabs, gr.Tabs) and tabs.selected == REVIEW_TAB_KEY
     assert "원본 범위 타임라인" in summary
     assert text == timeline_cell.STARTED_TEXT.format(clips=3, cues=4)
 
@@ -117,7 +128,7 @@ def test_the_view_is_empty_without_a_timeline_and_shows_the_newest(
     assert "원본 범위 타임라인 · 20261113T010203Z" in cell.view(signature)
 
 
-def test_blocks_put_the_button_beside_the_render_export_and_wire_the_tab(
+def test_blocks_put_the_button_on_the_command_bar_and_wire_the_tab(
     tmp_path: Path, local_socket: None
 ) -> None:
     server, _root, _signature = _server(tmp_path)
@@ -125,7 +136,9 @@ def test_blocks_put_the_button_beside_the_render_export_and_wire_the_tab(
     config = app.config
     by_id = {component["id"]: component for component in config["components"]}
     elem_ids = {c["props"].get("elem_id") for c in config["components"]}
-    assert {SEND_ID, RENDER_EXPORT_ID} <= elem_ids
+    assert SEND_ID in elem_ids
+    # 「추천만 이어붙여 내보내기」는 은퇴했다(W-91, D161) — 길은 이 단추 하나다.
+    assert "vl-render-export" not in elem_ids
     deps = config["dependencies"]
     fns = {dep["id"]: app.fns[dep["id"]].fn for dep in deps}
     cell = server._timeline_cell
@@ -136,4 +149,4 @@ def test_blocks_put_the_button_beside_the_render_export_and_wire_the_tab(
     assert sent["js"] == ui_facade.EXPORT_WAKE_JS  # 기다리는 동안 활동 띠가 깨어 있다
     views = [d for d in deps if fns[d["id"]] == cell.view]
     assert len(views) >= 5  # 작업공간을 열고 바꾸는 사건마다 다시 그린다
-    assert [d for d in deps if fns[d["id"]] == server.render_export_view]
+    assert not hasattr(server, "render_export_view")

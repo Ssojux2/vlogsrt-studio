@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -78,8 +79,8 @@ def test_browse_skips_symlink_entries(card: Path, tmp_path: Path) -> None:
     [
         ("", "폴더 경로를 입력"),
         ("   ", "폴더 경로를 입력"),
-        ("/없는-경로/아마도", "없는 경로"),
-        ("/etc/hosts", "폴더가 아니다"),
+        (os.path.abspath("/없는-경로/아마도"), "없는 경로"),
+        (__file__, "폴더가 아니다"),  # 어느 운영체제에나 있는 파일 — `/etc/hosts`는 POSIX뿐이다
     ],
 )
 def test_browse_rejects_bad_targets(raw_path: str, fragment: str) -> None:

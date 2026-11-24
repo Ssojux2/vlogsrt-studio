@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import shutil
 import subprocess
+import sys
 from dataclasses import FrozenInstanceError, fields
 from pathlib import Path
 
@@ -64,6 +65,12 @@ SPINE_DEFAULT = (
     '    <asset-clip ref="r2" name="클립2" offset="110s" start="200s"'
     ' duration="90s" enabled="0" srcEnable="video"/>'
 )
+
+
+def _operand(path: Path) -> str:
+    """제품이 xmllint에 넘기는 입력 칸 — Windows는 ASCII `file:///` URI다(W-84a)."""
+    resolved = path.resolve()
+    return resolved.as_uri() if sys.platform == "win32" else str(resolved)
 
 
 def build_fcpxml(*, proxy_kind: str = "proxy-media") -> str:
@@ -126,7 +133,7 @@ def test_wellformedness_argv_is_exactly_the_frozen_shape(
 
     assert len(seen) == 1, "subprocess 호출은 정확히 한 번이다"
     argv, kwargs = seen[0]
-    assert argv == ["/usr/bin/xmllint", "--nonet", "--noout", str(path.resolve())]
+    assert argv == ["/usr/bin/xmllint", "--nonet", "--noout", _operand(path)]
     assert kwargs["shell"] is False
     assert "executable" not in kwargs
     assert result.valid is True
@@ -154,7 +161,7 @@ def test_dtd_argv_is_exactly_the_frozen_shape_with_a_uri(
         "--noout",
         "--dtdvalid",
         dtd.resolve().as_uri(),
-        str(path.resolve()),
+        _operand(path),
     ]
     assert " " not in argv[4], "빈칸은 %20으로 인코딩되어 한 argv 칸에 있어야 한다"
     assert "%20" in argv[4]
@@ -175,7 +182,7 @@ def test_a_malicious_looking_path_stays_one_plain_argv_element(
 
     argv, kwargs = seen[0]
     assert len(argv) == 4
-    assert argv[-1] == str(path.resolve())
+    assert argv[-1] == _operand(path)
     assert kwargs["shell"] is False
 
 
@@ -195,8 +202,8 @@ def test_a_relative_option_looking_path_becomes_an_absolute_operand(
     validate_xml(Path("--version"))
 
     argv, _kwargs = seen[0]
-    assert argv[-1] == str(Path("--version").resolve())
-    assert argv[-1].startswith("/")
+    assert argv[-1] == _operand(Path("--version"))
+    assert argv[-1].startswith("file:///" if sys.platform == "win32" else "/")
     assert "--version" not in argv
 
 
@@ -211,8 +218,8 @@ def test_an_ordinary_relative_input_is_normalized_to_its_absolute_spot(
     validate_xml(Path("plain/ordinary.fcpxml"))
 
     argv, _kwargs = seen[0]
-    assert argv[-1] == str((tmp_path / "plain" / "ordinary.fcpxml").resolve())
-    assert argv[-1].startswith("/")
+    assert argv[-1] == _operand(tmp_path / "plain" / "ordinary.fcpxml")
+    assert argv[-1].startswith("file:///" if sys.platform == "win32" else "/")
 
 
 # ─── 없음은 판정이 아니다 — unavailable ─────────────────────────────────
@@ -403,7 +410,9 @@ def test_real_malformed_xml_reports_diagnostics_without_raising(tmp_path: Path) 
 @needs_xmllint
 def test_real_malicious_name_is_validated_never_executed(tmp_path: Path) -> None:
     """셸 확장 문구가 이름에 실려 있어도 자막처럼 검증될 뿐 실행되지 않는다."""
-    path = tmp_path / "evil $(touch pwned) '; rm -rf *; `id`.fcpxml"
+    # Windows 파일 이름에는 `*`을 쓸 수 없다 — 나머지 셸 글자(`$( )`·`;`·`` ` ``)는 그대로다.
+    star = "*" if sys.platform != "win32" else "STAR"
+    path = tmp_path / f"evil $(touch pwned) '; rm -rf {star}; `id`.fcpxml"
     path.write_text(build_fcpxml(), encoding="utf-8")
 
     result = validate_xml(path)

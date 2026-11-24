@@ -69,6 +69,7 @@ if ! "$PYTHON" scripts/launch_check.py stamp-ok; then
 fi
 
 "$PYTHON" scripts/launch_check.py tools || pause_and_exit 1
+"$PYTHON" scripts/launch_check.py advice
 
 print -- "브이로그 작업대를 시작합니다. 잠시 뒤 브라우저가 열립니다."
 print -- "종료하려면 Ctrl+C를 누르세요."
