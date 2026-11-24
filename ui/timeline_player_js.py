@@ -2020,13 +2020,20 @@ PLAYER_APP_JS = r"""
       '<span id="tl-cue-en" class="tl-cue-en-note"></span>' +
       '<div class="tl-cue-buttons">' + cueButton("cue-en-ask", "이 줄 영어 번역",
         "이 줄의 한국어를 Gemini로 옮겨 영어 칸에 넣는다(유료 · 누름이 승인) — 앞 줄들은 맥락") +
+      // 그 옆 「전체 자막 영어 번역」(2026-11-24 사용자 지시)은 머리의 「영어 만들기」와 같다.
+      cueButton("translate", "전체 자막 영어 번역",
+        "저장한 자막 전체를 Gemini로 옮긴다(유료 · 누름이 승인) — 「영어 만들기」와 같고," +
+        " 같은 글은 다시 사지 않는다") +
       "</div></div>" +
+      // 한 줄(2026-11-24 사용자 지시 — 인스펙터 약 400px에서 두 줄로 접혔다): 이름은 짧게,
+      // 뜻은 title.
       '<div class="tl-cue-buttons">' +
-      cueButton("cue-start", "시작을 여기로 [", "자막 시작을 플레이헤드로") +
-      cueButton("cue-end", "끝을 여기로 ]", "자막 끝을 플레이헤드로") +
+      cueButton("cue-start", "시작 [", "시작을 여기로 [ — 자막 시작을 플레이헤드로") +
+      cueButton("cue-end", "끝 ]", "끝을 여기로 ] — 자막 끝을 플레이헤드로") +
       cueButton("cue-split", "나누기 ⇧B", "플레이헤드에서 자막 나누기") +
-      cueButton("cue-merge", "다음과 합치기 ⇧M", "다음 보이는 자막과 합치기(같은 원본만)") +
-      cueButton("cue-delete", "자막 지우기", "이 자막 지우기(고른 자막이면 ⌫)") + "</div>";
+      cueButton("cue-merge", "합치기 ⇧M", "다음과 합치기 ⇧M — 다음 보이는 자막과(같은 원본만)") +
+      cueButton("cue-delete", "지우기", "자막 지우기 — 이 자막을 지운다(고른 자막이면 ⌫)") +
+      "</div>";
   }
   function cueButton(action, label, title) {
     return '<button type="button" data-tl="' + action + '" title="' + esc(title) + '">' +

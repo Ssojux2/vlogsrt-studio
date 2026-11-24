@@ -592,7 +592,9 @@ TIMELINE_PLAYER_CSS = """
 .tl-cue-edit textarea { font: inherit; font-size: 13px; min-height: 52px; resize: vertical;
   padding: 4px 6px; border: 1px solid var(--vl-line-strong); border-radius: 4px;
   background: var(--vl-surface-raised); color: var(--vl-ink); }
-.tl-cue-edit .tl-cue-buttons { display: flex; flex-wrap: wrap; gap: 4px; }
+.tl-cue-edit .tl-cue-buttons { display: flex; flex-wrap: nowrap; gap: 4px; min-width: 0; }
+.tl-cue-edit .tl-cue-buttons > button { flex: 0 1 auto; min-width: 0; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
 .tl-cue-edit .tl-cue-muted { color: var(--vl-ink-muted); }
 .tl-cue-edit .tl-cue-warn { color: var(--vl-warn); min-height: 1.4em; }
 .tl-cue-times { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }

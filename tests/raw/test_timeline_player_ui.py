@@ -154,9 +154,11 @@ def test_the_cue_panel_is_on_the_page_and_its_buttons_have_handlers() -> None:
     assert 'id="tl-cue-list"' in page and 'id="tl-cue-edit"' in page
     assert 'data-tl="cue-insert"' in page
     drawn = set(re.findall(r'cueButton\("([a-z-]+)"', PLAYER_JS))
-    # 「이 줄 영어 번역」(W-112)은 번역 모드의 영어 칸 아래 단추다.
-    assert drawn == {"cue-start", "cue-end", "cue-split", "cue-merge", "cue-delete", "cue-en-ask"}
-    for action in drawn | {"cue-insert"}:
+    # 「이 줄 영어 번역」(W-112)과 그 옆 「전체 자막 영어 번역」은 번역 모드의 영어 칸 아래 단추다.
+    assert drawn == {"cue-start", "cue-end", "cue-split", "cue-merge", "cue-delete", "cue-en-ask",
+                     "translate"}  # fmt: skip
+    assert "translate: translate," in PLAYER_JS
+    for action in (drawn - {"translate"}) | {"cue-insert"}:
         assert re.search(rf'"{re.escape(action)}": function', PLAYER_JS), action
     for op in ("start", "end", "split", "merge", "delete", "insert", "text"):
         assert f'cueOp("{op}"' in PLAYER_JS, op
@@ -634,6 +636,32 @@ def test_one_cue_is_translated_into_its_english_field_on_request(
     assert 'cueButton("cue-en-ask", "이 줄 영어 번역",' in js
     assert '"cue-en-ask": function () { askLineEnglish(cueTargetOf(target)); }' in js
     assert "next = TL.cueSetEnglish(S.doc, id, got.english, S.settings);" in js
+
+
+def test_the_whole_subtitle_translate_button_sits_beside_the_line_one_on_one_row() -> None:
+    """사용자 지시(2026-11-24 「이 줄 영어 번역 버튼 옆에 전체자막 영어 번역을 추가 ·
+    버튼들을 두 줄로 넣지 말고 한 줄로」) — 영어 칸 아래 단추 줄은 「이 줄 영어 번역」 바로 옆에
+    「전체 자막 영어 번역」을 둔다. 그 단추는 머리의 「영어 만들기」와 같은 처리기(저장한 리비전
+    전체 · 유료 · 누름이 승인)다.
+    편집 칸의 단추 줄은 감싸지 않고 한 줄이다(좁으면 단추가 줄고 말줄임 — 이름은 title)."""
+    js = PLAYER_JS
+    line = js.index('cueButton("cue-en-ask", "이 줄 영어 번역",')
+    whole = js.index('cueButton("translate", "전체 자막 영어 번역",')
+    between = js[line:whole]
+    assert "</div>" not in between and "<div" not in between
+    edit_row = js[js.index('cueButton("cue-start"') : js.index('cueButton("cue-delete"')]
+    for short in ('"시작 [",', '"끝 ]",', '"나누기 ⇧B",', '"합치기 ⇧M",'):
+        assert short in edit_row, short
+    assert 'cueButton("cue-delete", "지우기",' in js
+    css = timeline_player.TIMELINE_PLAYER_CSS
+    assert (
+        ".tl-cue-edit .tl-cue-buttons { display: flex; flex-wrap: nowrap; gap: 4px; min-width: 0; }"
+        in css
+    )
+    assert (
+        ".tl-cue-edit .tl-cue-buttons > button { flex: 0 1 auto; min-width: 0;"
+        " white-space: nowrap;\n  overflow: hidden; text-overflow: ellipsis; }" in css
+    )
 
 
 def test_clicking_a_video_card_moves_the_timeline_to_that_video() -> None:
