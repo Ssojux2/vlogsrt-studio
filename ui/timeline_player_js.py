@@ -1604,6 +1604,7 @@ PLAYER_APP_JS = r"""
       root.classList.remove("is-fit");
       root.style.height = "";
       if (deck) { deck.scrollTop = kept; }
+      fitFloors(deck);
       return;
     }
     root.classList.add("is-fit");
@@ -1621,9 +1622,64 @@ PLAYER_APP_JS = r"""
       root.style.height = "";
       deck.scrollTop = kept;
     }
+    // 맞춤을 정한 뒤에 잰다 — 쌓인 모양(머리 · 여백이 다르다)에서 재면 바닥이 부푼다.
+    fitFloors(deck);
     if (lane) { requestLane(); }
   }
   S.fitDeck = fitDeck;
+  // 맞춤의 바닥(2026-11-24 사용자 지시 「16:10 맥북에서도 UI가 다 보이게」 — 14인치 크롬 창에서
+  // 스토리라인 아래가 덱 안 스크롤로 잘리고 번역 모드 편집 칸의 단추가 인스펙터에 숨었다). 위·아래
+  // 덱 줄은 이 아래로 줄지 않고 영상 · 자막 목록이 먼저 준다. 늘고 주는 칸(파형 레인 · 자막 목록)만
+  // 최소로 바꿔 잴 뿐이라 바닥이 제 결과로 다시 자라지 않는다. 합이 화면보다 크면 무대가 길어진다
+  // (숨기지 않고 문서가 스크롤한다). 값이 바뀔 때만 단다.
+  function fitFloors(deck) {
+    var host = deck && deck.closest ? deck.closest("[id=visual-stage]") : null;
+    if (!host) { return; }
+    function put(name, px) {
+      var value = px > 0 ? Math.ceil(px) + "px" : "";
+      if (host.style.getPropertyValue(name) !== value) {
+        if (value) { host.style.setProperty(name, value); }
+        else { host.style.removeProperty(name); }
+      }
+    }
+    var wide = W.matchMedia ? W.matchMedia("(min-width: 1051px)").matches : true;
+    var lane = $("tl-lane");
+    var deckFloor = 0;
+    var upperFloor = 0;
+    if (host.hasAttribute("data-vl-fit") && wide && lane && lane.offsetParent) {
+      // 「자막」 작업공간의 레인은 제 최소 높이(토큰)가 더 크다.
+      var laneMin = Math.max(S.settings.fitLaneMinPx + S.settings.laneFilmPx,
+        parseFloat(getComputedStyle(lane).minHeight) || 0);
+      // 쌓인 모양(인덱스를 열었을 때 등)이면 레인이 줄지 않으니 덱 내용 전체가 바닥이다.
+      deckFloor = !S.rootEl.classList.contains("is-fit") ? deck.scrollHeight :
+        deck.scrollHeight - lane.offsetHeight + laneMin;
+      // 자막 칸이 인스펙터에 있을 때(「기본」 · 타임라인 뷰어, D178)만 — 편집 칸과 단추를 지킨다.
+      var list = $("tl-cue-list");
+      var inspector = list && list.closest ? list.closest("[data-vl-inspector]") : null;
+      if (inspector && list.offsetParent) {
+        upperFloor = inspector.scrollHeight - list.offsetHeight +
+          (parseFloat(getComputedStyle(list).minHeight) || 0);
+      }
+    }
+    var need = 0;
+    if (deckFloor > 0) {
+      // 무대 줄: 위 덱 · 원본 레일(auto) · 아래 덱 · 상태 줄 — 위 덱 바닥은 덱 최소 높이 토큰 이상.
+      var cs = getComputedStyle(host);
+      var rows = cs.gridTemplateRows.split(" ").map(parseFloat);
+      var gap = parseFloat(cs.rowGap) || 0;
+      var fixed = (rows[1] || 0) + deckFloor + (rows[3] || 0) + gap * (rows.length - 1);
+      var deckMin = parseFloat(cs.getPropertyValue("--vl-deck-min")) || 0;
+      // 화면이 둘 다 담지 못하면(13인치 크롬 창 1440×780) 타임라인을 지키고 위 덱 바닥을 남는
+      // 높이로 줄인다 — 인스펙터가 제 안에서 스크롤한다(문서는 스크롤하지 않는다).
+      var screen = Math.max(parseFloat(cs.getPropertyValue("--vl-stage-min-h")) || 0,
+        W.innerHeight - (parseFloat(host.style.getPropertyValue("--vl-stage-top")) || 0));
+      upperFloor = Math.min(upperFloor, Math.max(screen - fixed, deckMin));
+      need = Math.max(upperFloor, deckMin) + fixed;
+    }
+    put("--vl-deck-floor", deckFloor);
+    put("--vl-upper-floor", upperFloor);
+    put("--vl-fit-need", need);
+  }
   function paintCues() {
     if (!S.doc) { return; }
     paintCueList();
@@ -2001,14 +2057,16 @@ PLAYER_APP_JS = r"""
     }
   }
   function cueEditorHtml(id) {
-    return '<strong id="tl-cue-head"></strong>' +
+    // 길이 · 문자/초는 머리 줄 옆(2026-11-24 — 16:10 화면): 시각 줄이 시작 · 끝만이라 좁은
+    // 인스펙터(약 400px)에서도 한 줄이다(예전엔 두 줄로 접혔다).
+    return '<div class="tl-cue-headline"><strong id="tl-cue-head"></strong>' +
+      '<span id="tl-cue-dur" class="tl-cue-num"></span>' +
+      '<span id="tl-cue-stats" class="tl-cue-num"></span></div>' +
       '<div class="tl-cue-times"><label>시작 <input id="tl-cue-start" class="tl-tc"' +
       ' data-side="start" data-cue="' + esc(id) + '" spellcheck="false"' +
       ' aria-label="자막 시작 — 시:분:초:프레임"></label>' +
       '<label>끝 <input id="tl-cue-end" class="tl-tc" data-side="end" data-cue="' + esc(id) +
-      '" spellcheck="false" aria-label="자막 끝 — 시:분:초:프레임"></label>' +
-      '<span id="tl-cue-dur" class="tl-cue-num"></span>' +
-      '<span id="tl-cue-stats" class="tl-cue-num"></span></div>' +
+      '" spellcheck="false" aria-label="자막 끝 — 시:분:초:프레임"></label></div>' +
       '<span id="tl-cue-meta" class="tl-cue-muted"></span>' +
       '<span id="tl-cue-warn" class="tl-cue-warn"></span>' +
       '<textarea id="tl-cue-text" data-cue="' + esc(id) + '" spellcheck="false"' +
@@ -3578,9 +3636,26 @@ PLAYER_APP_JS = r"""
       if (W.ResizeObserver) { new W.ResizeObserver(requestLane).observe(lane); }
     }
     var deckEl = S.rootEl && S.rootEl.closest ? S.rootEl.closest("#vl-timeline-deck") : null;
+    var refit = function () { if (S.doc) { fitDeck(); } };
+    // 편집 칸 높이(자막 고름 · 번역 모드)가 바뀌면 위 덱 바닥을 다시 잰다 — 인스펙터 칸 크기는
+    // 그대로라 덱 관찰로는 모른다. 재생기를 다시 그리면 칸도 새것이라 칸마다 묶는다.
+    // 이동 막대(상태 줄에 글이 생기면 한 줄 자란다)도 같다.
+    [$("tl-cue-edit"), S.rootEl ? S.rootEl.querySelector(".tl-transport") : null]
+      .forEach(function (box) {
+        if (box && !box.__tlFloorBound && W.ResizeObserver) {
+          box.__tlFloorBound = true;
+          new W.ResizeObserver(refit).observe(box);
+        }
+      });
+    // 높이만 줄어든 창 — 무대가 바닥 합(`--vl-fit-need`)에 묶여 덱 크기가 그대로면 덱 관찰로는
+    // 모른다. 남는 높이(위 덱 바닥의 상한)는 창 높이에서 온다.
+    if (!W.__tlFitResizeBound && W.addEventListener) {
+      W.__tlFitResizeBound = true;
+      W.addEventListener("resize", refit);
+    }
     if (deckEl && !deckEl.__tlFitBound && W.ResizeObserver) {
       deckEl.__tlFitBound = true;
-      new W.ResizeObserver(function () { if (S.doc) { fitDeck(); } }).observe(deckEl);
+      new W.ResizeObserver(refit).observe(deckEl);
       // 작업공간(「자막」 — 목록이 덱 밖으로)·맞춤·뷰어가 바뀌면 덱 크기가 그대로여도 다시 잰다.
       var stageEl = deckEl.closest("[id=visual-stage]");
       if (stageEl && W.MutationObserver) {

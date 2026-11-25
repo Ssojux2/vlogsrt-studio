@@ -1001,3 +1001,42 @@ def test_a_video_card_dragged_onto_the_lane_is_added_where_it_is_dropped() -> No
         assert gone not in js
     html = timeline_player.timeline_player_html({"frame": {"width": 1920, "height": 1080}})
     assert "tl-add" not in html and "원본 넣기" not in html
+
+
+def test_the_fit_floors_come_from_fixed_pieces_and_the_minimums() -> None:
+    """2026-11-24(16:10 화면) — 재생기 실행본이 맞춤의 바닥 둘을 무대에 단다.
+
+    아래 덱 = 덱 내용 높이 − 지금 파형 레인 + 레인 최소(`fitLaneMinPx + laneFilmPx`),
+    위 덱 = 자막 칸을 든 인스펙터 내용 높이 − 지금 자막 목록 + 목록 최소 높이 — 늘고 주는 칸
+    (레인 · 목록)을 최소로 바꿔 잴 뿐이라 바닥이 제 결과로 다시 자라지 않는다. 값이 바뀔 때만
+    단다(틱마다 다시 배치하지 않는다). 이동 막대의 빈 상태 줄은 둘째 줄 옆 · 편집 칸의 길이 ·
+    문자/초는 머리 줄 옆이라 시각 줄이 한 줄이다."""
+    floors = PLAYER_JS[PLAYER_JS.index("function fitFloors(") :].split("\n  }\n")[0]
+    assert "S.settings.fitLaneMinPx + S.settings.laneFilmPx" in floors
+    assert "parseFloat(getComputedStyle(lane).minHeight) || 0);" in floors
+    assert "deck.scrollHeight - lane.offsetHeight + laneMin" in floors
+    assert '!S.rootEl.classList.contains("is-fit") ? deck.scrollHeight :' in floors
+    assert "parseFloat(getComputedStyle(list).minHeight)" in floors
+    for name in ('"--vl-deck-floor"', '"--vl-upper-floor"', '"--vl-fit-need"'):
+        assert name in floors, name
+    assert "getPropertyValue(name) !== value" in floors
+    # 화면이 둘 다 담지 못하면 타임라인이 먼저다 — 위 덱 바닥을 남는 높이로 줄인다(인스펙터 스크롤).
+    assert "upperFloor = Math.min(upperFloor, Math.max(screen - fixed, deckMin));" in floors
+    fit = PLAYER_JS[PLAYER_JS.index("function fitDeck()") :].split("S.fitDeck = fitDeck;")[0]
+    assert "fitFloors(deck);" in fit
+    # 편집 칸 · 이동 막대 높이가 바뀌면(자막 고름 · 번역 모드 · 상태 글) 다시 잰다 — 높이만 준
+    # 창도(무대가 바닥 합에 묶이면 덱 크기가 그대로다).
+    assert '[$("tl-cue-edit"), S.rootEl ? S.rootEl.querySelector(".tl-transport") : null]' in (
+        PLAYER_JS
+    )
+    assert "new W.ResizeObserver(refit).observe(box);" in PLAYER_JS
+    assert 'W.addEventListener("resize", refit);' in PLAYER_JS
+    css = timeline_player.TIMELINE_PLAYER_CSS
+    # 상태 줄은 제 글 폭만큼 — 비면 줄을 먹지 않고, 길면 제 줄로(거절 까닭을 자르지 않는다).
+    assert ".tl-root.is-fit .tl-status { flex: 1 0 auto; max-width: 100%; }" in css
+    assert ".tl-status { color: var(--vl-ink-muted); flex: 1 0 100%;" in css
+    # 편집 칸 머리 줄에 길이 · 문자/초 — 시각 줄은 시작 · 끝만이라 좁은 인스펙터에서도 한 줄이다.
+    editor = PLAYER_JS[PLAYER_JS.index("function cueEditorHtml(") :].split("\n  }\n")[0]
+    head = editor[: editor.index('<div class="tl-cue-times">')]
+    assert 'id="tl-cue-head"' in head and 'id="tl-cue-dur"' in head and 'id="tl-cue-stats"' in head
+    assert ".tl-cue-headline .tl-cue-num {" in css
