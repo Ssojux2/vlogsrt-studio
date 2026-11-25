@@ -313,20 +313,22 @@ def test_a_cached_hydrogen_answer_is_never_bought_twice(
     service, root, asset = _project(tmp_path, stereo_offset)
     _live_online(service, root, monkeypatch)
     _run(service, root, _bound(_gemini_approval(service, root, asset)), _TwoEndpoints())
+    heard = {body["_folder"] for body in _phase_documents(root, asset.asset_id, "asr_outcome.json")}
     asr_epoch.bump(service._workspace(root), asset.asset_id)  # 같은 WAV·같은 줄을 다시 듣는다
     again = _TwoEndpoints()
     _run(service, root, _bound(_gemini_approval(service, root, asset)), again)
     assert len(again.transcribe) == 1 and again.hydrogen == []  # 캐시에서 읽었다
     assert _texts(service, root, asset.asset_id) == [f"H:{text}" for text in TRANSCRIBED]
-    (chunk,) = _text_record_of(root, asset.asset_id, epoch_folders=2)["chunks"]
+    (chunk,) = _text_record_after(root, asset.asset_id, heard)["chunks"]
     assert chunk["cached"] is True
 
 
-def _text_record_of(root: Path, asset_id: str, *, epoch_folders: int) -> dict[str, Any]:
-    """가장 최근 1단계 기록의 글자 귀 기록 — 다시 들으면 기록이 여럿이다."""
+def _text_record_after(root: Path, asset_id: str, heard: set[str]) -> dict[str, Any]:
+    """다시 들은 1단계 기록의 글자 귀 기록 — 처음 기록의 폴더를 빼고 남은 하나다.
+
+    `created_at`은 초 단위라 빠른 기계에서 두 기록이 같은 초에 찍힌다 — 시각으로 고르면 흔들린다."""
     found = _phase_documents(root, asset_id, "asr_outcome.json")
-    assert len(found) == epoch_folders
-    latest = max(found, key=lambda body: str(body.get("created_at") or ""))
+    (latest,) = [body for body in found if body["_folder"] not in heard]
     record: dict[str, Any] = latest["asr_text"]
     return record
 
