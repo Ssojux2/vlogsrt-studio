@@ -53,3 +53,13 @@ def test_reads_no_untrusted_event_text() -> None:
     """푸시·PR 글(제목·본문·브랜치 이름)을 명령 줄에 넣지 않는다 — 주입 경로가 없다."""
     assert "github.event." not in _text()
     assert "github.head_ref" not in _text()
+
+
+def test_pins_ffmpeg_9_0_where_the_package_manager_would_drift() -> None:
+    """소리 시각 시험은 ffmpeg 9.0으로 잰 값이다 — Windows·Linux는 판을 못 박는다.
+
+    못 박지 않은 choco가 9.1.0을 깔자 test_pcm 둘이 깨지고 시험 하나가 2시간 한도까지 멈췄다.
+    """
+    text = _text()
+    assert "choco install ffmpeg-full --version=9.0.2" in text
+    assert "ffmpeg-n9.0-latest-linux64-gpl-9.0" in text

@@ -44,9 +44,12 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install ffmpeg
 
+      # 판을 9.0.2로 못 박는다 — 소리 시각 시험(AAC 앞자리·원점 표)이 ffmpeg 9.0으로 잰 값이다(Linux와 같은
+      # 까닭). 못 박지 않았을 때 choco가 9.1.0을 깔자(2026-11-21~) test_pcm 둘이 깨지고 시험 하나가 2시간
+      # 한도까지 멈췄다 — 9.0.2였던 마지막 초록(53b5bf0)은 40분이었다.
       - name: ffmpeg (Windows — gyan full 빌드에는 libass가 든다)
         if: runner.os == 'Windows'
-        run: choco install ffmpeg-full -y --no-progress
+        run: choco install ffmpeg-full --version=9.0.2 -y --no-progress
 
       # xmllint(libxml2-utils)는 FCPXML 검증 문이다 — 없으면 Final Cut 보내기가 거부한다(W-84a).
       # zsh는 개발 엔진 설치 스크립트(`#!/bin/zsh`)의 셸이다. macOS는 둘 다 시스템에 있다.
