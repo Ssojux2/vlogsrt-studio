@@ -1846,6 +1846,30 @@ WORKBENCH_CSS = (
  border: 2px dashed var(--vl-tier-red-ink); box-shadow: none; }
 /* 「다음」·막대 클릭으로 고른 등급 구간 — accent-ink 바깥선(고른 컷과 같은 선택 하나). */
 .vl-recommendation.vl-rec-sel { outline: 2px solid var(--vl-accent-ink); outline-offset: 1px; }
+/* 등급 막대 직접 고치기(D189) — 사람 표시 막대는 ✎ 표지와 안쪽 테두리로 자동 등급과 갈린다. */
+.vl-recommendation.human { box-shadow: inset 0 0 0 2px var(--vl-accent-ink); }
+.vl-tier-edge { position:absolute; top:var(--vl-rec-top); height:var(--vl-rec-h); width:12px;
+ margin-left:-6px; padding:0; border:0; background:transparent; cursor:ew-resize; z-index:3;
+ touch-action:none; }
+.vl-tier-edge::after { content:""; position:absolute; top:3px; bottom:3px; left:5px; width:2px;
+ border-radius:1px; background:var(--vl-ink); opacity:.55; }
+.vl-tier-edge:hover::after, .vl-tier-edge:focus-visible::after { opacity:1;
+ background:var(--vl-accent-ink); }
+.vl-tier-drag { position:absolute; top:var(--vl-rec-top); height:var(--vl-rec-h);
+ pointer-events:none; z-index:2; opacity:.85; outline:1px dashed var(--vl-ink); }
+.vl-tier-drag.green { background: var(--vl-tier-green); }
+.vl-tier-drag.yellow { background: var(--vl-tier-yellow); }
+.vl-tier-drag.red { background: var(--vl-tier-red); }
+.vl-tier-drag.clear { background: transparent; }
+.vl-tier-menu { position:absolute; top:calc(var(--vl-rec-top) + var(--vl-rec-h) + 4px); z-index:6;
+ display:flex; gap:4px; padding:4px; border-radius:6px; border:1px solid var(--vl-line-strong);
+ background:var(--vl-surface-raised); box-shadow:var(--vl-shadow-pop); }
+.vl-tier-pick { font: 500 12px/1 var(--vl-font-sans); padding:6px 9px; border-radius:4px;
+ border:1px solid var(--vl-line); background:var(--vl-surface); color:var(--vl-ink);
+ cursor:pointer; white-space:nowrap; }
+.vl-tier-pick:hover { background:var(--vl-surface-hover); }
+.vl-tier-pick[aria-pressed="true"] { border-color:var(--vl-accent-ink);
+ box-shadow: inset 0 0 0 1px var(--vl-accent-ink); }
 .vl-tier-key.green { color: var(--vl-tier-green-ink); }
 .vl-tier-key.yellow { color: var(--vl-tier-yellow-ink); }
 .vl-tier-key.red { color: var(--vl-tier-red-ink); }
@@ -3227,14 +3251,234 @@ VISUAL_BOOTSTRAP_JS = (
         if (staleWire()) { return false; }
         if (!rangeValid()) { msg("시작과 끝을 먼저 찍으세요(In · Out)."); return true; }
         var r = curRange();
-        call("vl_apply", { op: "range", mark: mark, sourceId: r.sourceId,
-          startSec: VL.str(r.inSec), endSec: VL.str(r.outSec),
-          revisionId: model.revisionId, basePlanId: model.basePlanId, page: model.page,
-          selectedId: selectedId() }, "범위를 표시하는 중…", function (res) {
+        postRangeMark(r.sourceId, mark, r.inSec, r.outSec, "범위를 표시하는 중…", function (res) {
           // 저장했으면 찍은 범위를 걷는다 — 낡음(다른 곳의 편집)이면 그대로 두어 다시 누르게 한다.
           if (res && res.ok && !res.rangeStale && state.range === r) { state.range = null; }
         });
         return true;
+      }
+      // 범위 표시 하나(D100 §4) — In·Out 단추와 등급 막대 고치기(D189)가 같은 서버 편집을 쓴다.
+      function postRangeMark(sourceId, mark, a, b, note, done) {
+        call("vl_apply", { op: "range", mark: mark, sourceId: sourceId,
+          startSec: VL.str(a), endSec: VL.str(b),
+          revisionId: model.revisionId, basePlanId: model.basePlanId, page: model.page,
+          selectedId: selectedId() }, note, done);
+      }
+      // ── 등급 막대 직접 고치기(D189) — 막대는 실제로 내보낼 등급이다: 사람 표시가 자동 등급을
+      // 이긴다(렌더 계획 `_judge`와 같은 차례). 자동 등급은 읽을 때마다 다시 계산하고 보관하지
+      // 않으므로(D51) 고친 것은 사람 표시(범위 표시)로만 남는다 — 새 저장·새 서버 동작은 없다.
+      var TIER_MARK = { green: "recommended", yellow: "normal", red: "not_recommended" };
+      var MARK_TIER = { recommended: "green", normal: "yellow", not_recommended: "red" };
+      function coveringPart(parts, t) {
+        return parts.find(function (part) {
+          return VL.cmp(part.start, t) <= 0 && VL.cmp(part.end, t) > 0;
+        }) || null;
+      }
+      function tierParts(info) {
+        var autos = [], marks = [];
+        ((info && info.suggestions) || []).forEach(function (row, index) {
+          var a = ratOf(row.start), b = ratOf(row.end);
+          if (a && b && VL.cmp(a, b) < 0) {
+            autos.push({ start: a, end: b, row: row, index: index });
+          }
+        });
+        (((info && info.rail) || {}).intervals || []).forEach(function (it) {
+          var a = ratOf(it.sourceStart || it.start), b = ratOf(it.sourceEnd || it.end);
+          if (MARK_TIER[it.mark] && a && b && VL.cmp(a, b) < 0) {
+            marks.push({ start: a, end: b, mark: it.mark });
+          }
+        });
+        return { autos: autos, marks: marks };
+      }
+      // 원본 시계 초의 막대 — 자동 구간은 예전 그대로 하나씩(사람 표시가 덮은 곳만 잘라 낸다),
+      // 사람 표시는 같은 등급끼리 이어 뒤에 붙인다. 그린 차례가 막대 번호(`data-vl-tierbar`)다.
+      function withoutPart(pieces, cut) {
+        var out = [];
+        pieces.forEach(function (piece) {
+          if (VL.cmp(cut.end, piece[0]) <= 0 || VL.cmp(cut.start, piece[1]) >= 0) {
+            out.push(piece);
+            return;
+          }
+          if (VL.cmp(piece[0], cut.start) < 0) { out.push([piece[0], cut.start]); }
+          if (VL.cmp(cut.end, piece[1]) < 0) { out.push([cut.end, piece[1]]); }
+        });
+        return out;
+      }
+      function tierBars(info) {
+        var parts = tierParts(info), bars = [], humans = [];
+        parts.autos.forEach(function (auto) {
+          parts.marks.reduce(withoutPart, [[auto.start, auto.end]]).forEach(function (piece) {
+            bars.push({ start: piece[0], end: piece[1], human: false, row: auto.row,
+              index: auto.index, tier: tierOf(auto.row), hold: !!auto.row.hold });
+          });
+        });
+        parts.marks.slice().sort(function (x, y) { return VL.cmp(x.start, y.start); })
+          .forEach(function (mark) {
+            var tier = MARK_TIER[mark.mark], last = humans[humans.length - 1];
+            if (last && last.tier === tier && VL.cmp(last.end, mark.start) === 0) {
+              last.end = mark.end;
+              return;
+            }
+            humans.push({ start: mark.start, end: mark.end, human: true, row: null, index: -1,
+              tier: tier, hold: false });
+          });
+        humans.forEach(function (bar) {
+          var mid = VL.mul(VL.add(bar.start, bar.end), VL.parse("1/2"));
+          var under = coveringPart(parts.autos, mid);
+          bar.row = under ? under.row : null;
+        });
+        return bars.concat(humans);
+      }
+      // 끌 수 있는 끝 — 맞닿은 두 막대 사이와, 이웃 없이 원본 안쪽에 선 바깥 끝.
+      function tierEdges(drawn, dur) {
+        var out = [];
+        var bars = drawn.slice().sort(function (x, y) { return VL.cmp(x.start, y.start); });
+        bars.forEach(function (bar, i) {
+          var prev = bars[i - 1], next = bars[i + 1];
+          if (!(prev && VL.cmp(prev.end, bar.start) === 0) && VL.cmp(bar.start, [0, 1]) > 0) {
+            out.push({ at: bar.start, left: null, right: bar });
+          }
+          if (VL.cmp(bar.end, dur) < 0) {
+            var touching = next && VL.cmp(bar.end, next.start) === 0;
+            out.push({ at: bar.end, left: bar, right: touching ? next : null });
+          }
+        });
+        return out;
+      }
+      function tierEditable() { return state.timelineMode !== "result"; }
+      function tierMenuOf() {
+        var menu = state.tierMenu;
+        return menu && menu.sourceId === curSourceId() && tierEditable() ? menu : null;
+      }
+      function tierDragOf() {
+        var drag = state.tierDrag;
+        return drag && drag.sourceId === curSourceId() && tierEditable() ? drag : null;
+      }
+      // 커진 막대의 등급 — 이웃 막대가 없는 바깥 끝을 안으로 끌었으면 비운 띠에 표시가 없다(null).
+      function growingTier(drag) {
+        var grow = VL.cmp(drag.to, drag.from) > 0 ? drag.edge.left : drag.edge.right;
+        return grow ? grow.tier : null;
+      }
+      function tierMenuHtml(menu, dur) {
+        var a = VL.pct(menu.start, dur), b = VL.pct(menu.end, dur);
+        // 레일 오른쪽 절반의 막대는 오른쪽 끝에 붙여 연다 — 칸이 레일 밖으로 나가지 않는다.
+        var place = a + b > 100 ? "right:" + Math.max(0, 100 - b).toFixed(3) + "%"
+          : "left:" + a.toFixed(3) + "%";
+        var picks = [["recommended", "★ 추천"], ["normal", "보통"],
+          ["not_recommended", "✕ 비추천"]];
+        var html = ['<div class="vl-tier-menu" role="group" aria-label="이 구간(' +
+          esc(VL.fmt(menu.start, 1)) + "~" + esc(VL.fmt(menu.end, 1)) + '초)의 등급" style="' +
+          place + '">'];
+        picks.forEach(function (pick) {
+          var on = TIER_MARK[menu.tier] === pick[0] && !menu.hold;
+          html.push('<button type="button" class="vl-tier-pick" data-vl-tier-pick="' + pick[0] +
+            '" aria-pressed="' + on + '">' + pick[1] + "</button>");
+        });
+        if (menu.human) {
+          html.push('<button type="button" class="vl-tier-pick" data-vl-tier-pick="clear"' +
+            ' title="사람 표시를 거두고 자동 등급으로 돌립니다">자동으로</button>');
+        }
+        html.push('<button type="button" class="vl-tier-pick" data-vl-tier-pick="close"' +
+          ' aria-label="닫기">×</button></div>');
+        return html.join("");
+      }
+      function tierEditLayers(bars, dur) {
+        state.tierEdges = [];
+        if (!tierEditable()) { return ""; }
+        var html = [], drag = tierDragOf(), edges = tierEdges(bars, dur);
+        state.tierEdges = edges;
+        if (drag && VL.cmp(drag.from, drag.to) !== 0) {
+          var lo = VL.cmp(drag.from, drag.to) < 0 ? drag.from : drag.to;
+          var hi = lo === drag.from ? drag.to : drag.from;
+          html.push('<div class="vl-tier-drag ' + (growingTier(drag) || "clear") +
+            '" style="left:' +
+            VL.pct(lo, dur).toFixed(3) + "%;width:" + VL.pct(VL.sub(hi, lo), dur).toFixed(3) +
+            '%"></div>');
+        }
+        edges.forEach(function (edge, k) {
+          var at = drag && drag.key === VL.str(edge.at) ? drag.to : edge.at;
+          html.push('<button type="button" class="vl-tier-edge" data-vl-tier-edge="' + k +
+            '" aria-label="등급 경계 ' + esc(VL.fmt(edge.at, 2)) + '초 — 끌면 옮깁니다"' +
+            ' style="left:' + VL.pct(at, dur).toFixed(3) + '%"></button>');
+        });
+        var menu = tierMenuOf();
+        if (menu) { html.push(tierMenuHtml(menu, dur)); }
+        return html.join("");
+      }
+      function openTierMenu(barIndex) {
+        var drawn = state.tierBars && state.tierBars.sourceId === curSourceId()
+          ? state.tierBars.list : [];
+        var bar = drawn[barIndex], open = tierMenuOf();
+        if (!bar || !tierEditable() || (open && VL.cmp(open.start, bar.start) === 0 &&
+          VL.cmp(open.end, bar.end) === 0)) {
+          state.tierMenu = null;
+          return bar || null;
+        }
+        state.tierMenu = { sourceId: curSourceId(), start: bar.start, end: bar.end,
+          tier: bar.tier, hold: bar.hold, human: bar.human };
+        return bar;
+      }
+      function tierPick(word) {
+        var menu = tierMenuOf();
+        state.tierMenu = null;
+        drawRail();
+        if (!menu || word === "close" || staleWire()) { return; }
+        var a = snapRange(menu.start), b = snapRange(menu.end);
+        if (!a || !b || VL.cmp(a, b) >= 0) {
+          msg("이 구간은 한 프레임보다 짧아 등급을 바꿀 수 없습니다.");
+          return;
+        }
+        postRangeMark(menu.sourceId, word, a, b, "등급을 바꾸는 중…");
+      }
+      // 끝 끌기 — 옮긴 띠 하나를 커진 막대의 등급으로 표시한다(이웃이 없으면 표시를 거둔다).
+      // 끄는 동안은 미리 그리기만, 놓을 때 범위 표시 한 번(되돌리기 한 걸음)이다. 이웃 막대는
+      // 한 프레임 남는다.
+      function tierEdgeDrag(ev, k) {
+        var edge = (state.tierEdges || [])[k], fd = rangeFrame(), dur = rangeDur();
+        if (!edge || !fd || !dur || !tierEditable()) { return; }
+        var from = snapRange(edge.at);
+        var lo = edge.left ? VL.add(snapRange(edge.left.start), fd) : [0, 1];
+        var hi = edge.right ? VL.sub(snapRange(edge.right.end), fd) : dur;
+        if (!from || VL.cmp(lo, hi) > 0) { return; }
+        if (ev.preventDefault) { ev.preventDefault(); }
+        var drag = { sourceId: curSourceId(), key: VL.str(edge.at), from: from, to: from,
+          edge: edge };
+        state.tierDrag = drag;
+        state.tierMenu = null;
+        var mount = doc.getElementById("visual-rail");
+        var detach = function () {
+          if (!mount) { return; }
+          mount.removeEventListener("pointermove", mount._vlTierMove);
+          mount.removeEventListener("pointerup", mount._vlTierUp);
+        };
+        var move = function (mv) {
+          if (staleWire() || !mv || state.tierDrag !== drag) { return; }
+          var at = secAt(mv.clientX);
+          var v = at ? snapRange(sourceTime(at)) : null;
+          if (!v) { return; }
+          if (VL.cmp(v, lo) < 0) { v = lo; }
+          if (VL.cmp(v, hi) > 0) { v = hi; }
+          drag.to = v;
+          drawRail();
+        };
+        var up = function () {
+          detach();
+          if (state.tierDrag !== drag) { return; }
+          state.tierDrag = null;
+          state.tierSwallow = true;
+          drawRail();
+          if (staleWire() || VL.cmp(drag.to, drag.from) === 0) { return; }
+          var right = VL.cmp(drag.to, drag.from) > 0;
+          var grown = growingTier(drag);
+          postRangeMark(drag.sourceId, grown ? TIER_MARK[grown] : "clear",
+            right ? drag.from : drag.to, right ? drag.to : drag.from, "등급 경계를 옮기는 중…");
+        };
+        if (mount) {
+          detach();
+          mount._vlTierMove = move; mount._vlTierUp = up;
+          mount.addEventListener("pointermove", move);
+          mount.addEventListener("pointerup", up);
+        }
       }
       function sendUndo() {
         if (staleWire()) { return; }
@@ -3382,30 +3626,39 @@ VISUAL_BOOTSTRAP_JS = (
         }
         html.push('</div>');
         var info = curSource();
-        var suggestions = (info && info.suggestions) || [];
-        if (!suggestions.length) {
+        // 막대는 내보낼 등급이다 — 사람 표시가 자동 등급을 이긴다(D189).
+        var bars = tierBars(info);
+        state.tierBars = { sourceId: curSourceId(), list: bars };
+        if (!bars.length) {
           html.push('<div class="vl-rec-pending">' +
             esc(info && (info.analysisLabel || info.analysisState) || '분석 전') + '</div>');
         }
-        suggestions.forEach(function(row,index) {
-          var a = displayTime(ratOf(row.start)), b = displayTime(ratOf(row.end));
+        bars.forEach(function(bar, barIndex) {
+          var row = bar.row;
+          var a = displayTime(bar.start), b = displayTime(bar.end);
           if (!a || !b || VL.cmp(a,b) >= 0) { return; }
-          var tier = tierOf(row);
-          var loose = tier === "red" && row.loose;
-          var detail = (loose ? "컷 경계와 맞지 않음 · 남은 수에 들지 않음 · " : "") +
-            tierDetail(row);
+          var tier = bar.tier;
+          var loose = !bar.human && tier === "red" && row.loose;
+          var detail = bar.human
+            ? "사람 표시: " + tierWord(tier, false) + " — 자동 등급보다 먼저입니다" +
+              (row ? " · 자동: " + tierWord(tierOf(row), row.hold) : "")
+            : (loose ? "컷 경계와 맞지 않음 · 남은 수에 들지 않음 · " : "") + tierDetail(row);
           // 「다음」·막대 클릭으로 고른 구간은 accent-ink 바깥선으로 보인다(선택은 하나, D57 C).
-          var picked = state.marker && state.marker.sourceId === curSourceId() &&
+          var picked = !bar.human && state.marker && state.marker.sourceId === curSourceId() &&
             state.marker.start === row.start && state.marker.end === row.end;
-          html.push('<button type="button" class="vl-recommendation ' + esc(row.rec) + ' ' +
-            esc(tier) + (row.hold ? ' hold' : '') + (loose ? ' loose' : '') +
-            (picked ? ' vl-rec-sel' : '') +
-            '" data-vl-recommendation="' + index +
+          html.push('<button type="button" class="vl-recommendation ' +
+            esc(bar.human ? TIER_MARK[tier] : row.rec) + ' ' +
+            esc(tier) + (bar.hold ? ' hold' : '') + (loose ? ' loose' : '') +
+            (bar.human ? ' human' : '') + (picked ? ' vl-rec-sel' : '') + '"' +
+            (bar.human ? '' : ' data-vl-recommendation="' + bar.index + '"') +
+            ' data-vl-tierbar="' + barIndex +
             '" data-vl-tier="' + esc(tier) + '" style="left:' + VL.pct(a,dur).toFixed(3) +
             '%;width:' + Math.max(.4,VL.pct(VL.sub(b,a),dur)).toFixed(3) +
-            '%" aria-label="' + esc(tierWord(tier, row.hold) + ' ' +
-              VL.fmt(ratOf(row.start), 1) + '초~' + VL.fmt(ratOf(row.end), 1) + '초 · ' + detail) +
-            '" title="' + esc(detail) + '">' + esc(tierGlyph(tier, row.hold)) + '</button>');
+            '%" aria-label="' + esc(tierWord(tier, bar.hold) + ' ' +
+              VL.fmt(bar.start, 1) + '초~' + VL.fmt(bar.end, 1) + '초 · ' + detail +
+              (tierEditable() ? ' — 누르면 등급을 고릅니다' : '')) +
+            '" title="' + esc(detail) + '">' + esc((bar.human ? '✎ ' : '') +
+              tierGlyph(tier, bar.hold)) + '</button>');
         });
         ((info && info.subtitles) || []).forEach(function(cue,index) {
           var a = displayTime(ratOf(cue.start)), b = displayTime(ratOf(cue.end));
@@ -3459,6 +3712,7 @@ VISUAL_BOOTSTRAP_JS = (
               dur).toFixed(3) + '% - 6px)"></button>');
         }
         html.push(rangeLayers(info, rail, dur));
+        html.push(tierEditLayers(bars, dur));
         html.push('<div class="vl-playhead" id="vl-playhead" style="left:0"></div>');
         if (state.draft && state.draft.epoch === model.epoch && state.draft.sec) {
           html.push('<div class="vl-draftmark" style="left:' +
@@ -4322,6 +4576,10 @@ VISUAL_BOOTSTRAP_JS = (
       function railPointerDown(ev) {
         if (staleWire()) { return; }
         if (!ev || !ev.target || !ev.target.getAttribute) { return; }
+        // 끌기 뒤 click 하나만 삼킨다 — 새 누름이 오면 남은 표지를 거둔다.
+        state.tierSwallow = false;
+        var tierEdge = ev.target.getAttribute("data-vl-tier-edge");
+        if (tierEdge !== null) { tierEdgeDrag(ev, Number(tierEdge)); return; }
         var rangeSide = ev.target.getAttribute("data-vl-range-handle");
         if (rangeSide) { rangeDrag(ev, rangeSide); return; }
         var side = ev.target.getAttribute("data-vl-handle");
@@ -4394,6 +4652,17 @@ VISUAL_BOOTSTRAP_JS = (
         if (staleWire()) { return; }
         if (!ev || !ev.target || !ev.target.getAttribute) { return; }
         if (ev.target.getAttribute("data-vl-range-handle")) { return; }
+        // 등급 끝 끌기 뒤에 오는 click은 재생 위치를 옮기지 않는다(D189).
+        if (state.tierSwallow) { state.tierSwallow = false; return; }
+        if (ev.target.getAttribute("data-vl-tier-edge") !== null) { return; }
+        var tierWordPick = ev.target.getAttribute("data-vl-tier-pick");
+        if (tierWordPick) { tierPick(tierWordPick); return; }
+        var tierBarIndex = ev.target.getAttribute("data-vl-tierbar");
+        var tierBar = tierBarIndex !== null ? openTierMenu(Number(tierBarIndex)) : null;
+        if (tierBar && tierBar.human) {
+          seekTo(tierBar.start); drawRail(); renderPanel();
+          return;
+        }
         var cueIndex = ev.target.getAttribute("data-vl-source-cue");
         if (cueIndex !== null) {
           var cueInfo = curSource();
@@ -4420,7 +4689,7 @@ VISUAL_BOOTSTRAP_JS = (
             state.marker = Object.assign({sourceId:curSourceId(), label:
               tierWord(tierOf(row), row.hold) || recLabel(row.rec),
               segmentId: selectedInterval ? selectedInterval.id : null, tierSpan: true}, row);
-            seekTo(ratOf(row.start)); renderPanel();
+            seekTo(ratOf(row.start)); renderPanel(); drawRail();
           }
           return;
         }
