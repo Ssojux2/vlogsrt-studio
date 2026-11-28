@@ -111,10 +111,10 @@ def test_top_bar_names_project_steps_mode_shortcuts_and_settings() -> None:
     assert ">단축키</span>" in online and "data-vl-keys-open" in online
     assert flow in online
     keys = online[online.index('id="vl-keysheet"') :]
-    # 재생 다섯 + 시작·끝 표시 셋(I·O · 1·2·3 · Esc — W-46b, D100 §7b).
+    # 재생 다섯 + 시작·끝 표시 셋(I·O · 1·2·3 · Esc — W-46b, D100 §7b) + ⌘Z 되돌리기(D190).
     viewer = keys[keys.index('<dl class="vl-keysheet">') :]
     viewer = viewer[: viewer.index("</dl>")]
-    assert viewer.count("<dt>") == len(ui_facade.SHORTCUT_SHEET) == 8
+    assert viewer.count("<dt>") == len(ui_facade.SHORTCUT_SHEET) == 9
     # 재생기(타임라인 · 자막)의 키도 같은 판 하나에 모은다(W-102, D175 — 사용자 지시).
     assert keymap.keysheet_sections_html() in keys and "<details" not in keys
     assert "입력 칸에 글을 쓰는 중에는 단축키가 동작하지 않습니다." in keys
