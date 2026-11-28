@@ -14,6 +14,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from fractions import Fraction
 
+from ui import platform_keys
+
 
 def parse_seconds(text: str, *, what: str = "시각") -> Fraction:
     """입력 칸의 초 표기 해석 — 정수·소수·유리수(`3/7`)를 정확히.
@@ -139,6 +141,10 @@ FLOW_STEP_LABELS = ("폴더 불러오기", "분석 승인", "검토", "편집 ·
 PROJECT_EMPTY_LABEL = "프로젝트 없음"
 SHORTCUT_SEEK_SECONDS = 5
 """J/L이 옮기는 초 — 실행본의 `VL_SEEK_SECONDS`와 같은 값이다(시험이 둘을 맞춰 본다)."""
+RAIL_DRAG_PX = 4
+"""원본 구간 레일의 등급 막대 안에서 누른 채 이만큼 움직여야 구간 고르기(끌기)가 된다(D190) —
+그 아래는 누름(막대 전체 고르기)이다. 외부 근거 없는 조정 대상(손 떨림 몇 px을 누름으로 둔다) —
+실행본의 `VL_RAIL_DRAG_PX`와 같은 값이다(시험이 둘을 맞춰 본다). 어느 지문·저장에도 없다."""
 TOAST_TITLES = {"error": "오류", "warning": "주의", "info": "알림", "success": "완료"}
 """알림(toast) 머리 글자 — 완료는 알림, 막힘은 주의, 실패는 오류(D57 C).
 
@@ -184,8 +190,9 @@ SHORTCUT_SHEET: tuple[tuple[tuple[str, ...], str], ...] = (
     (("←", "→"), "경계 손잡이에 초점이 있을 때 한 프레임씩 옮기기"),
     (("Enter",), "경계 초안을 프레임에 맞추기"),
     (("I", "O"), "지금 위치를 시작 · 끝으로 찍기"),
-    (("1", "2", "3"), "찍은 범위를 추천 · 보통 · 비추천으로 표시"),
-    (("Esc",), "찍은 시작 · 끝 지우기"),
+    (("1", "2", "3"), "찍은 범위(또는 고른 등급 막대 · 끈 구간)를 추천 · 보통 · 비추천으로 표시"),
+    (("Esc",), "등급 고르기 닫기 · 찍은 시작 · 끝 지우기"),
+    (("⌘Z",), "원본 구간의 마지막 편집 되돌리기"),
 )
 SHORTCUT_HINT: tuple[tuple[tuple[str, ...], str], ...] = (
     (("Space",), "재생"),
@@ -261,7 +268,10 @@ def flow_steps_html(steps: Sequence[FlowStep]) -> str:
 
 
 def _kbd_html(keys: Sequence[str]) -> str:
-    return "".join(f'<kbd class="vl-kbd">{html.escape(key)}</kbd>' for key in keys)
+    # 키 표는 macOS 글자로 적는다 — 다른 운영체제는 ⌘ → Ctrl+로 읽는다(W-84, D144).
+    return "".join(
+        f'<kbd class="vl-kbd">{html.escape(platform_keys.display(key))}</kbd>' for key in keys
+    )
 
 
 def keysheet_html() -> str:
@@ -1114,6 +1124,11 @@ def visual_player_shell_html(video_src: str | None, note: str) -> str:
     )
 
 
+UNDO_ARIA_KEYS = "Meta+Z Control+Z"
+UNDO_TITLE = "마지막 편집 한 걸음을 되돌립니다 (⌘Z · Ctrl+Z)"
+"""「되돌리기」의 키(D190) — 실행본은 ⌘Z와 Ctrl+Z를 함께 받는다(운영체제를 가리지 않는다). 작업대
+그림은 운영체제마다 같은 바이트여야 하므로(잠근 그림 시험) 둘을 함께 적는다 — 운영체제에 맞춘
+글자는 「단축키」 판이 보인다."""
 RANGE_MARK_BUTTONS: tuple[tuple[str, str, str, str], ...] = (
     ("recommended", "green", "추천", "1"),
     ("normal", "yellow", "보통", "2"),
@@ -1151,7 +1166,8 @@ def range_markbar_html() -> str:
         f'<span id="vl-range-readout" class="vl-range-readout" aria-live="polite">'
         f"{html.escape(RANGE_EMPTY_TEXT)}</span>{marks}"
         '<button type="button" id="vl-range-undo" class="vl-btn vl-btn-ghost"'
-        ' title="마지막 편집 한 걸음을 되돌립니다">되돌리기</button></div>'
+        f' aria-keyshortcuts="{UNDO_ARIA_KEYS}"'
+        f' title="{UNDO_TITLE}">되돌리기</button></div>'
     )
 
 
@@ -1848,13 +1864,20 @@ WORKBENCH_CSS = (
 .vl-recommendation.vl-rec-sel { outline: 2px solid var(--vl-accent-ink); outline-offset: 1px; }
 /* 등급 막대 직접 고치기(D189) — 사람 표시 막대는 ✎ 표지와 안쪽 테두리로 자동 등급과 갈린다. */
 .vl-recommendation.human { box-shadow: inset 0 0 0 2px var(--vl-accent-ink); }
-.vl-tier-edge { position:absolute; top:var(--vl-rec-top); height:var(--vl-rec-h); width:12px;
- margin-left:-6px; padding:0; border:0; background:transparent; cursor:ew-resize; z-index:3;
- touch-action:none; }
-.vl-tier-edge::after { content:""; position:absolute; top:3px; bottom:3px; left:5px; width:2px;
- border-radius:1px; background:var(--vl-ink); opacity:.55; }
+.vl-tier-edge { position:absolute; top:calc(var(--vl-rec-top) - 2px);
+ height:calc(var(--vl-rec-h) + 4px); width:16px; margin-left:-8px; padding:0; border:0;
+ background:transparent; cursor:ew-resize; z-index:3; touch-action:none; }
+/* 잡을 끝(D190) — 어느 등급 색 위에서도 보이게 바깥 테두리를 두른 굵은 손잡이. */
+.vl-tier-edge::after { content:""; position:absolute; top:2px; bottom:2px; left:6px; width:4px;
+ border-radius:2px; background:var(--vl-ink); box-shadow:0 0 0 1px var(--vl-surface);
+ opacity:.8; }
 .vl-tier-edge:hover::after, .vl-tier-edge:focus-visible::after { opacity:1;
  background:var(--vl-accent-ink); }
+/* 고른 구간 — 숫자 키 · 표시 단추가 바꿀 자리(끄는 동안은 점선). 누름은 막대가 받는다. */
+.vl-tier-span { position:absolute; top:calc(var(--vl-rec-top) - 2px);
+ height:calc(var(--vl-rec-h) + 4px); box-sizing:border-box; pointer-events:none; z-index:2;
+ border:2px solid var(--vl-accent-ink); border-radius:3px; }
+.vl-tier-span.sweeping { border-style:dashed; }
 .vl-tier-drag { position:absolute; top:var(--vl-rec-top); height:var(--vl-rec-h);
  pointer-events:none; z-index:2; opacity:.85; outline:1px dashed var(--vl-ink); }
 .vl-tier-drag.green { background: var(--vl-tier-green); }
@@ -1870,6 +1893,10 @@ WORKBENCH_CSS = (
 .vl-tier-pick:hover { background:var(--vl-surface-hover); }
 .vl-tier-pick[aria-pressed="true"] { border-color:var(--vl-accent-ink);
  box-shadow: inset 0 0 0 1px var(--vl-accent-ink); }
+/* 단축키 글자 — 자식 원소 없이 그린다(누른 원소가 늘 단추다). */
+.vl-tier-pick[data-vl-key]::after { content:attr(data-vl-key); margin-left:6px; padding:1px 4px;
+ border-radius:3px; border:1px solid var(--vl-line); font: 500 11px/1 var(--vl-font-mono);
+ color:var(--vl-ink-muted); }
 .vl-tier-key.green { color: var(--vl-tier-green-ink); }
 .vl-tier-key.yellow { color: var(--vl-tier-yellow-ink); }
 .vl-tier-key.red { color: var(--vl-tier-red-ink); }
@@ -2338,8 +2365,14 @@ VISUAL_BOOTSTRAP_JS = (
     "KeyL": "forward", "Comma": "frameBack", "Period": "frameForward" };
   var VL_PLAY_FAILED_TEXT = "재생할 수 없습니다: ";
   // 시작·끝 표시 키(W-46b) — 재생 키와 같은 막기(입력 칸·조합·반복·수정키·열린 서랍)를 지난다.
+  // 1–3은 막대를 고른 동안 그 구간 몫이다(D190) — 숫자판도 같다.
   var VL_RANGE_KEYS = { "KeyI": "in", "KeyO": "out", "Digit1": "recommended",
-    "Digit2": "normal", "Digit3": "not_recommended", "Escape": "cancel" };
+    "Digit2": "normal", "Digit3": "not_recommended", "Numpad1": "recommended",
+    "Numpad2": "normal", "Numpad3": "not_recommended", "Escape": "cancel" };
+  // 레일 막대 안 끌기가 누름이 아니라 끌기가 되는 거리(px) — 파이썬 `RAIL_DRAG_PX`와 같다.
+  var VL_RAIL_DRAG_PX = 4;
+  // ⌘Z · Ctrl+Z가 원본 구간 편집을 되돌리는 자리 — 마지막으로 누른 곳이 이 안이어야 한다(D190).
+  var VL_UNDO_ZONE = "#visual-player";
   var VL_RANGE_MARKS = ["recommended", "normal", "not_recommended", "clear"];
   if (!W.__vlWireVisual) {
     W.__vlWireVisual = function (root, doc) {
@@ -3218,6 +3251,8 @@ VISUAL_BOOTSTRAP_JS = (
           var swap = r.inSec; r.inSec = r.outSec; r.outSec = swap;
         }
         state.range = r;
+        // 시작·끝을 찍으면 숫자 키는 찍은 범위 몫이다 — 막대 고름을 닫는다(D190).
+        state.tierMenu = null;
         renderRail();
         return true;
       }
@@ -3227,11 +3262,15 @@ VISUAL_BOOTSTRAP_JS = (
       }
       function rangeSeconds(a) { return VL.fmt(a, 2) + "초"; }
       function paintRangeControls() {
-        var r = curRange(), ok = rangeValid();
+        var r = curRange(), ok = rangeValid(), picked = tierMenuOf();
         var out = doc.getElementById("vl-range-readout");
         if (out) {
           var text = "재생하며 In(I)·Out(O)으로 시작과 끝을 찍으세요.";
-          if (r && r.inSec && r.outSec) {
+          if (picked) {
+            text = "고른 구간 " + rangeSeconds(picked.start) + " ~ " +
+              rangeSeconds(picked.end) + " (" + rangeSeconds(VL.sub(picked.end, picked.start)) +
+              ") — 1 추천 · 2 보통 · 3 비추천 · Esc 닫기";
+          } else if (r && r.inSec && r.outSec) {
             text = rangeSeconds(r.inSec) + " ~ " + rangeSeconds(r.outSec) + " (" +
               rangeSeconds(VL.sub(r.outSec, r.inSec)) + ")" +
               (ok ? "" : " — 시작과 끝이 같은 프레임입니다");
@@ -3244,8 +3283,14 @@ VISUAL_BOOTSTRAP_JS = (
         }
         VL_RANGE_MARKS.forEach(function (mark) {
           var button = doc.getElementById("vl-mark-" + mark);
-          if (button) { button.disabled = !ok; }
+          if (button) { button.disabled = !(ok || picked); }
         });
+      }
+      // 표시 단추 · 1–3 — 막대를 고른 동안은 그 구간, 아니면 찍은 범위(D190).
+      function markPicked(mark) {
+        if (!tierMenuOf()) { return sendMark(mark); }
+        tierPick(mark, true);
+        return true;
       }
       function sendMark(mark) {
         if (staleWire()) { return false; }
@@ -3327,7 +3372,42 @@ VISUAL_BOOTSTRAP_JS = (
           var under = coveringPart(parts.autos, mid);
           bar.row = under ? under.row : null;
         });
-        return bars.concat(humans);
+        return joinRuns(bars, humans);
+      }
+      // 사람 막대와 맞닿은 같은 등급 자동 막대는 한 줄기로 그린다(D190) — 자동 추천의 끝을
+      // 끌어 늘리면 추천 막대 하나가 길어져 보여야 한다(✎ 조각이 따로 서면 길이가 안 바뀐 것처럼
+      // 보인다).
+      // 판정 보류 · 경계와 맞지 않는 빨강은 제 모양이 있어 잇지 않는다. 자동끼리는 예전 그대로다.
+      function joinable(bar) { return !bar.hold && !(bar.tier === "red" && bar.row.loose); }
+      function joinRuns(autos, humans) {
+        var used = autos.map(function () { return false; });
+        var runs = humans.map(function (bar) {
+          return Object.assign({}, bar, { joined: false });
+        });
+        var grew = true;
+        while (grew) {
+          grew = false;
+          autos.forEach(function (bar, i) {
+            if (used[i] || !joinable(bar)) { return; }
+            runs.forEach(function (run) {
+              if (used[i] || run.tier !== bar.tier) { return; }
+              if (VL.cmp(bar.end, run.start) === 0) { run.start = bar.start; }
+              else if (VL.cmp(run.end, bar.start) === 0) { run.end = bar.end; }
+              else { return; }
+              used[i] = true; run.joined = true; grew = true;
+            });
+          });
+        }
+        var merged = [];
+        runs.sort(function (x, y) { return VL.cmp(x.start, y.start); }).forEach(function (run) {
+          var last = merged[merged.length - 1];
+          if (last && last.tier === run.tier && VL.cmp(last.end, run.start) === 0) {
+            last.end = run.end; last.joined = true;
+            return;
+          }
+          merged.push(run);
+        });
+        return autos.filter(function (bar, i) { return !used[i]; }).concat(merged);
       }
       // 끌 수 있는 끝 — 맞닿은 두 막대 사이와, 이웃 없이 원본 안쪽에 선 바깥 끝.
       function tierEdges(drawn, dur) {
@@ -3338,8 +3418,10 @@ VISUAL_BOOTSTRAP_JS = (
           if (!(prev && VL.cmp(prev.end, bar.start) === 0) && VL.cmp(bar.start, [0, 1]) > 0) {
             out.push({ at: bar.start, left: null, right: bar });
           }
-          if (VL.cmp(bar.end, dur) < 0) {
-            var touching = next && VL.cmp(bar.end, next.start) === 0;
+          var touching = next && VL.cmp(bar.end, next.start) === 0;
+          // 같은 등급끼리의 이음매는 옮겨도 아무것도 바뀌지 않는다 — 손잡이를 세우지 않는다.
+          var seam = touching && next.tier === bar.tier && !next.hold && !bar.hold;
+          if (VL.cmp(bar.end, dur) < 0 && !seam) {
             out.push({ at: bar.end, left: bar, right: touching ? next : null });
           }
         });
@@ -3359,41 +3441,73 @@ VISUAL_BOOTSTRAP_JS = (
         var grow = VL.cmp(drag.to, drag.from) > 0 ? drag.edge.left : drag.edge.right;
         return grow ? grow.tier : null;
       }
+      // 고른 구간의 지금 등급 — 덮은 막대가 한 등급뿐일 때만 눌려 보인다(섞였거나 보류면 없다).
+      // 사람 막대가 걸쳐 있으면 「자동으로」를 낸다. 그린 막대에서 매번 다시 읽는다(서버 답 뒤에도
+      // 맞다).
+      function spanState(menu) {
+        var drawn = state.tierBars && state.tierBars.sourceId === menu.sourceId
+          ? state.tierBars.list : [];
+        var tiers = {}, count = 0, hold = false, human = false;
+        drawn.forEach(function (bar) {
+          if (VL.cmp(bar.start, menu.end) >= 0 || VL.cmp(bar.end, menu.start) <= 0) { return; }
+          if (!tiers[bar.tier]) { tiers[bar.tier] = true; count += 1; }
+          hold = hold || bar.hold;
+          human = human || bar.human;
+        });
+        var only = count === 1 && !hold ? Object.keys(tiers)[0] : null;
+        return { tier: only, human: human };
+      }
       function tierMenuHtml(menu, dur) {
-        var a = VL.pct(menu.start, dur), b = VL.pct(menu.end, dur);
+        var a = VL.pct(menu.start, dur), b = VL.pct(menu.end, dur), now = spanState(menu);
         // 레일 오른쪽 절반의 막대는 오른쪽 끝에 붙여 연다 — 칸이 레일 밖으로 나가지 않는다.
         var place = a + b > 100 ? "right:" + Math.max(0, 100 - b).toFixed(3) + "%"
           : "left:" + a.toFixed(3) + "%";
-        var picks = [["recommended", "★ 추천"], ["normal", "보통"],
-          ["not_recommended", "✕ 비추천"]];
+        // 키 글자는 CSS가 `data-vl-key`로 그린다 — 단추 안에 자식 원소를 두면 누른 자리가 단추가
+        // 아니게 된다(레일 클릭은 누른 원소의 속성으로 가른다).
+        var picks = [["recommended", "★ 추천", "1"], ["normal", "보통", "2"],
+          ["not_recommended", "✕ 비추천", "3"]];
         var html = ['<div class="vl-tier-menu" role="group" aria-label="이 구간(' +
           esc(VL.fmt(menu.start, 1)) + "~" + esc(VL.fmt(menu.end, 1)) + '초)의 등급" style="' +
           place + '">'];
         picks.forEach(function (pick) {
-          var on = TIER_MARK[menu.tier] === pick[0] && !menu.hold;
+          var on = TIER_MARK[now.tier] === pick[0];
           html.push('<button type="button" class="vl-tier-pick" data-vl-tier-pick="' + pick[0] +
-            '" aria-pressed="' + on + '">' + pick[1] + "</button>");
+            '" aria-pressed="' + on + '" data-vl-key="' + pick[2] + '" aria-keyshortcuts="' +
+            pick[2] + '">' + pick[1] + "</button>");
         });
-        if (menu.human) {
+        if (now.human) {
           html.push('<button type="button" class="vl-tier-pick" data-vl-tier-pick="clear"' +
             ' title="사람 표시를 거두고 자동 등급으로 돌립니다">자동으로</button>');
         }
         html.push('<button type="button" class="vl-tier-pick" data-vl-tier-pick="close"' +
-          ' aria-label="닫기">×</button></div>');
+          ' aria-keyshortcuts="Escape" aria-label="닫기">×</button></div>');
         return html.join("");
       }
+      function tierSweepOf() {
+        var sweep = state.tierSweep;
+        return sweep && sweep.moved && sweep.sourceId === curSourceId() && tierEditable()
+          ? sweep : null;
+      }
+      function ordered(a, b) { return VL.cmp(a, b) <= 0 ? [a, b] : [b, a]; }
       function tierEditLayers(bars, dur) {
         state.tierEdges = [];
         if (!tierEditable()) { return ""; }
         var html = [], drag = tierDragOf(), edges = tierEdges(bars, dur);
         state.tierEdges = edges;
         if (drag && VL.cmp(drag.from, drag.to) !== 0) {
-          var lo = VL.cmp(drag.from, drag.to) < 0 ? drag.from : drag.to;
-          var hi = lo === drag.from ? drag.to : drag.from;
+          var moved = ordered(drag.from, drag.to);
           html.push('<div class="vl-tier-drag ' + (growingTier(drag) || "clear") +
             '" style="left:' +
-            VL.pct(lo, dur).toFixed(3) + "%;width:" + VL.pct(VL.sub(hi, lo), dur).toFixed(3) +
-            '%"></div>');
+            VL.pct(moved[0], dur).toFixed(3) + "%;width:" +
+            VL.pct(VL.sub(moved[1], moved[0]), dur).toFixed(3) + '%"></div>');
+        }
+        // 고른 구간 — 숫자 키 · 표시 단추가 바꿀 자리(끄는 동안은 점선).
+        var sweep = tierSweepOf(), menu = tierMenuOf();
+        var span = sweep ? ordered(sweep.from, sweep.to) : menu ? [menu.start, menu.end] : null;
+        if (span && VL.cmp(span[0], span[1]) < 0) {
+          html.push('<div class="vl-tier-span' + (sweep ? " sweeping" : "") + '" style="left:' +
+            VL.pct(span[0], dur).toFixed(3) + "%;width:" +
+            VL.pct(VL.sub(span[1], span[0]), dur).toFixed(3) + '%"></div>');
         }
         edges.forEach(function (edge, k) {
           var at = drag && drag.key === VL.str(edge.at) ? drag.to : edge.at;
@@ -3401,8 +3515,7 @@ VISUAL_BOOTSTRAP_JS = (
             '" aria-label="등급 경계 ' + esc(VL.fmt(edge.at, 2)) + '초 — 끌면 옮깁니다"' +
             ' style="left:' + VL.pct(at, dur).toFixed(3) + '%"></button>');
         });
-        var menu = tierMenuOf();
-        if (menu) { html.push(tierMenuHtml(menu, dur)); }
+        if (menu && !sweep) { html.push(tierMenuHtml(menu, dur)); }
         return html.join("");
       }
       function openTierMenu(barIndex) {
@@ -3412,16 +3525,27 @@ VISUAL_BOOTSTRAP_JS = (
         if (!bar || !tierEditable() || (open && VL.cmp(open.start, bar.start) === 0 &&
           VL.cmp(open.end, bar.end) === 0)) {
           state.tierMenu = null;
-          return bar || null;
+        } else {
+          state.tierMenu = { sourceId: curSourceId(), start: bar.start, end: bar.end };
         }
-        state.tierMenu = { sourceId: curSourceId(), start: bar.start, end: bar.end,
-          tier: bar.tier, hold: bar.hold, human: bar.human };
-        return bar;
+        paintRangeControls();
+        return bar || null;
       }
-      function tierPick(word) {
-        var menu = tierMenuOf();
+      function closeTierMenu() {
+        if (!tierMenuOf()) { return false; }
         state.tierMenu = null;
         drawRail();
+        paintRangeControls();
+        return true;
+      }
+      // 누른 고르기(또는 숫자 키·표시 단추)를 고른 구간(프레임에 붙인)에 범위 표시 한 번으로
+      // 싣는다.
+      // 칸에서 고르면 닫고, 키·단추면 고름을 남겨 다시 눌러 바꿀 수 있게 한다(D190).
+      function tierPick(word, keep) {
+        var menu = tierMenuOf();
+        if (!keep || word === "close") { state.tierMenu = null; }
+        drawRail();
+        paintRangeControls();
         if (!menu || word === "close" || staleWire()) { return; }
         var a = snapRange(menu.start), b = snapRange(menu.end);
         if (!a || !b || VL.cmp(a, b) >= 0) {
@@ -3430,9 +3554,49 @@ VISUAL_BOOTSTRAP_JS = (
         }
         postRangeMark(menu.sourceId, word, a, b, "등급을 바꾸는 중…");
       }
+      // 레일이 포인터를 붙잡는다 — 레일 밖으로 나가도 놓을 때까지 받는다. 붙잡은 뒤의 click은
+      // 레일 자신에게 가므로 누름(막대 고르기)이 될 수 있는 동안은 붙잡지 않는다(막대 안 끌기는
+      // 움직인 뒤).
+      function holdPointer(pointerId) {
+        var mount = doc.getElementById("visual-rail");
+        if (!mount || typeof mount.setPointerCapture !== "function" || pointerId === undefined) {
+          return;
+        }
+        try { mount.setPointerCapture(pointerId); }
+        catch (error) { /* 이미 놓인 포인터 — 레일 안의 사건만으로 따른다(예전 그대로) */ }
+      }
+      // 레일 위 끌기 하나를 따른다. 취소(pointercancel)는 `up(null)`이다. 끄는 동안 레일을 다시
+      // 그려도 레일 원소는 그대로다.
+      function railTrack(key, move, up) {
+        var mount = doc.getElementById("visual-rail");
+        if (!mount) { return; }
+        var names = ["pointermove", "pointerup", "pointercancel"];
+        var old = mount[key];
+        if (old) { names.forEach(function (n, i) { mount.removeEventListener(n, old[i]); }); }
+        var handlers = [move];
+        var detach = function () {
+          names.forEach(function (n, i) { mount.removeEventListener(n, handlers[i]); });
+          mount[key] = null;
+        };
+        handlers.push(function (e) { detach(); up(e || {}); });
+        handlers.push(function () { detach(); up(null); });
+        mount[key] = handlers;
+        names.forEach(function (n, i) { mount.addEventListener(n, handlers[i]); });
+      }
+      function railSourceAt(clientX) {
+        var at = typeof clientX === "number" ? secAt(clientX) : null;
+        return at ? snapRange(sourceTime(at)) : null;
+      }
       // 끝 끌기 — 옮긴 띠 하나를 커진 막대의 등급으로 표시한다(이웃이 없으면 표시를 거둔다).
       // 끄는 동안은 미리 그리기만, 놓을 때 범위 표시 한 번(되돌리기 한 걸음)이다. 이웃 막대는
       // 한 프레임 남는다.
+      // 끄는 동안 작업대가 다시 묶여도(분석 진행 · 다른 곳의 편집) 끌기는 이어진다 — 끌기는 원본
+      // 초만 들고, 그리기 · 보내기는 지금 묶인 배선(`state.tierLive`)이 지금 모델로 한다. 다른
+      // 원본으로 바뀌었으면 놓아도 보내지 않는다.
+      function liveTier(sourceId) {
+        var live = state.tierLive;
+        return live && live.source() === sourceId && live.editable() ? live : null;
+      }
       function tierEdgeDrag(ev, k) {
         var edge = (state.tierEdges || [])[k], fd = rangeFrame(), dur = rangeDur();
         if (!edge || !fd || !dur || !tierEditable()) { return; }
@@ -3445,40 +3609,66 @@ VISUAL_BOOTSTRAP_JS = (
           edge: edge };
         state.tierDrag = drag;
         state.tierMenu = null;
-        var mount = doc.getElementById("visual-rail");
-        var detach = function () {
-          if (!mount) { return; }
-          mount.removeEventListener("pointermove", mount._vlTierMove);
-          mount.removeEventListener("pointerup", mount._vlTierUp);
-        };
-        var move = function (mv) {
-          if (staleWire() || !mv || state.tierDrag !== drag) { return; }
-          var at = secAt(mv.clientX);
-          var v = at ? snapRange(sourceTime(at)) : null;
+        holdPointer(ev.pointerId);
+        railTrack("_vlTierTrack", function (mv) {
+          var live = liveTier(drag.sourceId);
+          if (!live || !mv || state.tierDrag !== drag) { return; }
+          var v = live.sourceAt(mv.clientX);
           if (!v) { return; }
           if (VL.cmp(v, lo) < 0) { v = lo; }
           if (VL.cmp(v, hi) > 0) { v = hi; }
           drag.to = v;
-          drawRail();
-        };
-        var up = function () {
-          detach();
+          live.draw();
+        }, function (up) {
           if (state.tierDrag !== drag) { return; }
           state.tierDrag = null;
           state.tierSwallow = true;
-          drawRail();
-          if (staleWire() || VL.cmp(drag.to, drag.from) === 0) { return; }
-          var right = VL.cmp(drag.to, drag.from) > 0;
+          var live = liveTier(drag.sourceId);
+          if (!live) { return; }
+          live.draw();
+          live.paint();
+          if (!up || VL.cmp(drag.to, drag.from) === 0) { return; }
+          var moved = ordered(drag.from, drag.to);
           var grown = growingTier(drag);
-          postRangeMark(drag.sourceId, grown ? TIER_MARK[grown] : "clear",
-            right ? drag.from : drag.to, right ? drag.to : drag.from, "등급 경계를 옮기는 중…");
-        };
-        if (mount) {
-          detach();
-          mount._vlTierMove = move; mount._vlTierUp = up;
-          mount.addEventListener("pointermove", move);
-          mount.addEventListener("pointerup", up);
-        }
+          live.post(drag.sourceId, grown ? TIER_MARK[grown] : "clear", moved[0], moved[1],
+            "등급 경계를 옮기는 중…");
+        });
+      }
+      // 막대 안 끌기(D190) — 누른 자리부터 끈 자리까지를 고른다(놓으면 고르기 칸이 뜬다). 몇 px
+      // 흔들림(`VL_RAIL_DRAG_PX` 아래)은 누름이라 click이 예전처럼 막대 전체를 고른다.
+      function tierSweep(ev) {
+        var from = tierEditable() ? railSourceAt(ev.clientX) : null;
+        if (!from) { return; }
+        if (ev.preventDefault) { ev.preventDefault(); }
+        var sweep = { sourceId: curSourceId(), x: ev.clientX, from: from, to: from, moved: false };
+        state.tierSweep = sweep;
+        railTrack("_vlTierTrack", function (mv) {
+          var live = liveTier(sweep.sourceId);
+          if (!live || !mv || state.tierSweep !== sweep) { return; }
+          if (!sweep.moved && Math.abs(mv.clientX - sweep.x) < VL_RAIL_DRAG_PX) { return; }
+          var v = live.sourceAt(mv.clientX);
+          if (!v) { return; }
+          if (!sweep.moved) {
+            sweep.moved = true;
+            state.tierMenu = null;
+            holdPointer(ev.pointerId);
+          }
+          sweep.to = v;
+          live.draw();
+        }, function (up) {
+          if (state.tierSweep !== sweep) { return; }
+          state.tierSweep = null;
+          if (!sweep.moved) { return; }
+          state.tierSwallow = true;
+          var live = liveTier(sweep.sourceId);
+          if (!live) { return; }
+          var span = ordered(sweep.from, sweep.to);
+          if (up && VL.cmp(span[0], span[1]) < 0) {
+            state.tierMenu = { sourceId: sweep.sourceId, start: span[0], end: span[1] };
+          }
+          live.draw();
+          live.paint();
+        });
       }
       function sendUndo() {
         if (staleWire()) { return; }
@@ -3489,8 +3679,19 @@ VISUAL_BOOTSTRAP_JS = (
       state.rangeKey = function (action) {
         if (staleWire()) { return false; }
         if (action === "in" || action === "out") { return setRangePoint(action, playheadLocal()); }
-        if (action === "cancel") { return clearRange(); }
-        return sendMark(action);
+        if (action === "cancel") { return closeTierMenu() || clearRange(); }
+        return markPicked(action);
+      };
+      state.tierLive = { source: curSourceId, editable: tierEditable, sourceAt: railSourceAt,
+        draw: drawRail, paint: paintRangeControls,
+        post: function (sourceId, mark, a, b, note) {
+          if (!staleWire()) { postRangeMark(sourceId, mark, a, b, note); }
+        } };
+      // ⌘Z · Ctrl+Z(D190) — 「되돌리기」 단추와 같은 서버 한 걸음이다.
+      state.undoKey = function () {
+        if (staleWire()) { return false; }
+        sendUndo();
+        return true;
       };
       function railPct(t, dur) { return VL.pct(displayTime(t), dur); }
       function rangeLayers(info, rail, dur) {
@@ -3641,7 +3842,8 @@ VISUAL_BOOTSTRAP_JS = (
           var loose = !bar.human && tier === "red" && row.loose;
           var detail = bar.human
             ? "사람 표시: " + tierWord(tier, false) + " — 자동 등급보다 먼저입니다" +
-              (row ? " · 자동: " + tierWord(tierOf(row), row.hold) : "")
+              (bar.joined ? " · 맞닿은 자동 " + tierWord(tier, false) + "과 한 줄기" :
+                row ? " · 자동: " + tierWord(tierOf(row), row.hold) : "")
             : (loose ? "컷 경계와 맞지 않음 · 남은 수에 들지 않음 · " : "") + tierDetail(row);
           // 「다음」·막대 클릭으로 고른 구간은 accent-ink 바깥선으로 보인다(선택은 하나, D57 C).
           var picked = !bar.human && state.marker && state.marker.sourceId === curSourceId() &&
@@ -4582,6 +4784,7 @@ VISUAL_BOOTSTRAP_JS = (
         if (tierEdge !== null) { tierEdgeDrag(ev, Number(tierEdge)); return; }
         var rangeSide = ev.target.getAttribute("data-vl-range-handle");
         if (rangeSide) { rangeDrag(ev, rangeSide); return; }
+        if (ev.target.getAttribute("data-vl-tierbar") !== null) { tierSweep(ev); return; }
         var side = ev.target.getAttribute("data-vl-handle");
         if (!side) { return; }
         var pair = boundaryPair(side);
@@ -5103,7 +5306,7 @@ VISUAL_BOOTSTRAP_JS = (
       bindControl("vl-mark-in", function() { setRangePoint("in", playheadLocal()); });
       bindControl("vl-mark-out", function() { setRangePoint("out", playheadLocal()); });
       VL_RANGE_MARKS.forEach(function (mark) {
-        bindControl("vl-mark-" + mark, function() { sendMark(mark); });
+        bindControl("vl-mark-" + mark, function() { markPicked(mark); });
       });
       bindControl("vl-range-undo", sendUndo);
       bindControl("vl-advanced-toggle", function() { setAdvanced(!advancedOpen()); });
@@ -5304,6 +5507,9 @@ VISUAL_BOOTSTRAP_JS = (
       if (ev.defaultPrevented || ev.metaKey || ev.ctrlKey || ev.altKey || ev.shiftKey) {
         return true;
       }
+      return W.__vlKeyTargetBlocked(ev);
+    };
+    W.__vlKeyTargetBlocked = function (ev) {
       // 서랍이 열려 있으면 막 뒤의 영상을 움직이지 않는다 — 초점이 막 뒤(승인 단추 등)에
       // 남아 있어도 마찬가지다.
       if (typeof document.querySelector === "function" && document.querySelector(VL_OPEN_DRAWER)) {
@@ -5360,7 +5566,39 @@ VISUAL_BOOTSTRAP_JS = (
       var target = W.__vlShortcutVideo();
       return target && target.video.id === "visual-video" ? VL_RANGE_KEYS[ev.code] : null;
     };
+    // ⌘Z · Ctrl+Z(D190) — 원본 구간 편집의 「되돌리기」 한 걸음. 마지막으로 누른 곳(또는 키를
+    // 받은 원소)이 작업대 재생기 안일 때만이다 — 타임라인 재생기(제 키를 가진 칸)나 목록을 누른
+    // 뒤의 ⌘Z가 보이지 않는 검토 편집을 되돌리면 안 된다. ⌘⇧Z(다시 하기)는 서버에 없다.
+    W.__vlUndoZone = false;
+    W.__vlInUndoZone = function (t) {
+      return !!(t && typeof t.closest === "function" && t.closest(VL_UNDO_ZONE) &&
+        !t.closest(VL_OWN_KEYS));
+    };
+    document.addEventListener("pointerdown", function (ev) {
+      W.__vlUndoZone = W.__vlInUndoZone(ev && ev.target);
+    }, true);
+    W.__vlUndoAction = function (ev) {
+      if (!ev || ev.isComposing || ev.keyCode === VL_IME_PROCESS_KEYCODE || ev.repeat ||
+        ev.defaultPrevented) {
+        return false;
+      }
+      if (!(ev.metaKey || ev.ctrlKey) || ev.code !== "KeyZ" || ev.shiftKey || ev.altKey) {
+        return false;
+      }
+      if (!(W.__vlUndoZone || W.__vlInUndoZone(ev.target)) || W.__vlKeyTargetBlocked(ev)) {
+        return false;
+      }
+      var target = W.__vlShortcutVideo();
+      return !!(target && target.video.id === "visual-video");
+    };
     W.__vlShortcutKey = function (ev) {
+      if (W.__vlUndoAction(ev)) {
+        var wired = W.__vlVisualWorkbenchState;
+        if (wired && typeof wired.undoKey === "function" && wired.undoKey()) {
+          ev.preventDefault();
+        }
+        return;
+      }
       var action = W.__vlShortcutAction(ev);
       var target = action ? W.__vlShortcutVideo() : null;
       if (!target) {

@@ -1663,18 +1663,27 @@ PLAYER_APP_JS = r"""
     }
     var need = 0;
     if (deckFloor > 0) {
-      // 무대 줄: 위 덱 · 원본 레일(auto) · 아래 덱 · 상태 줄 — 위 덱 바닥은 덱 최소 높이 토큰 이상.
+      // 무대 줄: 위 덱(늘고 주는 줄 하나 + 제 높이 줄들) · 아래 덱 · 상태 줄 — 위 덱 바닥은 덱 최소
+      // 높이 토큰 이상. 늘고 주는 줄은 타임라인 뷰어면 첫째(뷰어 · 인스펙터), 원본 뷰어면 내보낼
+      // 부분 줄이고 바닥이 따로다(D191 — 무대가 `--vl-upper-flex-row` · `--vl-upper-flex-min`으로
+      // 알린다). 그 줄과 아래 덱 줄을 뺀 나머지가 고정 몫이다.
       var cs = getComputedStyle(host);
       var rows = cs.gridTemplateRows.split(" ").map(parseFloat);
       var gap = parseFloat(cs.rowGap) || 0;
-      var fixed = (rows[1] || 0) + deckFloor + (rows[3] || 0) + gap * (rows.length - 1);
+      var flexRow = parseInt(cs.getPropertyValue("--vl-upper-flex-row"), 10) || 0;
+      var flexMinText = cs.getPropertyValue("--vl-upper-flex-min").trim();
+      var deckRow = rows.length - 2;
+      var fixed = deckFloor + gap * (rows.length - 1);
+      rows.forEach(function (px, at) {
+        if (at !== flexRow && at !== deckRow) { fixed += px || 0; }
+      });
       var deckMin = parseFloat(cs.getPropertyValue("--vl-deck-min")) || 0;
       // 화면이 둘 다 담지 못하면(13인치 크롬 창 1440×780) 타임라인을 지키고 위 덱 바닥을 남는
       // 높이로 줄인다 — 인스펙터가 제 안에서 스크롤한다(문서는 스크롤하지 않는다).
       var screen = Math.max(parseFloat(cs.getPropertyValue("--vl-stage-min-h")) || 0,
         W.innerHeight - (parseFloat(host.style.getPropertyValue("--vl-stage-top")) || 0));
       upperFloor = Math.min(upperFloor, Math.max(screen - fixed, deckMin));
-      need = Math.max(upperFloor, deckMin) + fixed;
+      need = Math.max(upperFloor, flexMinText ? parseFloat(flexMinText) || 0 : deckMin) + fixed;
     }
     put("--vl-deck-floor", deckFloor);
     put("--vl-upper-floor", upperFloor);
