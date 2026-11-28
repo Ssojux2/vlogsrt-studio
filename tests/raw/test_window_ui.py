@@ -305,3 +305,29 @@ def test_the_fit_window_never_hides_the_deck_or_the_caption_editor_on_a_16_10_sc
     # 「자막」 작업공간의 레인 — 맞춤이면 남은 높이를 받되 토큰 높이 아래로 줄지 않는다.
     assert '[data-vl-workspace="captions"] .tl-root.is-fit .tl-lane { height: 100%;' in css
     assert "min-height: var(--vl-caption-lane-h); }" in css
+
+
+def test_a_picked_clip_gives_the_viewer_the_whole_column_and_edits_tiers_in_the_inspector() -> None:
+    """D191(사용자 지시 2026-11-28 「클립 선택시 가운데 창에 너무 많은 내용들이 떠서 영상이 안보여 —
+    오른쪽 인스펙터 창에 추천을 수정할 수 있는 UI가 뜰 수 있도록」) — 맞춤 · 원본 뷰어(클립을 고른
+    때)면 영상이 가운데 열 위 덱 전체를 받고, 원본 구간(등급 막대 · 표시 줄)과 내보낼 부분은
+    오른쪽 인스펙터 「분석」 탭 아래에 선다. 「공유」 탭이면 인스펙터가 오른쪽 열 전체다."""
+    css = window_js.window_css()
+    wide = css[css.index("@media (min-width: 1051px)") :]
+    source = '#visual-stage[data-vl-fit="on"]:not([data-vl-viewer="program"])'
+    assert source + ":has(#vl-timeline-deck .tl-root:not(.tl-empty))" in wide
+    assert '"thumbs player quote" "thumbs player timeline" "thumbs player ranges"\n' in wide
+    # 원본 구간은 제 높이를 다 받는다(숨기지 않는다, D188) — 늘고 주는 줄은 내보낼 부분이고
+    # 맞춤 바닥 계산이 그 줄과 바닥을 안다.
+    assert "--vl-upper-flex-row: 2; --vl-upper-flex-min: var(--vl-ranges-min);" in wide
+    assert "grid-template-rows: max-content max-content\n" in wide
+    from ui import design_tokens
+
+    assert design_tokens.SCALAR_TOKENS["ranges-min"] == "64px"
+    assert source + " #vl-ranges { max-height: none; }" in wide
+    share = ':has(#vl-quote[data-vl-inspector="share"])'
+    assert '"thumbs player quote" "thumbs player quote" "thumbs player quote"' in wide
+    assert source + share + " #visual-timeline" in wide
+    assert source + share + " #vl-ranges" in wide
+    # 타임라인 뷰어의 모양은 그대로다(원본 레일 · 추천 구간을 접는다).
+    assert '"thumbs player quote" "thumbs timeline ranges" "deck deck deck"' in wide

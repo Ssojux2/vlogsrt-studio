@@ -546,6 +546,8 @@ def window_css() -> str:
     hide_analysis = ", ".join(
         f'#{INSPECTOR_ID}[data-vl-inspector="{SHARE}"] #{elem}' for elem in INSPECTOR_TABS[0][2]
     )
+    source = f'#{STAGE_ID}[data-vl-fit="{FIT_ON}"]:not([data-vl-viewer="{PROGRAM}"])'
+    share = f':has(#{INSPECTOR_ID}[data-vl-inspector="{SHARE}"])'
     return f"""
 /* 뷰어 하나(W-86b, D148) — 원본(source)이면 원본 재생기, 타임라인(program)이면 타임라인 화면. */
 #{PROGRAM_ID} {{ display: none; flex: 1 1 auto; min-height: 0; }}
@@ -685,6 +687,31 @@ def window_css() -> str:
   /* 원본 레일 · 추천 구간은 원본 쪽 칸이다 — 뷰어가 타임라인이면 접어 위 덱을 넓힌다. */
   #{STAGE_ID}[data-vl-fit="{FIT_ON}"][data-vl-viewer="{PROGRAM}"] #visual-timeline,
   #{STAGE_ID}[data-vl-fit="{FIT_ON}"][data-vl-viewer="{PROGRAM}"] #vl-ranges {{ display: none; }}
+  /* 원본 뷰어(클립을 고른 때, D191) — 영상이 가운데 열 위 덱 전체를 받고, 원본 구간(등급 막대 ·
+     표시 줄)과 내보낼 부분은 오른쪽 인스펙터 「분석」 탭 아래에 선다. 인스펙터 머리와 원본
+     구간은 제 높이를 다 받고(`max-content` — 스크롤 칸이라 `auto`면 맞춤 높이에 눌려 막대가
+     안쪽 스크롤에 숨는다, 숨기지 않는다 D188) 늘고 주는 줄은 내보낼 부분(셋째)이다 — 맞춤 바닥
+     계산(`fitFloors`)이 `--vl-upper-flex-row` · `--vl-upper-flex-min`으로 안다. 칸은 옮기지 않고
+     자리만 바꾼다(그리기 · 청취자 그대로). 좁은 열이라 단추를 조금 작게 한다. */
+  {source}:has(#{DECK_ID} .tl-root:not(.tl-empty)) {{
+    grid-template-areas: "thumbs player quote" "thumbs player timeline" "thumbs player ranges"
+      "deck deck deck" "foot foot foot";
+    grid-template-rows: max-content max-content
+      minmax(max(var(--vl-upper-floor, 0px), var(--vl-upper-flex-min)), var(--vl-upper-deck-fr))
+      minmax(var(--vl-deck-floor, 0px), var(--vl-lower-deck-fr)) var(--vl-statusline-h);
+    --vl-upper-flex-row: 2; --vl-upper-flex-min: var(--vl-ranges-min); }}
+  {source} #visual-timeline {{ padding-top: 0; }}
+  {source} #visual-timeline .vl-btn {{ padding: 2px 8px; font-size: 12px; }}
+  {source} #visual-timeline .vl-transport,
+  {source} #visual-timeline .vl-markbar {{ gap: 4px 6px; }}
+  {source} #vl-ranges {{ max-height: none; }}
+  /* 「공유」 탭이면 인스펙터가 오른쪽 열 전체다 — 원본 구간은 「분석」 탭 몫이다. */
+  {source}{share}:has(#{DECK_ID} .tl-root:not(.tl-empty)) {{
+    grid-template-areas: "thumbs player quote" "thumbs player quote" "thumbs player quote"
+      "deck deck deck" "foot foot foot"; }}
+  {source}{share} #{INSPECTOR_ID} {{ overflow: hidden auto; }}
+  {source}{share} #visual-timeline,
+  {source}{share} #vl-ranges {{ display: none; }}
   #{STAGE_ID}[data-vl-fit="{FIT_ON}"] #{DECK_ID} {{ min-height: 0; overflow: hidden auto; }}
   #{STAGE_ID}[data-vl-fit="{FIT_ON}"] #{PROGRAM_ID} .tl-frame {{ height: 100%; }}
 }}

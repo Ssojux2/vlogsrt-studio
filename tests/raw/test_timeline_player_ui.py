@@ -1022,6 +1022,10 @@ def test_the_fit_floors_come_from_fixed_pieces_and_the_minimums() -> None:
     assert "getPropertyValue(name) !== value" in floors
     # 화면이 둘 다 담지 못하면 타임라인이 먼저다 — 위 덱 바닥을 남는 높이로 줄인다(인스펙터 스크롤).
     assert "upperFloor = Math.min(upperFloor, Math.max(screen - fixed, deckMin));" in floors
+    # 무대 줄 수는 뷰어 쪽마다 다르다(D191 — 원본 뷰어는 위 덱이 세 줄) — 늘고 주는 위 줄과 아래 덱
+    # 줄을 뺀 나머지가 고정 몫이다.
+    assert '"--vl-upper-flex-row"' in floors and "rows.length - 2" in floors
+    assert '"--vl-upper-flex-min"' in floors
     fit = PLAYER_JS[PLAYER_JS.index("function fitDeck()") :].split("S.fitDeck = fitDeck;")[0]
     assert "fitFloors(deck);" in fit
     # 편집 칸 · 이동 막대 높이가 바뀌면(자막 고름 · 번역 모드 · 상태 글) 다시 잰다 — 높이만 준
